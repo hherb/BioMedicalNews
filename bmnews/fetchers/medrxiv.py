@@ -1,18 +1,13 @@
 """Fetcher for medRxiv and bioRxiv preprint servers.
 
-Uses the official content API:
-  https://api.medrxiv.org/details/{server}/{start}/{end}/{cursor}
-  https://api.biorxiv.org/details/{server}/{start}/{end}/{cursor}
-
-The API returns up to 100 records per page.  We paginate via the cursor
-parameter (0, 100, 200, …) until fewer than 100 records are returned.
+Uses the public API: https://api.medrxiv.org/
+Endpoint pattern: /details/{server}/{start_date}/{end_date}/{cursor}
 """
 
 from __future__ import annotations
 
 import logging
-import time
-from datetime import date
+from datetime import date, timedelta
 
 import httpx
 
@@ -20,111 +15,100 @@ from bmnews.fetchers.base import FetchedPaper
 
 logger = logging.getLogger(__name__)
 
-_PAGE_SIZE = 100
-_BASE_URLS = {
-    "medrxiv": "https://api.medrxiv.org/details/medrxiv",
-    "biorxiv": "https://api.biorxiv.org/details/biorxiv",
-}
-_REQUEST_TIMEOUT = 30.0
-_RETRY_ATTEMPTS = 3
-_RETRY_BACKOFF = 2.0
+BASE_URL = "https://api.medrxiv.org/details"
+PAGE_SIZE = 100
 
 
-class MedRxivFetcher:
-    """Fetch preprints from medRxiv or bioRxiv."""
+def fetch_medrxiv(
+    lookback_days: int = 7,
+    timeout: float = 30.0,
+) -> list[FetchedPaper]:
+    """Fetch recent preprints from medRxiv."""
+    return _fetch_rxiv("medrxiv", lookback_days, timeout)
 
-    def __init__(self, server: str = "medrxiv"):
-        if server not in _BASE_URLS:
-            raise ValueError(f"Unknown server: {server!r} (expected 'medrxiv' or 'biorxiv')")
-        self.server = server
-        self.source_name = server
-        self._base = _BASE_URLS[server]
 
-    def fetch(self, since: date, until: date | None = None) -> list[FetchedPaper]:
-        until = until or date.today()
-        start_str = since.strftime("%Y-%m-%d")
-        end_str = until.strftime("%Y-%m-%d")
+def fetch_biorxiv(
+    lookback_days: int = 7,
+    timeout: float = 30.0,
+) -> list[FetchedPaper]:
+    """Fetch recent preprints from bioRxiv."""
+    return _fetch_rxiv("biorxiv", lookback_days, timeout)
 
-        papers: list[FetchedPaper] = []
-        cursor = 0
 
-        with httpx.Client(timeout=_REQUEST_TIMEOUT) as client:
-            while True:
-                url = f"{self._base}/{start_str}/{end_str}/{cursor}"
-                data = self._request(client, url)
-                if data is None:
-                    break
+def _fetch_rxiv(
+    server: str,
+    lookback_days: int,
+    timeout: float,
+) -> list[FetchedPaper]:
+    """Fetch from a medRxiv/bioRxiv API endpoint with pagination."""
+    end = date.today()
+    start = end - timedelta(days=lookback_days)
+    start_str = start.isoformat()
+    end_str = end.isoformat()
 
-                collection = data.get("collection", [])
-                if not collection:
-                    break
+    papers: list[FetchedPaper] = []
+    cursor = 0
 
-                for item in collection:
-                    paper = self._parse(item)
-                    if paper:
-                        papers.append(paper)
+    with httpx.Client(timeout=timeout) as client:
+        while True:
+            url = f"{BASE_URL}/{server}/{start_str}/{end_str}/{cursor}"
+            logger.debug("Fetching %s", url)
 
-                logger.info(
-                    "%s: fetched %d papers (cursor=%d)", self.server, len(collection), cursor
-                )
-
-                if len(collection) < _PAGE_SIZE:
-                    break
-                cursor += _PAGE_SIZE
-
-        logger.info("%s: total %d papers from %s to %s", self.server, len(papers), start_str, end_str)
-        return papers
-
-    def _request(self, client: httpx.Client, url: str) -> dict | None:
-        for attempt in range(1, _RETRY_ATTEMPTS + 1):
             try:
                 resp = client.get(url)
                 resp.raise_for_status()
-                return resp.json()
-            except (httpx.HTTPStatusError, httpx.RequestError) as exc:
-                logger.warning(
-                    "%s: request failed (attempt %d/%d): %s", self.server, attempt, _RETRY_ATTEMPTS, exc
+            except httpx.HTTPError as e:
+                logger.error("HTTP error fetching %s: %s", url, e)
+                break
+
+            data = resp.json()
+            collection = data.get("collection", [])
+            if not collection:
+                break
+
+            for item in collection:
+                doi = item.get("rel_doi", "")
+                if not doi:
+                    continue
+
+                paper = FetchedPaper(
+                    doi=doi,
+                    title=item.get("rel_title", ""),
+                    authors=_format_authors(item.get("rel_authors", "")),
+                    abstract=item.get("rel_abs", ""),
+                    url=f"https://doi.org/{doi}",
+                    source=server,
+                    published_date=item.get("rel_date", ""),
+                    categories=item.get("rel_site", ""),
+                    metadata={
+                        "version": item.get("version", ""),
+                        "type": item.get("type", ""),
+                        "category": item.get("category", ""),
+                        "jats_xml_path": item.get("jatsxml", ""),
+                    },
                 )
-                if attempt < _RETRY_ATTEMPTS:
-                    time.sleep(_RETRY_BACKOFF * attempt)
-        logger.error("%s: giving up on %s", self.server, url)
-        return None
+                papers.append(paper)
 
-    def _parse(self, item: dict) -> FetchedPaper | None:
-        title = item.get("rel_title", "").strip()
-        if not title:
-            return None
+            # Check if there are more pages
+            messages = data.get("messages", [])
+            total = 0
+            for msg in messages:
+                if isinstance(msg, dict) and "total" in msg:
+                    total = int(msg["total"])
+                    break
 
-        doi = item.get("rel_doi", "")
-        authors_str = item.get("rel_authors", "")
-        authors = [a.strip() for a in authors_str.split(";") if a.strip()] if authors_str else []
-        abstract = item.get("rel_abs", "").strip()
-        pub_date = None
-        if item.get("rel_date"):
-            try:
-                pub_date = date.fromisoformat(item["rel_date"])
-            except ValueError:
-                pass
+            cursor += PAGE_SIZE
+            if cursor >= total:
+                break
 
-        url = item.get("rel_link", "")
-        if not url and doi:
-            url = f"https://doi.org/{doi}"
+    logger.info("Fetched %d papers from %s", len(papers), server)
+    return papers
 
-        category = item.get("category", "")
-        categories = [category] if category else []
 
-        return FetchedPaper(
-            doi=doi or None,
-            title=title,
-            authors=authors,
-            abstract=abstract,
-            url=url,
-            source=self.server,
-            published_date=pub_date,
-            categories=categories,
-            extra={
-                "version": item.get("version"),
-                "author_institutions": item.get("author_inst", ""),
-                "type": item.get("type", ""),
-            },
-        )
+def _format_authors(authors_str: str) -> str:
+    """Clean up the authors string from the API."""
+    if not authors_str:
+        return ""
+    # The API returns semicolon-separated authors
+    authors = [a.strip() for a in authors_str.split(";") if a.strip()]
+    return "; ".join(authors)

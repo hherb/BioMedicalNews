@@ -1,1 +1,30 @@
-"""Database package — engine, models, and repository."""
+"""Database schema and operations for bmnews.
+
+All SQL lives here — no direct SQL outside this package.
+Uses bmlib.db for connection management and query execution.
+"""
+
+from bmnews.db.schema import init_db, SCHEMA_SQLITE
+from bmnews.db.operations import (
+    upsert_paper,
+    get_paper_by_doi,
+    get_unscored_papers,
+    save_score,
+    get_scored_papers,
+    get_papers_for_digest,
+    record_digest,
+    paper_exists,
+)
+
+__all__ = [
+    "init_db",
+    "SCHEMA_SQLITE",
+    "upsert_paper",
+    "get_paper_by_doi",
+    "get_unscored_papers",
+    "save_score",
+    "get_scored_papers",
+    "get_papers_for_digest",
+    "record_digest",
+    "paper_exists",
+]

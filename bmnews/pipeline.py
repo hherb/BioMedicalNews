@@ -1,175 +1,217 @@
 """Main orchestration pipeline.
 
-Coordinates the full workflow:
-  1. Fetch new publications from configured sources
-  2. Store them in the database (deduplicated by DOI)
-  3. Score each publication for relevance and quality
-  4. Select papers above thresholds
-  5. Render and send an email digest
+Runs the full fetch → store → score → digest → deliver cycle.
 """
 
 from __future__ import annotations
 
+import json
 import logging
-from datetime import date, timedelta
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from bmlib.db import transaction
+from bmlib.llm import LLMClient
+from bmlib.templates import TemplateEngine
 
 from bmnews.config import AppConfig
-from bmnews.db.engine import get_session
-from bmnews.db.models import Publication, PublicationScore, create_tables
-from bmnews.db import repository as repo
-from bmnews.digest.renderer import render_html, render_text
-from bmnews.digest.sender import send_digest
-from bmnews.fetchers.base import FetchedPaper
-from bmnews.fetchers.europepmc import EuropePMCFetcher
-from bmnews.fetchers.medrxiv import MedRxivFetcher
-from bmnews.scoring.quality import score_quality
-from bmnews.scoring.relevance import get_scorer
+from bmnews.db.schema import init_db, open_db
+from bmnews.db.operations import (
+    upsert_paper,
+    get_unscored_papers,
+    save_score,
+    get_papers_for_digest,
+    record_digest,
+)
+from bmnews.fetchers import FetchedPaper, fetch_medrxiv, fetch_biorxiv, fetch_europepmc
+from bmnews.scoring.scorer import score_papers
+from bmnews.digest.renderer import render_digest
+from bmnews.digest.sender import send_email
 
 logger = logging.getLogger(__name__)
 
-
-def run(config: AppConfig) -> dict:
-    """Execute the full pipeline. Returns a summary dict."""
-    from bmnews.db.engine import get_engine, init_engine
-
-    engine = init_engine(config)
-    create_tables(engine)
-
-    summary: dict = {"fetched": 0, "scored": 0, "digest_size": 0, "email_sent": False}
-
-    since = date.today() - timedelta(days=config.sources.lookback_days)
-
-    # --- 1. Fetch ---
-    fetched_papers = _fetch_all(config, since)
-    summary["fetched"] = len(fetched_papers)
-    logger.info("Fetched %d papers total", len(fetched_papers))
-
-    # --- 2. Store ---
-    with get_session() as session:
-        stored = _store_papers(session, fetched_papers)
-        logger.info("Stored %d new papers", len(stored))
-
-    # --- 3. Ensure user profile exists ---
-    with get_session() as session:
-        user = repo.get_or_create_user(
-            session,
-            name=config.user.name,
-            email=config.user.email,
-            interests=config.user.interests,
-            min_relevance=config.scoring.min_relevance,
-            min_quality=config.scoring.min_quality,
-        )
-        user_id = user.id
-
-    # --- 4. Score ---
-    scorer = get_scorer(config.scoring.scorer)
-    with get_session() as session:
-        unscored = repo.get_unscored_publications(session, user_id)
-        user = session.get(UserProfile, user_id)
-        interests = user.interests or []
-        logger.info("Scoring %d unscored publications", len(unscored))
-
-        for pub in unscored:
-            paper_proxy = FetchedPaper(
-                doi=pub.doi, title=pub.title, authors=pub.authors or [],
-                abstract=pub.abstract or "", url=pub.url or "",
-                source=pub.source or "", published_date=pub.published_date,
-                categories=pub.categories or [],
-            )
-            rel = scorer.score(paper_proxy, interests)
-            qual = score_quality(paper_proxy)
-            combined = 0.6 * rel + 0.4 * qual
-
-            # Optionally store embedding
-            if pub.embedding is None:
-                emb = scorer.compute_embedding(f"{pub.title}. {pub.abstract or ''}")
-                if emb is not None:
-                    pub.embedding = emb
-
-            repo.save_score(session, PublicationScore(
-                publication_id=pub.id,
-                user_id=user_id,
-                relevance_score=rel,
-                quality_score=qual,
-                combined_score=combined,
-            ))
-        summary["scored"] = len(unscored)
-
-    # --- 5. Build digest ---
-    with get_session() as session:
-        top = repo.get_top_scored(
-            session, user_id,
-            min_relevance=config.scoring.min_relevance,
-            min_quality=config.scoring.min_quality,
-            limit=50,
-            exclude_sent=True,
-        )
-        summary["digest_size"] = len(top)
-
-        if not top:
-            logger.info("No papers above threshold — skipping digest")
-            return summary
-
-        logger.info("Digest: %d papers above threshold", len(top))
-
-        html = render_html(top)
-        text = render_text(top)
-        pub_ids = [pub.id for pub, _ in top]
-
-        # --- 6. Send email ---
-        if config.email.smtp_host and config.email.smtp_user:
-            ok = send_digest(
-                config=config.email,
-                to_address=config.user.email,
-                subject=f"BioMedical News Digest — {date.today().strftime('%B %d, %Y')}",
-                html_body=html,
-                text_body=text,
-            )
-            summary["email_sent"] = ok
-            status = "sent" if ok else "failed"
-        else:
-            logger.info("SMTP not configured — writing digest to stdout")
-            print(text)
-            status = "printed"
-
-        repo.record_digest(session, user_id, pub_ids, status)
-
-    return summary
+TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
+def build_template_engine(config: AppConfig) -> TemplateEngine:
+    """Build a TemplateEngine from config, with package defaults as fallback."""
+    user_dir = Path(config.template_dir).expanduser() if config.template_dir else None
+    return TemplateEngine(user_dir=user_dir, default_dir=TEMPLATES_DIR)
 
-def _fetch_all(config: AppConfig, since: date) -> list[FetchedPaper]:
+
+def build_llm_client(config: AppConfig) -> LLMClient:
+    """Build an LLM client from config."""
+    return LLMClient(
+        default_provider=config.llm.provider,
+        ollama_host=config.llm.ollama_host or None,
+        anthropic_api_key=config.llm.anthropic_api_key or None,
+    )
+
+
+def run_fetch(config: AppConfig) -> list[FetchedPaper]:
+    """Fetch papers from all configured sources."""
     papers: list[FetchedPaper] = []
+    lookback = config.sources.lookback_days
+
     if config.sources.medrxiv:
-        papers.extend(MedRxivFetcher("medrxiv").fetch(since))
+        logger.info("Fetching from medRxiv...")
+        papers.extend(fetch_medrxiv(lookback_days=lookback))
+
     if config.sources.biorxiv:
-        papers.extend(MedRxivFetcher("biorxiv").fetch(since))
+        logger.info("Fetching from bioRxiv...")
+        papers.extend(fetch_biorxiv(lookback_days=lookback))
+
     if config.sources.europepmc:
-        papers.extend(EuropePMCFetcher().fetch(since))
+        logger.info("Fetching from EuropePMC...")
+        papers.extend(fetch_europepmc(
+            query=config.sources.europepmc_query,
+            lookback_days=lookback,
+        ))
+
+    logger.info("Total papers fetched: %d", len(papers))
     return papers
 
 
-def _store_papers(session, papers: list[FetchedPaper]) -> list[Publication]:
-    stored = []
-    for fp in papers:
-        pub = Publication(
-            doi=fp.doi,
-            title=fp.title,
-            authors=fp.authors,
-            abstract=fp.abstract,
-            url=fp.url,
-            source=fp.source,
-            published_date=fp.published_date,
-            categories=fp.categories,
-            metadata_json=None,
+def run_store(config: AppConfig, papers: list[FetchedPaper]) -> int:
+    """Store fetched papers in the database. Returns count of new papers."""
+    conn = open_db(config)
+    init_db(conn)
+
+    stored = 0
+    for paper in papers:
+        upsert_paper(
+            conn,
+            doi=paper.doi,
+            title=paper.title,
+            authors=paper.authors,
+            abstract=paper.abstract,
+            url=paper.url,
+            source=paper.source,
+            published_date=paper.published_date,
+            categories=paper.categories,
+            metadata_json=json.dumps(paper.metadata),
         )
-        pub = repo.upsert_publication(session, pub)
-        stored.append(pub)
+        stored += 1
+
+    conn.close()
+    logger.info("Stored %d papers", stored)
     return stored
 
 
-# Re-export for convenience
-from bmnews.db.models import UserProfile  # noqa: E402
+def run_score(config: AppConfig) -> int:
+    """Score unscored papers. Returns count of papers scored."""
+    conn = open_db(config)
+    init_db(conn)
+
+    unscored = get_unscored_papers(conn)
+    if not unscored:
+        logger.info("No unscored papers found")
+        conn.close()
+        return 0
+
+    logger.info("Scoring %d papers...", len(unscored))
+
+    llm = build_llm_client(config)
+    templates = build_template_engine(config)
+    model = config.llm.model or f"{config.llm.provider}:"
+
+    results = score_papers(
+        papers=unscored,
+        llm=llm,
+        model=model,
+        template_engine=templates,
+        interests=config.user.research_interests,
+        concurrency=config.llm.concurrency,
+        quality_tier=config.quality.default_tier,
+    )
+
+    for result in results:
+        save_score(conn, **result)
+
+    conn.close()
+    logger.info("Scored %d papers", len(results))
+    return len(results)
+
+
+def run_digest(config: AppConfig, output: str | None = None) -> str:
+    """Generate a digest from top-scoring papers.
+
+    Args:
+        config: Application config.
+        output: If provided, write to this file path instead of stdout/email.
+
+    Returns:
+        The rendered digest text.
+    """
+    conn = open_db(config)
+    init_db(conn)
+
+    papers = get_papers_for_digest(
+        conn,
+        min_combined=config.scoring.min_combined,
+        max_papers=config.email.max_papers,
+    )
+
+    if not papers:
+        logger.info("No papers above threshold for digest")
+        conn.close()
+        return ""
+
+    templates = build_template_engine(config)
+
+    # Render both formats
+    html_body = render_digest(
+        papers, templates,
+        subject_prefix=config.email.subject_prefix,
+        fmt="html",
+    )
+    text_body = render_digest(
+        papers, templates,
+        subject_prefix=config.email.subject_prefix,
+        fmt="text",
+    )
+
+    # Deliver
+    paper_ids = [p["id"] for p in papers if "id" in p]
+
+    if output:
+        Path(output).write_text(html_body, encoding="utf-8")
+        logger.info("Digest written to %s", output)
+        record_digest(conn, paper_ids, delivery_method="file")
+    elif config.email.enabled and config.email.smtp_host:
+        subject = f"{config.email.subject_prefix} {datetime.now().strftime('%Y-%m-%d')}"
+        success = send_email(
+            html_body=html_body,
+            text_body=text_body,
+            subject=subject,
+            from_address=config.email.from_address,
+            to_address=config.email.to_address or config.user.email,
+            smtp_host=config.email.smtp_host,
+            smtp_port=config.email.smtp_port,
+            smtp_user=config.email.smtp_user,
+            smtp_password=config.email.smtp_password,
+            use_tls=config.email.use_tls,
+        )
+        record_digest(conn, paper_ids, delivery_method="email" if success else "email_failed")
+    else:
+        print(text_body)
+        record_digest(conn, paper_ids, delivery_method="stdout")
+
+    conn.close()
+    return text_body
+
+
+def run_pipeline(config: AppConfig) -> None:
+    """Execute the full pipeline: fetch → store → score → digest."""
+    logger.info("Starting pipeline run")
+
+    papers = run_fetch(config)
+    if papers:
+        run_store(config, papers)
+
+    scored = run_score(config)
+    if scored > 0:
+        run_digest(config)
+
+    logger.info("Pipeline complete")

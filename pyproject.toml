@@ -1,6 +1,6 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "bmnews"
@@ -16,8 +16,6 @@ keywords = ["biomedical", "preprints", "medrxiv", "europepmc", "research"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
-    "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -25,21 +23,25 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Medical Science Apps.",
 ]
 dependencies = [
-    "sqlalchemy>=2.0",
+    "bmlib @ file:///home/user/bmlib",
     "httpx>=0.25",
     "click>=8.0",
     "jinja2>=3.1",
 ]
 
 [project.optional-dependencies]
-postgresql = ["psycopg2-binary>=2.9", "pgvector>=0.3"]
-semantic = ["numpy>=1.24", "sentence-transformers>=2.2"]
-numpy = ["numpy>=1.24"]
+anthropic = ["bmlib[anthropic]"]
+ollama = ["bmlib[ollama]"]
+postgresql = ["bmlib[postgresql]"]
+transparency = ["bmlib[transparency]"]
 dev = ["pytest>=7.0", "pytest-cov", "ruff"]
-all = ["bmnews[postgresql,semantic,dev]"]
+all = ["bmnews[anthropic,ollama,postgresql,transparency,dev]"]
 
 [project.scripts]
 bmnews = "bmnews.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["bmnews*"]
 
 [tool.ruff]
 target-version = "py311"

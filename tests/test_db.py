@@ -1,127 +1,111 @@
-"""Tests for the database models and repository."""
+"""Tests for bmnews.db schema and operations."""
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from bmlib.db import connect_sqlite
 
-from bmnews.db.models import Publication, PublicationScore, UserProfile
-from bmnews.db import repository as repo
-
-
-class TestPublicationUpsert:
-    def test_insert_new(self, db_session):
-        pub = Publication(doi="10.1101/001", title="Paper 1", source="medrxiv")
-        result = repo.upsert_publication(db_session, pub)
-        db_session.flush()
-        assert result.id is not None
-        assert result.doi == "10.1101/001"
-
-    def test_deduplicate_by_doi(self, db_session):
-        pub1 = Publication(doi="10.1101/002", title="Paper A", source="medrxiv")
-        repo.upsert_publication(db_session, pub1)
-        db_session.flush()
-
-        pub2 = Publication(doi="10.1101/002", title="Paper A duplicate", source="biorxiv")
-        result = repo.upsert_publication(db_session, pub2)
-        assert result.title == "Paper A"  # Original kept
-
-    def test_insert_without_doi(self, db_session):
-        pub = Publication(doi=None, title="No DOI paper", source="europepmc")
-        result = repo.upsert_publication(db_session, pub)
-        db_session.flush()
-        assert result.id is not None
+from bmnews.db.schema import init_db
+from bmnews.db.operations import (
+    upsert_paper,
+    get_paper_by_doi,
+    get_unscored_papers,
+    save_score,
+    get_scored_papers,
+    get_papers_for_digest,
+    record_digest,
+    paper_exists,
+)
 
 
-class TestUserProfile:
-    def test_create_user(self, db_session):
-        user = repo.get_or_create_user(
-            db_session, name="Test", email="test@example.com",
-            interests=["genomics", "AI"],
+def _db():
+    conn = connect_sqlite(":memory:")
+    init_db(conn)
+    return conn
+
+
+class TestSchema:
+    def test_init_creates_tables(self):
+        conn = _db()
+        from bmlib.db import table_exists
+        assert table_exists(conn, "papers")
+        assert table_exists(conn, "scores")
+        assert table_exists(conn, "digests")
+        assert table_exists(conn, "digest_papers")
+
+
+class TestPapers:
+    def test_upsert_and_retrieve(self):
+        conn = _db()
+        pid = upsert_paper(
+            conn, doi="10.1101/test1", title="Test Paper",
+            authors="Smith J", abstract="An abstract.",
+            source="medrxiv", published_date="2024-01-01",
         )
-        assert user.id is not None
-        assert user.interests == ["genomics", "AI"]
+        assert pid > 0
+        assert paper_exists(conn, "10.1101/test1")
 
-    def test_update_existing_user(self, db_session):
-        repo.get_or_create_user(
-            db_session, name="Test", email="test@example.com",
-            interests=["old interest"],
+        paper = get_paper_by_doi(conn, "10.1101/test1")
+        assert paper["title"] == "Test Paper"
+        assert paper["authors"] == "Smith J"
+
+    def test_upsert_updates_existing(self):
+        conn = _db()
+        upsert_paper(conn, doi="10.1101/upd", title="Original Title")
+        upsert_paper(conn, doi="10.1101/upd", title="Updated Title")
+        paper = get_paper_by_doi(conn, "10.1101/upd")
+        assert paper["title"] == "Updated Title"
+
+    def test_paper_not_found(self):
+        conn = _db()
+        assert get_paper_by_doi(conn, "nonexistent") is None
+        assert not paper_exists(conn, "nonexistent")
+
+
+class TestScores:
+    def test_save_and_retrieve(self):
+        conn = _db()
+        pid = upsert_paper(conn, doi="10.1101/scored", title="Scored Paper",
+                           abstract="Abstract")
+        save_score(
+            conn, paper_id=pid, relevance_score=0.8,
+            quality_score=0.7, combined_score=0.76,
+            summary="A good paper.", study_design="RCT",
         )
-        db_session.flush()
+        scored = get_scored_papers(conn, min_combined=0.5)
+        assert len(scored) == 1
+        assert scored[0]["title"] == "Scored Paper"
+        assert scored[0]["combined_score"] == 0.76
 
-        user = repo.get_or_create_user(
-            db_session, name="Test Updated", email="test@example.com",
-            interests=["new interest"],
-        )
-        assert user.name == "Test Updated"
-        assert user.interests == ["new interest"]
+    def test_unscored_papers(self):
+        conn = _db()
+        upsert_paper(conn, doi="10.1101/a", title="Paper A", abstract="A")
+        upsert_paper(conn, doi="10.1101/b", title="Paper B", abstract="B")
+        pid = upsert_paper(conn, doi="10.1101/c", title="Paper C", abstract="C")
+        save_score(conn, paper_id=pid, combined_score=0.5)
 
-
-class TestScoring:
-    def test_save_and_retrieve_scores(self, db_session):
-        pub = Publication(doi="10.1101/010", title="Scored paper", source="medrxiv")
-        repo.upsert_publication(db_session, pub)
-        db_session.flush()
-
-        user = repo.get_or_create_user(
-            db_session, name="U", email="u@example.com", interests=["test"],
-        )
-        db_session.flush()
-
-        score = PublicationScore(
-            publication_id=pub.id, user_id=user.id,
-            relevance_score=0.8, quality_score=0.6, combined_score=0.72,
-        )
-        repo.save_score(db_session, score)
-        db_session.flush()
-
-        top = repo.get_top_scored(db_session, user.id, exclude_sent=False)
-        assert len(top) == 1
-        assert top[0][1].relevance_score == 0.8
-
-    def test_unscored_publications(self, db_session):
-        pub1 = Publication(doi="10.1101/020", title="P1", source="medrxiv")
-        pub2 = Publication(doi="10.1101/021", title="P2", source="medrxiv")
-        repo.upsert_publication(db_session, pub1)
-        repo.upsert_publication(db_session, pub2)
-        db_session.flush()
-
-        user = repo.get_or_create_user(
-            db_session, name="U", email="u2@example.com", interests=[],
-        )
-        db_session.flush()
-
-        # Score only the first paper
-        repo.save_score(db_session, PublicationScore(
-            publication_id=pub1.id, user_id=user.id,
-            relevance_score=0.5, quality_score=0.5, combined_score=0.5,
-        ))
-        db_session.flush()
-
-        unscored = repo.get_unscored_publications(db_session, user.id)
-        assert len(unscored) == 1
-        assert unscored[0].title == "P2"
+        unscored = get_unscored_papers(conn)
+        dois = [p["doi"] for p in unscored]
+        assert "10.1101/a" in dois
+        assert "10.1101/b" in dois
+        assert "10.1101/c" not in dois
 
 
-class TestVectorSimilarity:
-    def test_cosine_similarity(self):
-        from bmnews.db.repository import _cosine_similarity
-        a = [1.0, 0.0, 0.0]
-        b = [1.0, 0.0, 0.0]
-        assert abs(_cosine_similarity(a, b) - 1.0) < 1e-6
+class TestDigests:
+    def test_papers_for_digest_excludes_sent(self):
+        conn = _db()
+        pid1 = upsert_paper(conn, doi="10.1101/d1", title="P1", abstract="A1")
+        pid2 = upsert_paper(conn, doi="10.1101/d2", title="P2", abstract="A2")
+        save_score(conn, paper_id=pid1, combined_score=0.8)
+        save_score(conn, paper_id=pid2, combined_score=0.9)
 
-        c = [0.0, 1.0, 0.0]
-        assert abs(_cosine_similarity(a, c)) < 1e-6
+        # Both should be available
+        available = get_papers_for_digest(conn, min_combined=0.5)
+        assert len(available) == 2
 
-    def test_sqlite_vector_search(self, db_session):
-        pub = Publication(
-            doi="10.1101/vec", title="Vector paper", source="medrxiv",
-            embedding=[0.5, 0.5, 0.0],
-        )
-        repo.upsert_publication(db_session, pub)
-        db_session.flush()
+        # Send digest with first paper
+        record_digest(conn, [pid1], delivery_method="email")
 
-        results = repo.find_similar_publications(
-            db_session, [0.5, 0.5, 0.0], limit=5, threshold=0.5,
-        )
-        assert len(results) == 1
-        assert results[0][1] > 0.99  # Near-perfect match
+        # Only second paper should remain
+        available = get_papers_for_digest(conn, min_combined=0.5)
+        assert len(available) == 1
+        assert available[0]["doi"] == "10.1101/d2"

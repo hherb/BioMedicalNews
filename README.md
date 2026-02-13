@@ -1,27 +1,30 @@
 # BioMedical News
 
-A collection of libraries and apps that process publications on pre-publication servers, assess them for matching user preferences and quality of publication, and presenting the ones that match user preferences in convenient ways.
+A biomedical news reader that fetches preprints from medRxiv, bioRxiv, and Europe PMC, uses LLM-based assessment for relevance scoring and quality evaluation, and delivers curated digests via email.
+
+Built on [bmlib](https://github.com/hherb/bmlib) — a shared library for LLM abstraction, quality assessment, transparency analysis, and database utilities.
 
 ## Features
 
 - **Multi-source fetching** — medRxiv, bioRxiv, and Europe PMC preprint servers
-- **Relevance scoring** — keyword matching (default) or semantic similarity (optional, via sentence-transformers)
-- **Quality heuristics** — abstract structure, methodology signals, reporting quality, collaboration indicators
+- **LLM-based relevance scoring** — structured JSON responses with relevance scores and summaries
+- **Quality assessment** — 3-tier pipeline (metadata → LLM classifier → deep assessment) via bmlib
+- **Transparency analysis** — multi-API bias detection (optional, via bmlib)
+- **Configurable prompt templates** — Jinja2 templates with user overrides
 - **Email digests** — HTML + plain-text emails with scored paper summaries and DOI links
-- **Database abstraction** — SQLite (default) or PostgreSQL, both with vector embedding support for semantic search
+- **Database abstraction** — SQLite (default) or PostgreSQL, pure-function DB layer via bmlib
 - **CLI interface** — fetch, score, search, and send digests from the command line
 
 ## Quick start
 
 ```bash
 # Install
-pip install -e .
+uv pip install -e ".[dev]"
 
 # Initialise database and config
 bmnews init
 
 # Edit your preferences
-# (interests, email settings, scoring thresholds)
 nano ~/.bmnews/config.toml
 
 # Run the full pipeline
@@ -31,37 +34,25 @@ bmnews run
 bmnews fetch --days 7
 bmnews score
 bmnews digest
-bmnews search -q "machine learning"
+bmnews search "machine learning"
 ```
 
 ## Configuration
 
-Copy and edit `config.example.toml`, or run `bmnews init` to generate `~/.bmnews/config.toml`.
+Run `bmnews init` to generate `~/.bmnews/config.toml`.
 
 Key sections:
 
 | Section | Purpose |
 |---------|---------|
-| `[general]` | Database backend (`sqlite` / `postgresql`), log level |
-| `[database.sqlite]` | SQLite file path |
-| `[database.postgresql]` | PostgreSQL connection parameters |
+| `[database]` | Backend (`sqlite` / `postgresql`), connection params |
 | `[sources]` | Enable/disable medRxiv, bioRxiv, Europe PMC; lookback window |
-| `[scoring]` | Relevance/quality thresholds; scorer type (`keyword` / `semantic`) |
-| `[user]` | Name, email, research interest keywords |
+| `[llm]` | Provider (`ollama` / `anthropic`), model, concurrency |
+| `[scoring]` | Relevance and combined score thresholds |
+| `[quality]` | Quality assessment tier (1–3), minimum quality tier |
+| `[transparency]` | Enable/disable, score threshold for analysis |
+| `[user]` | Name, email, research interests |
 | `[email]` | SMTP server settings for digest delivery |
-
-## Optional dependencies
-
-```bash
-# PostgreSQL with pgvector
-pip install -e ".[postgresql]"
-
-# Semantic scoring via sentence-transformers
-pip install -e ".[semantic]"
-
-# All optional dependencies
-pip install -e ".[all]"
-```
 
 ## Architecture
 
@@ -69,23 +60,34 @@ pip install -e ".[all]"
 bmnews/
   config.py          # TOML config loading
   cli.py             # Click CLI commands
-  pipeline.py        # Orchestrates fetch → score → digest → send
+  pipeline.py        # Orchestrates fetch → store → score → digest → deliver
   db/
-    engine.py        # SQLAlchemy engine factory (SQLite / PostgreSQL)
-    models.py        # ORM models with portable EmbeddingType column
-    repository.py    # Data access + vector similarity search
+    schema.py        # DDL for SQLite and PostgreSQL (all SQL lives here)
+    operations.py    # Pure-function CRUD via bmlib.db
   fetchers/
-    base.py          # FetchedPaper dataclass + Fetcher protocol
+    base.py          # FetchedPaper dataclass
     medrxiv.py       # medRxiv / bioRxiv API client
     europepmc.py     # Europe PMC REST API client
   scoring/
-    relevance.py     # Keyword and semantic relevance scorers
-    quality.py       # Heuristic quality scorer
+    relevance_agent.py  # LLM-based relevance scoring (BaseAgent subclass)
+    scorer.py           # Orchestrates relevance + quality scoring
   digest/
-    renderer.py      # Jinja2 HTML + plain-text email templates
+    renderer.py      # Jinja2 HTML + plain-text rendering
     sender.py        # SMTP email delivery
+templates/
+  relevance_system.txt    # LLM system prompt
+  relevance_scoring.txt   # LLM scoring prompt (Jinja2)
+  digest_email.html       # HTML digest template
+  digest_text.txt         # Plain-text digest template
 tests/
 ```
+
+## Dependencies
+
+- **bmlib** — LLM abstraction, DB utilities, quality/transparency assessment
+- **httpx** — HTTP client for fetching papers
+- **click** — CLI framework
+- **jinja2** — Template engine (prompt templates + email rendering)
 
 ## License
 
