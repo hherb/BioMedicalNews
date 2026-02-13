@@ -31,11 +31,14 @@ def main(ctx: click.Context, config_path: str | None, verbose: bool) -> None:
 
 
 @main.command()
+@click.option("--days", default=None, type=int, help="Override lookback days for fetching.")
+@click.option("--show_cached", is_flag=True, default=False,
+              help="Show cached digests instead of running pipeline.")
 @click.pass_context
-def run(ctx: click.Context) -> None:
+def run(ctx: click.Context, days: int | None, show_cached: bool) -> None:
     """Run the full pipeline: fetch → score → digest."""
     from bmnews.pipeline import run_pipeline
-    run_pipeline(ctx.obj["config"])
+    run_pipeline(ctx.obj["config"], days=days, show_cached=show_cached)
 
 
 @main.command()

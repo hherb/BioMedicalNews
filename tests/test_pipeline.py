@@ -5,10 +5,12 @@ from __future__ import annotations
 from unittest.mock import patch
 
 from bmlib.db import connect_sqlite
+from click.testing import CliRunner
 
+from bmnews.cli import main
 from bmnews.config import load_config
+from bmnews.db.operations import record_digest, save_score, upsert_paper
 from bmnews.db.schema import init_db
-from bmnews.db.operations import upsert_paper, save_score, record_digest
 from bmnews.pipeline import show_cached_digests
 
 
@@ -49,3 +51,32 @@ class TestShowCachedDigests:
         config = _test_config()
         text = show_cached_digests(config)
         assert text == ""
+
+
+class TestRunCLI:
+    @patch("bmnews.pipeline.open_db")
+    def test_run_show_cached(self, mock_open_db):
+        mock_open_db.return_value = _seeded_db()
+        runner = CliRunner()
+        result = runner.invoke(main, ["run", "--show_cached"])
+        assert result.exit_code == 0
+        assert "Cached Paper" in result.output
+
+    @patch("bmnews.pipeline.open_db")
+    def test_run_show_cached_with_days(self, mock_open_db):
+        mock_open_db.return_value = _seeded_db()
+        runner = CliRunner()
+        result = runner.invoke(main, ["run", "--show_cached", "--days", "30"])
+        assert result.exit_code == 0
+        assert "Cached Paper" in result.output
+
+    @patch("bmnews.pipeline.run_pipeline")
+    def test_run_days_without_show_cached(self, mock_pipeline):
+        """--days without --show_cached passes through to pipeline."""
+        runner = CliRunner()
+        result = runner.invoke(main, ["run", "--days", "14"])
+        assert result.exit_code == 0
+        mock_pipeline.assert_called_once()
+        _, kwargs = mock_pipeline.call_args
+        assert kwargs.get("days") == 14
+        assert kwargs.get("show_cached") is False
