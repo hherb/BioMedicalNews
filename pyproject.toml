@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bmnews"
+version = "0.1.0"
+description = "Biomedical news reader — fetches, scores, and delivers biomedical preprints matching your research interests"
+readme = "README.md"
+license = "AGPL-3.0-or-later"
+requires-python = ">=3.11"
+authors = [
+    { name = "Horst Herb", email = "my.list.subscriptions@gmail.com" },
+]
+keywords = ["biomedical", "preprints", "medrxiv", "europepmc", "research"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+dependencies = [
+    "bmlib @ file:///home/user/bmlib",
+    "httpx>=0.25",
+    "click>=8.0",
+    "jinja2>=3.1",
+]
+
+[project.optional-dependencies]
+anthropic = ["bmlib[anthropic]"]
+ollama = ["bmlib[ollama]"]
+postgresql = ["bmlib[postgresql]"]
+transparency = ["bmlib[transparency]"]
+dev = ["pytest>=7.0", "pytest-cov", "ruff"]
+all = ["bmnews[anthropic,ollama,postgresql,transparency,dev]"]
+
+[project.scripts]
+bmnews = "bmnews.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["bmnews*"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
