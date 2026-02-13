@@ -67,19 +67,19 @@ def _fetch_rxiv(
                 break
 
             for item in collection:
-                doi = item.get("rel_doi", "")
+                doi = item.get("doi", "")
                 if not doi:
                     continue
 
                 paper = FetchedPaper(
                     doi=doi,
-                    title=item.get("rel_title", ""),
-                    authors=_format_authors(item.get("rel_authors", "")),
-                    abstract=item.get("rel_abs", ""),
+                    title=item.get("title", ""),
+                    authors=_format_authors(item.get("authors", "")),
+                    abstract=item.get("abstract", ""),
                     url=f"https://doi.org/{doi}",
                     source=server,
-                    published_date=item.get("rel_date", ""),
-                    categories=item.get("rel_site", ""),
+                    published_date=item.get("date", ""),
+                    categories=item.get("category", ""),
                     metadata={
                         "version": item.get("version", ""),
                         "type": item.get("type", ""),
