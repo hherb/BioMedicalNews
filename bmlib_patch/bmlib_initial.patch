@@ -1,0 +1,3810 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..34025c4
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,10 @@
++__pycache__/
++*.py[cod]
++*.egg-info/
++dist/
++build/
++.venv/
++.pytest_cache/
++*.egg
++.ruff_cache/
++uv.lock
+diff --git a/LICENSE b/LICENSE
+new file mode 100644
+index 0000000..6ec5f7b
+--- /dev/null
++++ b/LICENSE
+@@ -0,0 +1,17 @@
++GNU AFFERO GENERAL PUBLIC LICENSE
++Version 3, 19 November 2007
++
++Copyright (C) 2024-2026 Dr Horst Herb
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as published by
++the Free Software Foundation, either version 3 of the License, or
++(at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program.  If not, see <https://www.gnu.org/licenses/>.
+diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000..42d4230
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1,22 @@
++# bmlib
++
++Shared library for biomedical literature tools — LLM abstraction, quality assessment, transparency analysis, and database utilities.
++
++## Installation
++
++```bash
++uv pip install -e ".[all]"
++```
++
++## Modules
++
++- **bmlib.llm** — LLM provider abstraction (Ollama native, Anthropic)
++- **bmlib.db** — Thin database abstraction (SQLite, PostgreSQL) with pure functions
++- **bmlib.templates** — Jinja2 template engine with file-based prompt templates
++- **bmlib.agents** — Base agent class for LLM-driven tasks
++- **bmlib.quality** — 3-tier quality assessment pipeline for biomedical literature
++- **bmlib.transparency** — Multi-API transparency and bias analysis
++
++## License
++
++AGPL-3.0-or-later
+diff --git a/bmlib/__init__.py b/bmlib/__init__.py
+new file mode 100644
+index 0000000..1472f54
+--- /dev/null
++++ b/bmlib/__init__.py
+@@ -0,0 +1,3 @@
++"""bmlib — shared library for biomedical literature tools."""
++
++__version__ = "0.1.0"
+diff --git a/bmlib/agents/__init__.py b/bmlib/agents/__init__.py
+new file mode 100644
+index 0000000..67c4535
+--- /dev/null
++++ b/bmlib/agents/__init__.py
+@@ -0,0 +1,5 @@
++"""Agent base class for LLM-powered tasks."""
++
++from bmlib.agents.base import BaseAgent
++
++__all__ = ["BaseAgent"]
+diff --git a/bmlib/agents/base.py b/bmlib/agents/base.py
+new file mode 100644
+index 0000000..3879ddd
+--- /dev/null
++++ b/bmlib/agents/base.py
+@@ -0,0 +1,137 @@
++"""Base agent class for LLM-powered tasks.
++
++Provides shared infrastructure for agents that call LLMs:
++- Model/provider resolution from externally-supplied configuration
++- Helper methods for building messages
++- JSON response parsing
++
++Unlike the bmlibrarian_lite ``LiteBaseAgent``, this class does **not**
++read config from a hardcoded path.  The calling application passes in
++the model string and LLM client explicitly.
++
++Usage::
++
++    class ScoringAgent(BaseAgent):
++        def score(self, title: str, abstract: str, interests: list[str]) -> dict:
++            prompt = self.render_template("scoring.txt", ...)
++            response = self.chat(
++                [self.system_msg("You are ..."), self.user_msg(prompt)],
++                json_mode=True,
++            )
++            return self.parse_json(response.content)
++"""
++
++from __future__ import annotations
++
++import json
++import logging
++import re
++from typing import Any, Optional
++
++from bmlib.llm import LLMClient, LLMMessage, LLMResponse
++from bmlib.templates import TemplateEngine
++
++logger = logging.getLogger(__name__)
++
++
++class BaseAgent:
++    """Base class for LLM-powered agents.
++
++    Args:
++        llm: The LLM client to use.
++        model: Full model string (``"provider:model_name"``).
++        template_engine: Template engine for loading prompt files.
++        temperature: Default sampling temperature.
++        max_tokens: Default max tokens.
++    """
++
++    def __init__(
++        self,
++        llm: LLMClient,
++        model: str,
++        template_engine: TemplateEngine | None = None,
++        temperature: float = 0.3,
++        max_tokens: int = 4096,
++    ) -> None:
++        self.llm = llm
++        self.model = model
++        self.templates = template_engine
++        self.temperature = temperature
++        self.max_tokens = max_tokens
++
++    # --- Message helpers ---
++
++    @staticmethod
++    def system_msg(content: str) -> LLMMessage:
++        return LLMMessage(role="system", content=content)
++
++    @staticmethod
++    def user_msg(content: str) -> LLMMessage:
++        return LLMMessage(role="user", content=content)
++
++    @staticmethod
++    def assistant_msg(content: str) -> LLMMessage:
++        return LLMMessage(role="assistant", content=content)
++
++    # --- LLM interaction ---
++
++    def chat(
++        self,
++        messages: list[LLMMessage],
++        *,
++        json_mode: bool = False,
++        temperature: float | None = None,
++        max_tokens: int | None = None,
++        **kwargs: object,
++    ) -> LLMResponse:
++        """Send a chat request through the LLM client."""
++        return self.llm.chat(
++            messages=messages,
++            model=self.model,
++            temperature=temperature if temperature is not None else self.temperature,
++            max_tokens=max_tokens if max_tokens is not None else self.max_tokens,
++            json_mode=json_mode,
++            **kwargs,
++        )
++
++    # --- Template rendering ---
++
++    def render_template(self, template_name: str, **variables: Any) -> str:
++        """Render a prompt template.  Raises if no template engine configured."""
++        if self.templates is None:
++            raise RuntimeError(
++                f"No template engine configured — cannot render {template_name!r}"
++            )
++        return self.templates.render(template_name, **variables)
++
++    # --- JSON parsing ---
++
++    @staticmethod
++    def parse_json(text: str) -> dict:
++        """Extract and parse JSON from LLM response text.
++
++        Handles responses wrapped in markdown code blocks.
++        """
++        # Try direct parse
++        try:
++            return json.loads(text)
++        except json.JSONDecodeError:
++            pass
++
++        # Try extracting from code block
++        match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
++        if match:
++            try:
++                return json.loads(match.group(1).strip())
++            except json.JSONDecodeError:
++                pass
++
++        # Try finding a JSON object
++        match = re.search(r"\{.*\}", text, re.DOTALL)
++        if match:
++            try:
++                return json.loads(match.group(0))
++            except json.JSONDecodeError:
++                pass
++
++        raise ValueError(f"Could not parse JSON from LLM response: {text[:200]!r}")
+diff --git a/bmlib/db/__init__.py b/bmlib/db/__init__.py
+new file mode 100644
+index 0000000..65eaffb
+--- /dev/null
++++ b/bmlib/db/__init__.py
+@@ -0,0 +1,38 @@
++"""Thin database abstraction — pure functions over DB-API connections.
++
++Supports SQLite (built-in) and PostgreSQL (optional, via psycopg2).
++
++Usage::
++
++    from bmlib.db import connect_sqlite, fetch_all, execute, transaction
++
++    conn = connect_sqlite("~/.myapp/data.db")
++    with transaction(conn):
++        execute(conn, "INSERT INTO papers (doi, title) VALUES (?, ?)", ("10.1101/x", "A paper"))
++    rows = fetch_all(conn, "SELECT * FROM papers")
++"""
++
++from bmlib.db.connection import connect_sqlite, connect_postgresql
++from bmlib.db.operations import (
++    execute,
++    executemany,
++    fetch_one,
++    fetch_all,
++    fetch_scalar,
++    table_exists,
++    create_tables,
++)
++from bmlib.db.transactions import transaction
++
++__all__ = [
++    "connect_sqlite",
++    "connect_postgresql",
++    "execute",
++    "executemany",
++    "fetch_one",
++    "fetch_all",
++    "fetch_scalar",
++    "table_exists",
++    "create_tables",
++    "transaction",
++]
+diff --git a/bmlib/db/connection.py b/bmlib/db/connection.py
+new file mode 100644
+index 0000000..de0ee0d
+--- /dev/null
++++ b/bmlib/db/connection.py
+@@ -0,0 +1,86 @@
++"""Database connection factories.
++
++Each function returns a standard DB-API 2.0 connection.  SQLite uses the
++built-in ``sqlite3`` module; PostgreSQL uses ``psycopg2`` (optional
++dependency).
++"""
++
++from __future__ import annotations
++
++import logging
++import sqlite3
++from pathlib import Path
++from typing import Any
++
++logger = logging.getLogger(__name__)
++
++
++def connect_sqlite(
++    path: str | Path,
++    *,
++    wal_mode: bool = True,
++    foreign_keys: bool = True,
++) -> sqlite3.Connection:
++    """Open (or create) a SQLite database and return a connection.
++
++    Args:
++        path: File path (``":memory:"`` for in-memory).
++        wal_mode: Enable WAL journal mode for better concurrent access.
++        foreign_keys: Enforce foreign key constraints.
++    """
++    path = str(Path(path).expanduser()) if path != ":memory:" else ":memory:"
++
++    if path != ":memory:":
++        Path(path).parent.mkdir(parents=True, exist_ok=True)
++
++    conn = sqlite3.connect(path, check_same_thread=False)
++    conn.row_factory = sqlite3.Row
++
++    if wal_mode and path != ":memory:":
++        conn.execute("PRAGMA journal_mode=WAL")
++    if foreign_keys:
++        conn.execute("PRAGMA foreign_keys=ON")
++
++    logger.debug("SQLite connection opened: %s", path)
++    return conn
++
++
++def connect_postgresql(
++    dsn: str | None = None,
++    *,
++    host: str = "localhost",
++    port: int = 5432,
++    database: str = "bmlib",
++    user: str = "bmlib",
++    password: str = "",
++) -> Any:
++    """Open a PostgreSQL connection via psycopg2.
++
++    Either provide a full *dsn* string, or individual parameters.
++
++    Returns:
++        A ``psycopg2`` connection with ``RealDictCursor`` as the default
++        cursor factory.
++    """
++    try:
++        import psycopg2
++        import psycopg2.extras
++    except ImportError:
++        raise ImportError(
++            "psycopg2 not installed. Install with: pip install bmlib[postgresql]"
++        )
++
++    if dsn:
++        conn = psycopg2.connect(dsn, cursor_factory=psycopg2.extras.RealDictCursor)
++    else:
++        conn = psycopg2.connect(
++            host=host,
++            port=port,
++            database=database,
++            user=user,
++            password=password,
++            cursor_factory=psycopg2.extras.RealDictCursor,
++        )
++
++    logger.debug("PostgreSQL connection opened: %s:%s/%s", host, port, database)
++    return conn
+diff --git a/bmlib/db/operations.py b/bmlib/db/operations.py
+new file mode 100644
+index 0000000..0430110
+--- /dev/null
++++ b/bmlib/db/operations.py
+@@ -0,0 +1,95 @@
++"""Pure-function query helpers.
++
++All functions take a DB-API connection as their first argument.  SQL is
++passed in directly — callers are responsible for writing backend-appropriate
++SQL (``?`` for SQLite, ``%s`` for PostgreSQL).
++
++These helpers wrap the DB-API cursor pattern to provide a cleaner call
++interface while remaining completely transparent.
++"""
++
++from __future__ import annotations
++
++import logging
++from typing import Any, Sequence
++
++logger = logging.getLogger(__name__)
++
++
++def execute(conn: Any, sql: str, params: Sequence = ()) -> Any:
++    """Execute a single statement and return the cursor.
++
++    Useful for INSERT / UPDATE / DELETE where you might need
++    ``cursor.lastrowid`` or ``cursor.rowcount``.
++    """
++    cur = conn.cursor()
++    cur.execute(sql, params)
++    return cur
++
++
++def executemany(conn: Any, sql: str, params_seq: Sequence[Sequence]) -> None:
++    """Execute a statement for each parameter set in *params_seq*."""
++    cur = conn.cursor()
++    cur.executemany(sql, params_seq)
++
++
++def fetch_one(conn: Any, sql: str, params: Sequence = ()) -> Any:
++    """Execute and return the first row, or ``None``."""
++    cur = conn.cursor()
++    cur.execute(sql, params)
++    return cur.fetchone()
++
++
++def fetch_all(conn: Any, sql: str, params: Sequence = ()) -> list[Any]:
++    """Execute and return all rows."""
++    cur = conn.cursor()
++    cur.execute(sql, params)
++    return cur.fetchall()
++
++
++def fetch_scalar(conn: Any, sql: str, params: Sequence = ()) -> Any:
++    """Execute and return the first column of the first row, or ``None``."""
++    row = fetch_one(conn, sql, params)
++    if row is None:
++        return None
++    # Both sqlite3.Row and psycopg2 RealDictRow support index access.
++    # sqlite3.Row has keys() but NOT values(), so index access is universal.
++    try:
++        return row[0]
++    except (IndexError, KeyError):
++        return None
++
++
++def table_exists(conn: Any, name: str) -> bool:
++    """Check whether a table exists (works on both SQLite and PostgreSQL)."""
++    # Detect backend
++    module_name = type(conn).__module__
++    if "sqlite3" in module_name:
++        row = fetch_one(
++            conn,
++            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
++            (name,),
++        )
++    else:
++        row = fetch_one(
++            conn,
++            "SELECT 1 FROM information_schema.tables WHERE table_name=%s",
++            (name,),
++        )
++    return row is not None
++
++
++def create_tables(conn: Any, schema_sql: str) -> None:
++    """Execute a (possibly multi-statement) schema DDL string.
++
++    For SQLite the entire string is executed via ``executescript()``.
++    For PostgreSQL each statement is executed individually within an
++    implicit transaction.
++    """
++    module_name = type(conn).__module__
++    if "sqlite3" in module_name:
++        conn.executescript(schema_sql)
++    else:
++        cur = conn.cursor()
++        cur.execute(schema_sql)
++        conn.commit()
+diff --git a/bmlib/db/transactions.py b/bmlib/db/transactions.py
+new file mode 100644
+index 0000000..3cce487
+--- /dev/null
++++ b/bmlib/db/transactions.py
+@@ -0,0 +1,39 @@
++"""Transaction context manager."""
++
++from __future__ import annotations
++
++import logging
++from contextlib import contextmanager
++from typing import Any, Generator
++
++logger = logging.getLogger(__name__)
++
++
++@contextmanager
++def transaction(conn: Any) -> Generator[Any, None, None]:
++    """Context manager that commits on success, rolls back on exception.
++
++    Usage::
++
++        with transaction(conn):
++            execute(conn, "INSERT INTO ...")
++            execute(conn, "UPDATE ...")
++        # auto-committed here
++
++    For SQLite, ``conn.execute("BEGIN")`` is issued explicitly so
++    that ``conn.commit()`` has a well-defined scope.  For PostgreSQL
++    (psycopg2), autocommit is off by default so we simply call
++    ``conn.commit()`` or ``conn.rollback()``.
++    """
++    module_name = type(conn).__module__
++    is_sqlite = "sqlite3" in module_name
++
++    if is_sqlite:
++        conn.execute("BEGIN")
++
++    try:
++        yield conn
++        conn.commit()
++    except Exception:
++        conn.rollback()
++        raise
+diff --git a/bmlib/llm/__init__.py b/bmlib/llm/__init__.py
+new file mode 100644
+index 0000000..cfcdec1
+--- /dev/null
++++ b/bmlib/llm/__init__.py
+@@ -0,0 +1,27 @@
++"""LLM abstraction layer — unified interface across providers.
++
++Usage::
++
++    from bmlib.llm import LLMClient, LLMMessage
++
++    client = LLMClient()
++    response = client.chat(
++        messages=[LLMMessage(role="user", content="Hello")],
++        model="ollama:medgemma4B_it_q8",
++    )
++"""
++
++from bmlib.llm.data_types import LLMMessage, LLMResponse
++from bmlib.llm.client import LLMClient, get_llm_client, reset_llm_client
++from bmlib.llm.token_tracker import TokenTracker, get_token_tracker, reset_token_tracker
++
++__all__ = [
++    "LLMClient",
++    "LLMMessage",
++    "LLMResponse",
++    "TokenTracker",
++    "get_llm_client",
++    "get_token_tracker",
++    "reset_llm_client",
++    "reset_token_tracker",
++]
+diff --git a/bmlib/llm/client.py b/bmlib/llm/client.py
+new file mode 100644
+index 0000000..ffd91a2
+--- /dev/null
++++ b/bmlib/llm/client.py
+@@ -0,0 +1,203 @@
++"""Unified LLM client with provider routing.
++
++Routes requests to the appropriate provider based on model strings of
++the form ``"provider:model_name"`` (e.g. ``"ollama:medgemma4B_it_q8"``
++or ``"anthropic:claude-3-haiku-20240307"``).
++
++Usage::
++
++    from bmlib.llm import LLMClient, LLMMessage
++
++    client = LLMClient(default_provider="ollama")
++    resp = client.chat(
++        messages=[LLMMessage(role="user", content="Summarise this paper.")],
++        model="ollama:medgemma4B_it_q8",
++        json_mode=True,
++    )
++"""
++
++from __future__ import annotations
++
++import logging
++from typing import Optional, Union
++
++from bmlib.llm.data_types import LLMMessage, LLMResponse
++from bmlib.llm.token_tracker import get_token_tracker
++from bmlib.llm.providers import (
++    BaseProvider,
++    ModelMetadata,
++    get_provider,
++    list_providers,
++)
++
++logger = logging.getLogger(__name__)
++
++DEFAULT_PROVIDER = "anthropic"
++
++
++class LLMClient:
++    """Unified LLM client that delegates to provider implementations.
++
++    Automatically routes requests to the appropriate provider based on
++    the model string format ``"provider:model_name"``.
++    """
++
++    def __init__(
++        self,
++        default_provider: str = DEFAULT_PROVIDER,
++        ollama_host: Optional[str] = None,
++        anthropic_api_key: Optional[str] = None,
++    ) -> None:
++        self.default_provider = default_provider
++        self._provider_config: dict[str, dict[str, object]] = {
++            "anthropic": {"api_key": anthropic_api_key},
++            "ollama": {"base_url": ollama_host},
++        }
++        self._providers: dict[str, BaseProvider] = {}
++
++    def _get_provider(self, name: str) -> BaseProvider:
++        if name not in self._providers:
++            config = self._provider_config.get(name, {})
++            self._providers[name] = get_provider(name, **config)
++        return self._providers[name]
++
++    def _parse_model_string(self, model: Optional[str]) -> tuple[str, str]:
++        if model and ":" in model:
++            provider, model_name = model.split(":", 1)
++            return provider.lower(), model_name
++        provider = self.default_provider
++        provider_instance = self._get_provider(provider)
++        model_name = model or provider_instance.default_model
++        return provider, model_name
++
++    def chat(
++        self,
++        messages: list[LLMMessage],
++        model: Optional[str] = None,
++        temperature: float = 0.7,
++        max_tokens: int = 4096,
++        top_p: Optional[float] = None,
++        json_mode: bool = False,
++        **kwargs: object,
++    ) -> LLMResponse:
++        """Send a chat request, routing to the appropriate provider.
++
++        Extra *kwargs* are forwarded to the provider's ``chat()`` method.
++        Ollama-specific parameters (e.g. ``think=True``) are passed this way.
++        """
++        provider_name, model_name = self._parse_model_string(model)
++
++        logger.debug("Chat request: provider=%s, model=%s", provider_name, model_name)
++
++        provider = self._get_provider(provider_name)
++        response = provider.chat(
++            messages=messages,
++            model=model_name,
++            temperature=temperature,
++            max_tokens=max_tokens,
++            top_p=top_p,
++            json_mode=json_mode,
++            **kwargs,
++        )
++
++        # Track token usage
++        tracker = get_token_tracker()
++        cost = provider.calculate_cost(
++            model_name, response.input_tokens, response.output_tokens
++        )
++        tracker.record_usage(
++            model=f"{provider_name}:{model_name}",
++            input_tokens=response.input_tokens,
++            output_tokens=response.output_tokens,
++            cost=cost,
++        )
++
++        return response
++
++    def test_connection(
++        self, provider: Optional[str] = None,
++    ) -> Union[bool, dict[str, tuple[bool, str]]]:
++        """Test connectivity to one or all providers."""
++        if provider:
++            try:
++                p = self._get_provider(provider)
++                success, _ = p.test_connection()
++                return success
++            except Exception:
++                return False
++
++        results = {}
++        for name in list_providers():
++            try:
++                p = self._get_provider(name)
++                results[name] = p.test_connection()
++            except Exception as e:
++                results[name] = (False, str(e))
++        return results
++
++    def list_models(
++        self, provider: Optional[str] = None,
++    ) -> Union[list[str], list[ModelMetadata]]:
++        """List available models for one or all providers."""
++        if provider:
++            try:
++                p = self._get_provider(provider)
++                return [m.model_id for m in p.list_models()]
++            except Exception:
++                return []
++
++        all_models: list[ModelMetadata] = []
++        for name in list_providers():
++            try:
++                p = self._get_provider(name)
++                all_models.extend(p.list_models())
++            except Exception:
++                pass
++        return all_models
++
++    def get_model_metadata(
++        self, model: str, provider: Optional[str] = None,
++    ) -> Optional[ModelMetadata]:
++        if provider is None and ":" in model:
++            provider, model = model.split(":", 1)
++        provider = provider or self.default_provider
++        try:
++            p = self._get_provider(provider)
++            return p.get_model_metadata(model)
++        except Exception:
++            return None
++
++    def get_provider_info(self, provider: str) -> dict[str, object]:
++        p = self._get_provider(provider)
++        return {
++            "name": p.PROVIDER_NAME,
++            "display_name": p.DISPLAY_NAME,
++            "description": p.DESCRIPTION,
++            "website_url": p.WEBSITE_URL,
++            "setup_instructions": p.SETUP_INSTRUCTIONS,
++            "is_local": p.is_local,
++            "is_free": p.is_free,
++            "requires_api_key": p.requires_api_key,
++            "api_key_env_var": p.api_key_env_var,
++            "default_base_url": p.default_base_url,
++            "default_model": p.default_model,
++        }
++
++
++# ---------------------------------------------------------------------------
++# Global singleton
++# ---------------------------------------------------------------------------
++
++_global_client: Optional[LLMClient] = None
++
++
++def get_llm_client() -> LLMClient:
++    global _global_client
++    if _global_client is None:
++        _global_client = LLMClient()
++    return _global_client
++
++
++def reset_llm_client() -> None:
++    global _global_client
++    _global_client = None
+diff --git a/bmlib/llm/data_types.py b/bmlib/llm/data_types.py
+new file mode 100644
+index 0000000..2dee9f0
+--- /dev/null
++++ b/bmlib/llm/data_types.py
+@@ -0,0 +1,48 @@
++"""Data types for LLM communication.
++
++Provides type-safe dataclasses for messages and responses used across
++all providers.
++"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from typing import Literal, Optional
++
++
++@dataclass
++class LLMMessage:
++    """A message in an LLM conversation.
++
++    Attributes:
++        role: The role of the message sender (system, user, or assistant).
++        content: The text content of the message.
++    """
++
++    role: Literal["system", "user", "assistant"]
++    content: str
++
++
++@dataclass
++class LLMResponse:
++    """Response from an LLM request.
++
++    Attributes:
++        content: The text response from the model.
++        model: The model that generated the response.
++        input_tokens: Number of input tokens used.
++        output_tokens: Number of output tokens generated.
++        total_tokens: Total tokens used (input + output).
++        stop_reason: Why the model stopped generating.
++    """
++
++    content: str
++    model: str = ""
++    input_tokens: int = 0
++    output_tokens: int = 0
++    total_tokens: int = 0
++    stop_reason: Optional[str] = None
++
++    def __post_init__(self) -> None:
++        if self.total_tokens == 0:
++            self.total_tokens = self.input_tokens + self.output_tokens
+diff --git a/bmlib/llm/providers/__init__.py b/bmlib/llm/providers/__init__.py
+new file mode 100644
+index 0000000..c6fee78
+--- /dev/null
++++ b/bmlib/llm/providers/__init__.py
+@@ -0,0 +1,75 @@
++"""LLM provider registry.
++
++Providers are registered by name and lazily instantiated.  New providers
++can be added at runtime via :func:`register_provider`.
++"""
++
++from __future__ import annotations
++
++from typing import Type
++
++from bmlib.llm.providers.base import (
++    BaseProvider,
++    ModelMetadata,
++    ModelPricing,
++    ProviderCapabilities,
++)
++
++__all__ = [
++    "BaseProvider",
++    "ModelMetadata",
++    "ModelPricing",
++    "ProviderCapabilities",
++    "get_provider",
++    "list_providers",
++    "register_provider",
++]
++
++# Registry: provider name → class
++_REGISTRY: dict[str, Type[BaseProvider]] = {}
++
++
++def register_provider(name: str, cls: Type[BaseProvider]) -> None:
++    """Register a provider class under *name*."""
++    _REGISTRY[name] = cls
++
++
++def list_providers() -> list[str]:
++    """Return names of all registered providers."""
++    _ensure_builtins()
++    return list(_REGISTRY.keys())
++
++
++def get_provider(name: str, **kwargs) -> BaseProvider:
++    """Instantiate and return a provider by name.
++
++    Raises :class:`ValueError` if the provider is not registered and
++    its built-in module cannot be imported.
++    """
++    _ensure_builtins()
++    cls = _REGISTRY.get(name)
++    if cls is None:
++        raise ValueError(
++            f"Unknown provider {name!r}. Available: {list(_REGISTRY.keys())}"
++        )
++    return cls(**kwargs)
++
++
++def _ensure_builtins() -> None:
++    """Lazily register built-in providers on first access."""
++    if _REGISTRY:
++        return
++
++    # Anthropic
++    try:
++        from bmlib.llm.providers.anthropic import AnthropicProvider
++        _REGISTRY["anthropic"] = AnthropicProvider
++    except ImportError:
++        pass
++
++    # Ollama
++    try:
++        from bmlib.llm.providers.ollama import OllamaProvider
++        _REGISTRY["ollama"] = OllamaProvider
++    except ImportError:
++        pass
+diff --git a/bmlib/llm/providers/anthropic.py b/bmlib/llm/providers/anthropic.py
+new file mode 100644
+index 0000000..4f350a3
+--- /dev/null
++++ b/bmlib/llm/providers/anthropic.py
+@@ -0,0 +1,252 @@
++"""Anthropic Claude API provider."""
++
++from __future__ import annotations
++
++import json
++import logging
++import os
++import re
++import time
++from typing import Optional
++
++from bmlib.llm.data_types import LLMMessage, LLMResponse
++from bmlib.llm.providers.base import (
++    BaseProvider,
++    ModelMetadata,
++    ModelPricing,
++    ProviderCapabilities,
++)
++
++logger = logging.getLogger(__name__)
++
++
++class AnthropicProvider(BaseProvider):
++    """Anthropic Claude API provider."""
++
++    PROVIDER_NAME = "anthropic"
++    DISPLAY_NAME = "Anthropic"
++    DESCRIPTION = "Claude models via Anthropic API"
++    WEBSITE_URL = "https://console.anthropic.com"
++    SETUP_INSTRUCTIONS = "Get API key from console.anthropic.com/account/keys"
++
++    MODEL_PRICING: dict[str, ModelPricing] = {
++        "claude-opus-4-20250514": ModelPricing(input_cost=15.0, output_cost=75.0),
++        "claude-sonnet-4-20250514": ModelPricing(input_cost=3.0, output_cost=15.0),
++        "claude-3-5-sonnet-20241022": ModelPricing(input_cost=3.0, output_cost=15.0),
++        "claude-3-5-haiku-20241022": ModelPricing(input_cost=1.0, output_cost=5.0),
++        "claude-3-opus-20240229": ModelPricing(input_cost=15.0, output_cost=75.0),
++        "claude-3-sonnet-20240229": ModelPricing(input_cost=3.0, output_cost=15.0),
++        "claude-3-haiku-20240307": ModelPricing(input_cost=0.25, output_cost=1.25),
++    }
++
++    CACHE_TTL = 3600  # seconds
++
++    def __init__(
++        self,
++        api_key: Optional[str] = None,
++        base_url: Optional[str] = None,
++        **kwargs: object,
++    ) -> None:
++        resolved_api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
++        super().__init__(api_key=resolved_api_key, base_url=base_url, **kwargs)
++        self._models_cache: list[ModelMetadata] | None = None
++        self._cache_timestamp: float = 0
++
++    # --- Properties ---
++
++    @property
++    def is_local(self) -> bool:
++        return False
++
++    @property
++    def is_free(self) -> bool:
++        return False
++
++    @property
++    def requires_api_key(self) -> bool:
++        return True
++
++    @property
++    def api_key_env_var(self) -> str:
++        return "ANTHROPIC_API_KEY"
++
++    @property
++    def default_base_url(self) -> str:
++        return "https://api.anthropic.com"
++
++    @property
++    def default_model(self) -> str:
++        return "claude-sonnet-4-20250514"
++
++    # --- Client ---
++
++    def _get_client(self):
++        if self._client is None:
++            try:
++                import anthropic
++                kwargs: dict[str, object] = {"api_key": self._api_key}
++                if self._base_url and self._base_url != self.default_base_url:
++                    kwargs["base_url"] = self._base_url
++                self._client = anthropic.Anthropic(**kwargs)
++            except ImportError:
++                raise ImportError(
++                    "anthropic package not installed. Install with: pip install anthropic"
++                )
++        return self._client
++
++    # --- Core operations ---
++
++    def chat(
++        self,
++        messages: list[LLMMessage],
++        model: Optional[str] = None,
++        temperature: float = 0.7,
++        max_tokens: int = 4096,
++        **kwargs: object,
++    ) -> LLMResponse:
++        model = model or self.default_model
++        client = self._get_client()
++
++        top_p: Optional[float] = kwargs.get("top_p")  # type: ignore[assignment]
++        json_mode: bool = kwargs.get("json_mode", False)  # type: ignore[assignment]
++
++        # Separate system message (Anthropic API requirement)
++        system_content = ""
++        chat_messages: list[dict[str, str]] = []
++        for msg in messages:
++            if msg.role == "system":
++                system_content = msg.content
++            else:
++                chat_messages.append({"role": msg.role, "content": msg.content})
++
++        request_kwargs: dict[str, object] = {
++            "model": model,
++            "messages": chat_messages,
++            "max_tokens": max_tokens,
++            "temperature": temperature,
++        }
++        if system_content:
++            request_kwargs["system"] = system_content
++        if top_p is not None:
++            request_kwargs["top_p"] = top_p
++
++        response = client.messages.create(**request_kwargs)
++
++        content = ""
++        if response.content:
++            for block in response.content:
++                if hasattr(block, "text"):
++                    content += block.text
++
++        if json_mode:
++            try:
++                json.loads(content)
++            except json.JSONDecodeError:
++                content = self._extract_json(content)
++
++        return LLMResponse(
++            content=content,
++            model=model,
++            input_tokens=response.usage.input_tokens,
++            output_tokens=response.usage.output_tokens,
++            stop_reason=response.stop_reason,
++        )
++
++    def _extract_json(self, text: str) -> str:
++        """Extract JSON from text that may contain markdown code blocks."""
++        code_block_match = re.search(
++            r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL
++        )
++        if code_block_match:
++            candidate = code_block_match.group(1).strip()
++            try:
++                json.loads(candidate)
++                return candidate
++            except json.JSONDecodeError:
++                pass
++
++        brace_match = re.search(r"\{.*\}", text, re.DOTALL)
++        if brace_match:
++            candidate = brace_match.group(0)
++            try:
++                json.loads(candidate)
++                return candidate
++            except json.JSONDecodeError:
++                pass
++
++        return text
++
++    # --- Model listing ---
++
++    def list_models(self, force_refresh: bool = False) -> list[ModelMetadata]:
++        if (
++            not force_refresh
++            and self._models_cache is not None
++            and time.time() - self._cache_timestamp < self.CACHE_TTL
++        ):
++            return self._models_cache
++
++        try:
++            client = self._get_client()
++            api_models = client.models.list()
++            models = []
++            for model in api_models:
++                model_id = model.id
++                pricing = self.MODEL_PRICING.get(
++                    model_id, ModelPricing(input_cost=3.0, output_cost=15.0)
++                )
++                models.append(
++                    ModelMetadata(
++                        model_id=model_id,
++                        display_name=getattr(model, "display_name", model_id),
++                        context_window=getattr(model, "context_window", 200_000),
++                        pricing=pricing,
++                        capabilities=ProviderCapabilities(
++                            supports_vision=True,
++                            supports_function_calling=True,
++                            supports_system_messages=True,
++                            max_context_window=getattr(
++                                model, "context_window", 200_000
++                            ),
++                        ),
++                    )
++                )
++            self._models_cache = models
++            self._cache_timestamp = time.time()
++            return models
++        except Exception as e:
++            logger.warning("Failed to fetch models from Anthropic API: %s", e)
++            return [
++                ModelMetadata(
++                    model_id=mid,
++                    display_name=mid,
++                    context_window=200_000,
++                    pricing=p,
++                )
++                for mid, p in self.MODEL_PRICING.items()
++            ]
++
++    # --- Connection test ---
++
++    def test_connection(self) -> tuple[bool, str]:
++        try:
++            import anthropic
++            client = self._get_client()
++            models = list(client.models.list())
++            return True, f"Connected. {len(models)} models available."
++        except Exception as e:
++            return False, f"Connection failed: {e}"
++
++    # --- Tokens ---
++
++    def count_tokens(self, text: str, model: Optional[str] = None) -> int:
++        try:
++            client = self._get_client()
++            return client.count_tokens(text)
++        except Exception:
++            return len(text) // 4
++
++    def get_model_pricing(self, model: str) -> ModelPricing:
++        return self.MODEL_PRICING.get(
++            model, ModelPricing(input_cost=3.0, output_cost=15.0)
++        )
+diff --git a/bmlib/llm/providers/base.py b/bmlib/llm/providers/base.py
+new file mode 100644
+index 0000000..bfe6efa
+--- /dev/null
++++ b/bmlib/llm/providers/base.py
+@@ -0,0 +1,153 @@
++"""Abstract base class for LLM providers.
++
++All LLM providers must inherit from :class:`BaseProvider` and implement the
++abstract methods.  This ensures a consistent interface across Anthropic,
++Ollama, OpenAI-compatible servers, and any future providers.
++"""
++
++from __future__ import annotations
++
++from abc import ABC, abstractmethod
++from dataclasses import dataclass, field
++from typing import TYPE_CHECKING, Optional
++
++if TYPE_CHECKING:
++    from bmlib.llm.data_types import LLMMessage, LLMResponse
++
++
++@dataclass
++class ProviderCapabilities:
++    """Describes what a provider can do."""
++
++    supports_streaming: bool = False
++    supports_function_calling: bool = False
++    supports_vision: bool = False
++    supports_system_messages: bool = True
++    max_context_window: int = 128_000
++
++
++@dataclass
++class ModelPricing:
++    """Cost per million tokens (USD)."""
++
++    input_cost: float = 0.0
++    output_cost: float = 0.0
++
++
++@dataclass
++class ModelMetadata:
++    """Information about a specific model."""
++
++    model_id: str
++    display_name: str
++    context_window: int
++    pricing: ModelPricing
++    capabilities: ProviderCapabilities = field(default_factory=ProviderCapabilities)
++    is_deprecated: bool = False
++
++
++class BaseProvider(ABC):
++    """Abstract base class for LLM providers.
++
++    Class attributes to override:
++        PROVIDER_NAME   – short identifier (e.g. ``"anthropic"``).
++        DISPLAY_NAME    – human-readable label.
++        DESCRIPTION     – one-liner.
++        WEBSITE_URL     – provider's website.
++        SETUP_INSTRUCTIONS – how to get started.
++    """
++
++    PROVIDER_NAME: str
++    DISPLAY_NAME: str
++    DESCRIPTION: str
++    WEBSITE_URL: str
++    SETUP_INSTRUCTIONS: str
++
++    def __init__(
++        self,
++        api_key: Optional[str] = None,
++        base_url: Optional[str] = None,
++        **kwargs: object,
++    ) -> None:
++        self._api_key = api_key
++        self._base_url = base_url or self.default_base_url
++        self._client: object = None
++        self._extra_config = kwargs
++
++    # --- Provider characteristics (abstract properties) ---
++
++    @property
++    @abstractmethod
++    def is_local(self) -> bool: ...
++
++    @property
++    @abstractmethod
++    def is_free(self) -> bool: ...
++
++    @property
++    @abstractmethod
++    def requires_api_key(self) -> bool: ...
++
++    @property
++    def api_key_env_var(self) -> str:
++        return ""
++
++    @property
++    @abstractmethod
++    def default_base_url(self) -> str: ...
++
++    @property
++    @abstractmethod
++    def default_model(self) -> str: ...
++
++    # --- Core operations ---
++
++    @abstractmethod
++    def chat(
++        self,
++        messages: list["LLMMessage"],
++        model: Optional[str] = None,
++        temperature: float = 0.7,
++        max_tokens: int = 4096,
++        **kwargs: object,
++    ) -> "LLMResponse": ...
++
++    @abstractmethod
++    def list_models(self) -> list[ModelMetadata]: ...
++
++    @abstractmethod
++    def test_connection(self) -> tuple[bool, str]: ...
++
++    @abstractmethod
++    def count_tokens(self, text: str, model: Optional[str] = None) -> int: ...
++
++    # --- Cost helpers ---
++
++    def get_model_pricing(self, model: str) -> ModelPricing:
++        return ModelPricing(input_cost=0.0, output_cost=0.0)
++
++    def calculate_cost(
++        self,
++        model: str,
++        input_tokens: int,
++        output_tokens: int,
++    ) -> float:
++        pricing = self.get_model_pricing(model)
++        return (
++            (input_tokens / 1_000_000) * pricing.input_cost
++            + (output_tokens / 1_000_000) * pricing.output_cost
++        )
++
++    # --- Utility ---
++
++    def get_model_metadata(self, model: str) -> Optional[ModelMetadata]:
++        for m in self.list_models():
++            if m.model_id == model:
++                return m
++        return None
++
++    def validate_model(self, model: str) -> bool:
++        return any(m.model_id == model for m in self.list_models())
++
++    def format_model_string(self, model: str) -> str:
++        return f"{self.PROVIDER_NAME}:{model}"
+diff --git a/bmlib/llm/providers/ollama.py b/bmlib/llm/providers/ollama.py
+new file mode 100644
+index 0000000..06cb12c
+--- /dev/null
++++ b/bmlib/llm/providers/ollama.py
+@@ -0,0 +1,242 @@
++"""Ollama local model provider — native API.
++
++Uses the ``ollama`` Python package which talks to the Ollama server's
++native REST API (not the OpenAI-compatible endpoint).  This gives access
++to Ollama-specific features such as model discovery via ``ollama.show()``
++and native parameters (e.g. thinking mode toggles) that are not reliably
++exposed through the OpenAI compatibility layer.
++"""
++
++from __future__ import annotations
++
++import logging
++import os
++import re
++from typing import Optional
++
++from bmlib.llm.data_types import LLMMessage, LLMResponse
++from bmlib.llm.providers.base import (
++    BaseProvider,
++    ModelMetadata,
++    ModelPricing,
++    ProviderCapabilities,
++)
++
++logger = logging.getLogger(__name__)
++
++
++class OllamaProvider(BaseProvider):
++    """Ollama local model provider (native API)."""
++
++    PROVIDER_NAME = "ollama"
++    DISPLAY_NAME = "Ollama"
++    DESCRIPTION = "Local models via Ollama server (free)"
++    WEBSITE_URL = "https://ollama.ai"
++    SETUP_INSTRUCTIONS = "Install from ollama.ai, then run 'ollama pull <model>'"
++
++    def __init__(
++        self,
++        api_key: Optional[str] = None,
++        base_url: Optional[str] = None,
++        **kwargs: object,
++    ) -> None:
++        resolved_base_url = base_url or os.environ.get(
++            "OLLAMA_HOST", "http://localhost:11434"
++        )
++        super().__init__(api_key=None, base_url=resolved_base_url, **kwargs)
++        self._model_info_cache: dict[str, ModelMetadata] = {}
++
++    # --- Properties ---
++
++    @property
++    def is_local(self) -> bool:
++        return True
++
++    @property
++    def is_free(self) -> bool:
++        return True
++
++    @property
++    def requires_api_key(self) -> bool:
++        return False
++
++    @property
++    def default_base_url(self) -> str:
++        return "http://localhost:11434"
++
++    @property
++    def default_model(self) -> str:
++        return "medgemma4B_it_q8"
++
++    # --- Client ---
++
++    def _get_client(self):
++        if self._client is None:
++            try:
++                import ollama
++                self._client = ollama.Client(host=self._base_url)
++            except ImportError:
++                raise ImportError(
++                    "ollama package not installed. Install with: pip install ollama"
++                )
++        return self._client
++
++    # --- Core operations ---
++
++    def chat(
++        self,
++        messages: list[LLMMessage],
++        model: Optional[str] = None,
++        temperature: float = 0.7,
++        max_tokens: int = 4096,
++        **kwargs: object,
++    ) -> LLMResponse:
++        model = model or self.default_model
++        client = self._get_client()
++
++        top_p: Optional[float] = kwargs.get("top_p")  # type: ignore[assignment]
++        json_mode: bool = kwargs.get("json_mode", False)  # type: ignore[assignment]
++        think: Optional[bool] = kwargs.get("think")  # type: ignore[assignment]
++
++        ollama_messages = [
++            {"role": msg.role, "content": msg.content} for msg in messages
++        ]
++
++        options: dict[str, object] = {
++            "temperature": temperature,
++            "num_predict": max_tokens,
++        }
++        if top_p is not None:
++            options["top_p"] = top_p
++
++        request_kwargs: dict[str, object] = {
++            "model": model,
++            "messages": ollama_messages,
++            "options": options,
++        }
++
++        if json_mode:
++            request_kwargs["format"] = "json"
++
++        if think is not None:
++            request_kwargs["think"] = think
++
++        response = client.chat(**request_kwargs)
++
++        content = response.get("message", {}).get("content", "")
++        input_tokens = response.get(
++            "prompt_eval_count", self._estimate_tokens(messages)
++        )
++        output_tokens = response.get("eval_count", len(content) // 4)
++
++        return LLMResponse(
++            content=content,
++            model=model,
++            input_tokens=input_tokens,
++            output_tokens=output_tokens,
++            stop_reason="stop",
++        )
++
++    # --- Model discovery (native API) ---
++
++    def list_models(self) -> list[ModelMetadata]:
++        try:
++            client = self._get_client()
++            response = client.list()
++            models = []
++            model_list = getattr(response, "models", []) or []
++            for model_info in model_list:
++                name = getattr(model_info, "model", "") or ""
++                if name:
++                    metadata = self._get_model_info(name)
++                    models.append(metadata)
++            return models
++        except Exception as e:
++            logger.warning("Failed to list Ollama models: %s", e)
++            return []
++
++    def _get_model_info(self, model_name: str) -> ModelMetadata:
++        """Fetch model metadata using ``ollama.show()`` (cached)."""
++        if model_name in self._model_info_cache:
++            return self._model_info_cache[model_name]
++
++        try:
++            client = self._get_client()
++            info = client.show(model_name)
++            context_window = self._extract_context_window(info)
++            details = info.get("details", {})
++            parameter_size = details.get("parameter_size", "")
++            display_name = (
++                f"{model_name} ({parameter_size})" if parameter_size else model_name
++            )
++
++            metadata = ModelMetadata(
++                model_id=model_name,
++                display_name=display_name,
++                context_window=context_window,
++                pricing=ModelPricing(0.0, 0.0),
++                capabilities=ProviderCapabilities(
++                    supports_system_messages=True,
++                    max_context_window=context_window,
++                ),
++            )
++            self._model_info_cache[model_name] = metadata
++            return metadata
++
++        except Exception as e:
++            logger.debug("Failed to get model info for %s: %s", model_name, e)
++            return ModelMetadata(
++                model_id=model_name,
++                display_name=model_name,
++                context_window=8192,
++                pricing=ModelPricing(0.0, 0.0),
++            )
++
++    def _extract_context_window(self, info: dict) -> int:
++        """Extract context window from ``ollama.show()`` response."""
++        model_info = info.get("model_info", {})
++        for key, value in model_info.items():
++            if "context" in key.lower() and isinstance(value, int):
++                return value
++
++        parameters = info.get("parameters", {})
++        if isinstance(parameters, dict) and "num_ctx" in parameters:
++            return int(parameters["num_ctx"])
++
++        modelfile = info.get("modelfile", "")
++        if modelfile and "num_ctx" in modelfile:
++            match = re.search(r"num_ctx\s+(\d+)", modelfile)
++            if match:
++                return int(match.group(1))
++
++        return 8192
++
++    # --- Connection test ---
++
++    def test_connection(self) -> tuple[bool, str]:
++        try:
++            client = self._get_client()
++            response = client.list()
++            model_list = getattr(response, "models", []) or []
++            if model_list:
++                return True, f"Connected. {len(model_list)} models available."
++            return True, "Connected. No models installed."
++        except ImportError:
++            return False, "ollama package not installed"
++        except Exception as e:
++            return False, f"Connection failed: {e}"
++
++    # --- Tokens ---
++
++    def count_tokens(self, text: str, model: Optional[str] = None) -> int:
++        return len(text) // 4
++
++    def _estimate_tokens(self, messages: list[LLMMessage]) -> int:
++        total_chars = sum(len(m.content) for m in messages)
++        return total_chars // 4
++
++    def get_model_pricing(self, model: str) -> ModelPricing:
++        return ModelPricing(0.0, 0.0)
++
++    def get_model_metadata(self, model: str) -> Optional[ModelMetadata]:
++        return self._get_model_info(model)
+diff --git a/bmlib/llm/token_tracker.py b/bmlib/llm/token_tracker.py
+new file mode 100644
+index 0000000..aae7eda
+--- /dev/null
++++ b/bmlib/llm/token_tracker.py
+@@ -0,0 +1,143 @@
++"""Thread-safe token usage and cost tracking.
++
++Maintains a running total of token usage and estimated costs across all
++LLM calls during a session.
++
++Usage::
++
++    from bmlib.llm import get_token_tracker
++
++    tracker = get_token_tracker()
++    tracker.record_usage(
++        model="anthropic:claude-3-haiku",
++        input_tokens=100,
++        output_tokens=50,
++        cost=0.00045,
++    )
++    summary = tracker.get_summary()
++"""
++
++from __future__ import annotations
++
++import logging
++import threading
++from dataclasses import dataclass, field
++from datetime import datetime
++from typing import Optional
++
++logger = logging.getLogger(__name__)
++
++
++@dataclass
++class TokenUsageRecord:
++    """Record of a single LLM call's token usage."""
++
++    model: str
++    input_tokens: int
++    output_tokens: int
++    timestamp: datetime = field(default_factory=datetime.now)
++    cost_usd: float = 0.0
++
++
++@dataclass
++class TokenUsageSummary:
++    """Aggregate summary of token usage."""
++
++    total_input_tokens: int = 0
++    total_output_tokens: int = 0
++    total_tokens: int = 0
++    total_cost_usd: float = 0.0
++    call_count: int = 0
++    by_model: dict[str, dict] = field(default_factory=dict)
++
++
++class TokenTracker:
++    """Thread-safe token usage tracker."""
++
++    def __init__(self) -> None:
++        self._records: list[TokenUsageRecord] = []
++        self._lock = threading.Lock()
++        self._total_input = 0
++        self._total_output = 0
++        self._total_cost = 0.0
++
++    def record_usage(
++        self,
++        model: str,
++        input_tokens: int,
++        output_tokens: int,
++        cost: float = 0.0,
++    ) -> None:
++        record = TokenUsageRecord(
++            model=model,
++            input_tokens=input_tokens,
++            output_tokens=output_tokens,
++            cost_usd=cost,
++        )
++        with self._lock:
++            self._records.append(record)
++            self._total_input += input_tokens
++            self._total_output += output_tokens
++            self._total_cost += cost
++
++        logger.debug(
++            "Recorded usage: %s, in=%d, out=%d, cost=$%.6f",
++            model, input_tokens, output_tokens, cost,
++        )
++
++    def get_summary(self) -> TokenUsageSummary:
++        with self._lock:
++            by_model: dict[str, dict] = {}
++            for record in self._records:
++                if record.model not in by_model:
++                    by_model[record.model] = {
++                        "input_tokens": 0,
++                        "output_tokens": 0,
++                        "cost_usd": 0.0,
++                        "calls": 0,
++                    }
++                by_model[record.model]["input_tokens"] += record.input_tokens
++                by_model[record.model]["output_tokens"] += record.output_tokens
++                by_model[record.model]["cost_usd"] += record.cost_usd
++                by_model[record.model]["calls"] += 1
++
++            return TokenUsageSummary(
++                total_input_tokens=self._total_input,
++                total_output_tokens=self._total_output,
++                total_tokens=self._total_input + self._total_output,
++                total_cost_usd=self._total_cost,
++                call_count=len(self._records),
++                by_model=by_model,
++            )
++
++    def reset(self) -> None:
++        with self._lock:
++            self._records.clear()
++            self._total_input = 0
++            self._total_output = 0
++            self._total_cost = 0.0
++
++    def get_recent_records(self, count: int = 10) -> list[TokenUsageRecord]:
++        with self._lock:
++            return list(self._records[-count:])
++
++
++# ---------------------------------------------------------------------------
++# Global singleton
++# ---------------------------------------------------------------------------
++_global_tracker: Optional[TokenTracker] = None
++_tracker_lock = threading.Lock()
++
++
++def get_token_tracker() -> TokenTracker:
++    global _global_tracker
++    with _tracker_lock:
++        if _global_tracker is None:
++            _global_tracker = TokenTracker()
++        return _global_tracker
++
++
++def reset_token_tracker() -> None:
++    global _global_tracker
++    with _tracker_lock:
++        _global_tracker = TokenTracker()
+diff --git a/bmlib/quality/__init__.py b/bmlib/quality/__init__.py
+new file mode 100644
+index 0000000..ed56993
+--- /dev/null
++++ b/bmlib/quality/__init__.py
+@@ -0,0 +1,30 @@
++"""Tiered quality assessment for biomedical publications.
++
++Three-tier pipeline (cheapest first, escalating on demand):
++
++- **Tier 1**: PubMed metadata classification (free, instant)
++- **Tier 2**: LLM study-design classification (cheap model)
++- **Tier 3**: Deep methodological assessment (capable model)
++"""
++
++from bmlib.quality.data_models import (
++    BiasRisk,
++    QualityAssessment,
++    QualityFilter,
++    QualityTier,
++    StudyDesign,
++    DESIGN_TO_TIER,
++    DESIGN_TO_SCORE,
++)
++from bmlib.quality.manager import QualityManager
++
++__all__ = [
++    "BiasRisk",
++    "QualityAssessment",
++    "QualityFilter",
++    "QualityManager",
++    "QualityTier",
++    "StudyDesign",
++    "DESIGN_TO_TIER",
++    "DESIGN_TO_SCORE",
++]
+diff --git a/bmlib/quality/data_models.py b/bmlib/quality/data_models.py
+new file mode 100644
+index 0000000..94d910d
+--- /dev/null
++++ b/bmlib/quality/data_models.py
+@@ -0,0 +1,312 @@
++"""Data models for the quality assessment pipeline.
++
++Defines enums for study design and quality tiers, plus the core
++:class:`QualityAssessment` dataclass that all three tiers produce.
++"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass, field
++from enum import Enum
++from functools import total_ordering
++from typing import Any, Optional
++
++
++# ---------------------------------------------------------------------------
++# Study design
++# ---------------------------------------------------------------------------
++
++class StudyDesign(Enum):
++    SYSTEMATIC_REVIEW = "systematic_review"
++    META_ANALYSIS = "meta_analysis"
++    RCT = "rct"
++    COHORT_PROSPECTIVE = "cohort_prospective"
++    COHORT_RETROSPECTIVE = "cohort_retrospective"
++    CASE_CONTROL = "case_control"
++    CROSS_SECTIONAL = "cross_sectional"
++    CASE_SERIES = "case_series"
++    CASE_REPORT = "case_report"
++    GUIDELINE = "guideline"
++    EDITORIAL = "editorial"
++    LETTER = "letter"
++    COMMENT = "comment"
++    OTHER = "other"
++    UNKNOWN = "unknown"
++
++
++# String → enum lookup (tolerant of LLM output variations)
++STUDY_DESIGN_MAPPING: dict[str, StudyDesign] = {
++    "systematic_review": StudyDesign.SYSTEMATIC_REVIEW,
++    "systematic review": StudyDesign.SYSTEMATIC_REVIEW,
++    "meta_analysis": StudyDesign.META_ANALYSIS,
++    "meta-analysis": StudyDesign.META_ANALYSIS,
++    "rct": StudyDesign.RCT,
++    "randomized controlled trial": StudyDesign.RCT,
++    "randomised controlled trial": StudyDesign.RCT,
++    "cohort_prospective": StudyDesign.COHORT_PROSPECTIVE,
++    "prospective cohort": StudyDesign.COHORT_PROSPECTIVE,
++    "cohort_retrospective": StudyDesign.COHORT_RETROSPECTIVE,
++    "retrospective cohort": StudyDesign.COHORT_RETROSPECTIVE,
++    "cohort": StudyDesign.COHORT_PROSPECTIVE,
++    "case_control": StudyDesign.CASE_CONTROL,
++    "case-control": StudyDesign.CASE_CONTROL,
++    "cross_sectional": StudyDesign.CROSS_SECTIONAL,
++    "cross-sectional": StudyDesign.CROSS_SECTIONAL,
++    "case_series": StudyDesign.CASE_SERIES,
++    "case series": StudyDesign.CASE_SERIES,
++    "case_report": StudyDesign.CASE_REPORT,
++    "case report": StudyDesign.CASE_REPORT,
++    "guideline": StudyDesign.GUIDELINE,
++    "editorial": StudyDesign.EDITORIAL,
++    "letter": StudyDesign.LETTER,
++    "comment": StudyDesign.COMMENT,
++    "other": StudyDesign.OTHER,
++    "unknown": StudyDesign.UNKNOWN,
++}
++
++
++# ---------------------------------------------------------------------------
++# Quality tiers (Oxford CEBM–inspired)
++# ---------------------------------------------------------------------------
++
++@total_ordering
++class QualityTier(Enum):
++    """Evidence quality tier.  Higher value = stronger evidence."""
++    UNCLASSIFIED = 0
++    TIER_1_ANECDOTAL = 1       # case reports, editorials, letters
++    TIER_2_OBSERVATIONAL = 2   # cross-sectional, case-control
++    TIER_3_CONTROLLED = 3      # cohort studies
++    TIER_4_EXPERIMENTAL = 4    # RCTs
++    TIER_5_SYNTHESIS = 5       # systematic reviews, meta-analyses
++
++    def __lt__(self, other):
++        if self.__class__ is other.__class__:
++            return self.value < other.value
++        return NotImplemented
++
++
++# Design → tier mapping
++DESIGN_TO_TIER: dict[StudyDesign, QualityTier] = {
++    StudyDesign.SYSTEMATIC_REVIEW: QualityTier.TIER_5_SYNTHESIS,
++    StudyDesign.META_ANALYSIS: QualityTier.TIER_5_SYNTHESIS,
++    StudyDesign.GUIDELINE: QualityTier.TIER_5_SYNTHESIS,
++    StudyDesign.RCT: QualityTier.TIER_4_EXPERIMENTAL,
++    StudyDesign.COHORT_PROSPECTIVE: QualityTier.TIER_3_CONTROLLED,
++    StudyDesign.COHORT_RETROSPECTIVE: QualityTier.TIER_3_CONTROLLED,
++    StudyDesign.CASE_CONTROL: QualityTier.TIER_2_OBSERVATIONAL,
++    StudyDesign.CROSS_SECTIONAL: QualityTier.TIER_2_OBSERVATIONAL,
++    StudyDesign.CASE_SERIES: QualityTier.TIER_1_ANECDOTAL,
++    StudyDesign.CASE_REPORT: QualityTier.TIER_1_ANECDOTAL,
++    StudyDesign.EDITORIAL: QualityTier.TIER_1_ANECDOTAL,
++    StudyDesign.LETTER: QualityTier.TIER_1_ANECDOTAL,
++    StudyDesign.COMMENT: QualityTier.TIER_1_ANECDOTAL,
++    StudyDesign.OTHER: QualityTier.UNCLASSIFIED,
++    StudyDesign.UNKNOWN: QualityTier.UNCLASSIFIED,
++}
++
++# Design → default numeric score (0–10)
++DESIGN_TO_SCORE: dict[StudyDesign, float] = {
++    StudyDesign.SYSTEMATIC_REVIEW: 9.0,
++    StudyDesign.META_ANALYSIS: 9.0,
++    StudyDesign.GUIDELINE: 8.5,
++    StudyDesign.RCT: 8.0,
++    StudyDesign.COHORT_PROSPECTIVE: 6.0,
++    StudyDesign.COHORT_RETROSPECTIVE: 5.0,
++    StudyDesign.CASE_CONTROL: 4.5,
++    StudyDesign.CROSS_SECTIONAL: 4.0,
++    StudyDesign.CASE_SERIES: 3.0,
++    StudyDesign.CASE_REPORT: 2.0,
++    StudyDesign.EDITORIAL: 1.5,
++    StudyDesign.LETTER: 1.5,
++    StudyDesign.COMMENT: 1.0,
++    StudyDesign.OTHER: 0.0,
++    StudyDesign.UNKNOWN: 0.0,
++}
++
++
++# ---------------------------------------------------------------------------
++# Bias risk (Cochrane RoB)
++# ---------------------------------------------------------------------------
++
++@dataclass
++class BiasRisk:
++    """Cochrane Risk-of-Bias across five domains."""
++    selection: str = "unclear"     # "low", "unclear", "high"
++    performance: str = "unclear"
++    detection: str = "unclear"
++    attrition: str = "unclear"
++    reporting: str = "unclear"
++
++    def to_dict(self) -> dict[str, str]:
++        return {
++            "selection": self.selection,
++            "performance": self.performance,
++            "detection": self.detection,
++            "attrition": self.attrition,
++            "reporting": self.reporting,
++        }
++
++    @classmethod
++    def from_dict(cls, data: dict) -> BiasRisk:
++        valid = ("low", "unclear", "high")
++        def v(k): return data.get(k, "unclear") if data.get(k) in valid else "unclear"
++        return cls(
++            selection=v("selection"), performance=v("performance"),
++            detection=v("detection"), attrition=v("attrition"),
++            reporting=v("reporting"),
++        )
++
++
++# ---------------------------------------------------------------------------
++# Quality assessment result
++# ---------------------------------------------------------------------------
++
++@dataclass
++class QualityAssessment:
++    """Result from any tier of the quality pipeline."""
++
++    assessment_tier: int = 0             # 0=unclassified, 1=metadata, 2=haiku, 3=sonnet
++    extraction_method: str = "none"
++    study_design: StudyDesign = StudyDesign.UNKNOWN
++    quality_tier: QualityTier = QualityTier.UNCLASSIFIED
++    quality_score: float = 0.0           # 0–10
++    evidence_level: Optional[str] = None # Oxford CEBM level
++    is_randomized: Optional[bool] = None
++    is_controlled: Optional[bool] = None
++    is_blinded: Optional[str] = None     # none / single / double / triple
++    is_prospective: Optional[bool] = None
++    is_multicenter: Optional[bool] = None
++    sample_size: Optional[int] = None
++    confidence: float = 0.0              # 0–1
++    bias_risk: Optional[BiasRisk] = None
++    strengths: list[str] = field(default_factory=list)
++    limitations: list[str] = field(default_factory=list)
++    extraction_details: list[str] = field(default_factory=list)
++
++    # Transparency integration
++    transparency_result: Any = None
++    original_quality_tier: Optional[QualityTier] = None
++    transparency_adjusted: bool = False
++
++    # --- Factories ---
++
++    @classmethod
++    def unclassified(cls) -> QualityAssessment:
++        return cls()
++
++    @classmethod
++    def from_metadata(
++        cls,
++        design: StudyDesign,
++        confidence: float = 0.9,
++    ) -> QualityAssessment:
++        return cls(
++            assessment_tier=1,
++            extraction_method="pubmed_metadata",
++            study_design=design,
++            quality_tier=DESIGN_TO_TIER.get(design, QualityTier.UNCLASSIFIED),
++            quality_score=DESIGN_TO_SCORE.get(design, 0.0),
++            confidence=confidence,
++        )
++
++    @classmethod
++    def from_classification(
++        cls,
++        study_design: StudyDesign,
++        confidence: float = 0.7,
++        sample_size: Optional[int] = None,
++        is_blinded: Optional[str] = None,
++    ) -> QualityAssessment:
++        return cls(
++            assessment_tier=2,
++            extraction_method="llm_classifier",
++            study_design=study_design,
++            quality_tier=DESIGN_TO_TIER.get(study_design, QualityTier.UNCLASSIFIED),
++            quality_score=DESIGN_TO_SCORE.get(study_design, 0.0),
++            confidence=confidence,
++            sample_size=sample_size,
++            is_blinded=is_blinded,
++        )
++
++    # --- Filtering ---
++
++    def passes_filter(self, qfilter: QualityFilter) -> bool:
++        if qfilter.min_tier is not None and self.quality_tier < qfilter.min_tier:
++            return False
++        if qfilter.require_randomization and not self.is_randomized:
++            return False
++        if qfilter.require_blinding and self.is_blinded in (None, "none"):
++            return False
++        if (
++            qfilter.min_sample_size is not None
++            and self.sample_size is not None
++            and self.sample_size < qfilter.min_sample_size
++        ):
++            return False
++        return True
++
++    # --- Serialisation ---
++
++    def to_dict(self) -> dict[str, Any]:
++        d: dict[str, Any] = {
++            "assessment_tier": self.assessment_tier,
++            "extraction_method": self.extraction_method,
++            "study_design": self.study_design.value,
++            "quality_tier": self.quality_tier.value,
++            "quality_score": self.quality_score,
++            "evidence_level": self.evidence_level,
++            "is_randomized": self.is_randomized,
++            "is_controlled": self.is_controlled,
++            "is_blinded": self.is_blinded,
++            "is_prospective": self.is_prospective,
++            "is_multicenter": self.is_multicenter,
++            "sample_size": self.sample_size,
++            "confidence": self.confidence,
++            "strengths": self.strengths,
++            "limitations": self.limitations,
++            "transparency_adjusted": self.transparency_adjusted,
++        }
++        if self.bias_risk:
++            d["bias_risk"] = self.bias_risk.to_dict()
++        return d
++
++    @classmethod
++    def from_dict(cls, data: dict[str, Any]) -> QualityAssessment:
++        design_str = data.get("study_design", "unknown")
++        design = STUDY_DESIGN_MAPPING.get(design_str, StudyDesign.UNKNOWN)
++        bias = BiasRisk.from_dict(data["bias_risk"]) if "bias_risk" in data else None
++        return cls(
++            assessment_tier=data.get("assessment_tier", 0),
++            extraction_method=data.get("extraction_method", "none"),
++            study_design=design,
++            quality_tier=QualityTier(data.get("quality_tier", 0)),
++            quality_score=data.get("quality_score", 0.0),
++            evidence_level=data.get("evidence_level"),
++            is_randomized=data.get("is_randomized"),
++            is_controlled=data.get("is_controlled"),
++            is_blinded=data.get("is_blinded"),
++            is_prospective=data.get("is_prospective"),
++            is_multicenter=data.get("is_multicenter"),
++            sample_size=data.get("sample_size"),
++            confidence=data.get("confidence", 0.0),
++            bias_risk=bias,
++            strengths=data.get("strengths", []),
++            limitations=data.get("limitations", []),
++            transparency_adjusted=data.get("transparency_adjusted", False),
++        )
++
++
++# ---------------------------------------------------------------------------
++# Quality filter (user preferences)
++# ---------------------------------------------------------------------------
++
++@dataclass
++class QualityFilter:
++    """User-configurable quality filter thresholds."""
++    min_tier: Optional[QualityTier] = None
++    require_randomization: bool = False
++    require_blinding: bool = False
++    min_sample_size: Optional[int] = None
++    use_metadata_only: bool = False
++    use_llm_classification: bool = True
++    use_detailed_assessment: bool = False
+diff --git a/bmlib/quality/manager.py b/bmlib/quality/manager.py
+new file mode 100644
+index 0000000..15b6f00
+--- /dev/null
++++ b/bmlib/quality/manager.py
+@@ -0,0 +1,158 @@
++"""Quality Manager — orchestrates the tiered assessment pipeline.
++
++Assessment flow:
++  1. Tier 1: PubMed metadata classification (free, instant)
++  2. Tier 2: LLM classification via cheap model (if metadata inconclusive)
++  3. Tier 3: Deep assessment via capable model (if explicitly requested)
++"""
++
++from __future__ import annotations
++
++import logging
++from typing import Callable, Optional, Sequence
++
++from bmlib.llm import LLMClient
++from bmlib.templates import TemplateEngine
++from bmlib.quality.data_models import (
++    QualityAssessment,
++    QualityFilter,
++    QualityTier,
++)
++from bmlib.quality.metadata_filter import classify_from_metadata
++from bmlib.quality.study_classifier import StudyClassifier
++from bmlib.quality.quality_agent import QualityAgent
++
++logger = logging.getLogger(__name__)
++
++# Accept Tier 1 result without LLM fallback if confidence ≥ this
++METADATA_ACCEPTANCE_THRESHOLD = 0.9
++
++
++class QualityManager:
++    """Orchestrates tiered quality assessment.
++
++    Args:
++        llm: LLM client for Tier 2/3.
++        classifier_model: Model string for Tier 2 (cheap/fast).
++        assessor_model: Model string for Tier 3 (capable).
++        template_engine: Optional template engine.
++    """
++
++    def __init__(
++        self,
++        llm: LLMClient,
++        classifier_model: str,
++        assessor_model: str,
++        template_engine: TemplateEngine | None = None,
++    ) -> None:
++        self.classifier = StudyClassifier(
++            llm=llm,
++            model=classifier_model,
++            template_engine=template_engine,
++            temperature=0.1,
++            max_tokens=256,
++        )
++        self.assessor = QualityAgent(
++            llm=llm,
++            model=assessor_model,
++            template_engine=template_engine,
++            temperature=0.2,
++            max_tokens=1024,
++        )
++
++    def assess(
++        self,
++        title: str,
++        abstract: str,
++        *,
++        publication_types: Sequence[str] = (),
++        filter_settings: QualityFilter | None = None,
++    ) -> QualityAssessment:
++        """Run the tiered assessment pipeline for a single paper.
++
++        Args:
++            title: Paper title.
++            abstract: Paper abstract.
++            publication_types: PubMed publication types (for Tier 1).
++            filter_settings: Controls which tiers are enabled.
++        """
++        filt = filter_settings or QualityFilter()
++
++        # --- Tier 1: metadata ---
++        metadata_result = classify_from_metadata(publication_types)
++        if metadata_result.quality_tier != QualityTier.UNCLASSIFIED:
++            logger.debug(
++                "Tier 1: %s (confidence %.2f)",
++                metadata_result.study_design.value,
++                metadata_result.confidence,
++            )
++
++        if filt.use_metadata_only:
++            return metadata_result
++
++        metadata_is_confident = (
++            metadata_result.confidence >= METADATA_ACCEPTANCE_THRESHOLD
++            and metadata_result.quality_tier != QualityTier.UNCLASSIFIED
++        )
++
++        if metadata_is_confident and not filt.use_detailed_assessment:
++            return metadata_result
++
++        # --- Tier 2: LLM classification ---
++        if filt.use_llm_classification:
++            classification = self.classifier.classify(title, abstract)
++            logger.debug(
++                "Tier 2: %s (confidence %.2f)",
++                classification.study_design.value,
++                classification.confidence,
++            )
++
++            if not filt.use_detailed_assessment:
++                return classification
++
++        # --- Tier 3: deep assessment ---
++        if filt.use_detailed_assessment:
++            assessment = self.assessor.assess(title, abstract)
++            logger.debug(
++                "Tier 3: %s score=%.1f",
++                assessment.study_design.value,
++                assessment.quality_score,
++            )
++            return assessment
++
++        # Fallback
++        return metadata_result
++
++    def assess_batch(
++        self,
++        papers: list[dict],
++        *,
++        filter_settings: QualityFilter | None = None,
++        progress_callback: Callable[[int, int, QualityAssessment], None] | None = None,
++    ) -> list[QualityAssessment]:
++        """Assess a batch of papers.
++
++        Each dict in *papers* should have ``"title"`` and ``"abstract"``
++        keys, and optionally ``"publication_types"``.
++
++        Args:
++            papers: List of paper dicts.
++            filter_settings: Controls which tiers are enabled.
++            progress_callback: Optional ``(current, total, assessment)`` callback.
++
++        Returns:
++            List of assessments (same order as input).
++        """
++        results: list[QualityAssessment] = []
++        total = len(papers)
++        for i, paper in enumerate(papers):
++            assessment = self.assess(
++                title=paper.get("title", ""),
++                abstract=paper.get("abstract", ""),
++                publication_types=paper.get("publication_types", ()),
++                filter_settings=filter_settings,
++            )
++            results.append(assessment)
++            if progress_callback:
++                progress_callback(i + 1, total, assessment)
++        return results
+diff --git a/bmlib/quality/metadata_filter.py b/bmlib/quality/metadata_filter.py
+new file mode 100644
+index 0000000..e6cbeaf
+--- /dev/null
++++ b/bmlib/quality/metadata_filter.py
+@@ -0,0 +1,123 @@
++"""Tier 1: PubMed metadata-based quality classification.
++
++Maps PubMed publication types (assigned by NLM indexers) to
++:class:`StudyDesign` enums.  Free and instant — always run first.
++"""
++
++from __future__ import annotations
++
++import logging
++from typing import Optional, Sequence
++
++from bmlib.quality.data_models import (
++    QualityAssessment,
++    QualityTier,
++    StudyDesign,
++    DESIGN_TO_TIER,
++)
++
++logger = logging.getLogger(__name__)
++
++# Confidence when matched from metadata
++METADATA_HIGH_CONFIDENCE = 0.9
++
++# PubMed publication type → StudyDesign
++PUBMED_TYPE_TO_DESIGN: dict[str, StudyDesign] = {
++    "Systematic Review": StudyDesign.SYSTEMATIC_REVIEW,
++    "Meta-Analysis": StudyDesign.META_ANALYSIS,
++    "Randomized Controlled Trial": StudyDesign.RCT,
++    "Controlled Clinical Trial": StudyDesign.RCT,
++    "Clinical Trial": StudyDesign.RCT,
++    "Clinical Trial, Phase I": StudyDesign.RCT,
++    "Clinical Trial, Phase II": StudyDesign.RCT,
++    "Clinical Trial, Phase III": StudyDesign.RCT,
++    "Clinical Trial, Phase IV": StudyDesign.RCT,
++    "Pragmatic Clinical Trial": StudyDesign.RCT,
++    "Equivalence Trial": StudyDesign.RCT,
++    "Multicenter Study": StudyDesign.RCT,
++    "Observational Study": StudyDesign.COHORT_PROSPECTIVE,
++    "Cohort Study": StudyDesign.COHORT_PROSPECTIVE,
++    "Longitudinal Study": StudyDesign.COHORT_PROSPECTIVE,
++    "Prospective Study": StudyDesign.COHORT_PROSPECTIVE,
++    "Retrospective Study": StudyDesign.COHORT_RETROSPECTIVE,
++    "Case-Control Study": StudyDesign.CASE_CONTROL,
++    "Cross-Sectional Study": StudyDesign.CROSS_SECTIONAL,
++    "Twin Study": StudyDesign.CROSS_SECTIONAL,
++    "Validation Study": StudyDesign.CROSS_SECTIONAL,
++    "Comparative Study": StudyDesign.CROSS_SECTIONAL,
++    "Case Reports": StudyDesign.CASE_REPORT,
++    "Practice Guideline": StudyDesign.GUIDELINE,
++    "Guideline": StudyDesign.GUIDELINE,
++    "Consensus Development Conference": StudyDesign.GUIDELINE,
++    "Editorial": StudyDesign.EDITORIAL,
++    "Letter": StudyDesign.LETTER,
++    "Comment": StudyDesign.COMMENT,
++    "Review": StudyDesign.OTHER,
++    "Published Erratum": StudyDesign.OTHER,
++    "Retracted Publication": StudyDesign.OTHER,
++}
++
++# Resolution priority (most specific first)
++TYPE_PRIORITY: list[str] = [
++    "Systematic Review",
++    "Meta-Analysis",
++    "Randomized Controlled Trial",
++    "Controlled Clinical Trial",
++    "Pragmatic Clinical Trial",
++    "Clinical Trial, Phase III",
++    "Clinical Trial, Phase IV",
++    "Clinical Trial, Phase II",
++    "Clinical Trial, Phase I",
++    "Clinical Trial",
++    "Case-Control Study",
++    "Cohort Study",
++    "Longitudinal Study",
++    "Prospective Study",
++    "Retrospective Study",
++    "Cross-Sectional Study",
++    "Observational Study",
++    "Case Reports",
++    "Practice Guideline",
++    "Guideline",
++    "Editorial",
++    "Letter",
++    "Comment",
++]
++
++
++def classify_from_metadata(
++    publication_types: Sequence[str],
++) -> QualityAssessment:
++    """Classify study design from PubMed publication types.
++
++    Args:
++        publication_types: List of publication type strings from PubMed.
++
++    Returns:
++        A :class:`QualityAssessment` at tier 1 (metadata).  Returns
++        ``QualityAssessment.unclassified()`` if no types match.
++    """
++    if not publication_types:
++        return QualityAssessment.unclassified()
++
++    type_set = set(publication_types)
++
++    # Walk priority list and take the first match
++    for ptype in TYPE_PRIORITY:
++        if ptype in type_set:
++            design = PUBMED_TYPE_TO_DESIGN[ptype]
++            return QualityAssessment.from_metadata(
++                design=design,
++                confidence=METADATA_HIGH_CONFIDENCE,
++            )
++
++    # Try remaining types not in the priority list
++    for ptype in publication_types:
++        if ptype in PUBMED_TYPE_TO_DESIGN:
++            design = PUBMED_TYPE_TO_DESIGN[ptype]
++            return QualityAssessment.from_metadata(
++                design=design,
++                confidence=METADATA_HIGH_CONFIDENCE * 0.8,
++            )
++
++    return QualityAssessment.unclassified()
+diff --git a/bmlib/quality/quality_agent.py b/bmlib/quality/quality_agent.py
+new file mode 100644
+index 0000000..c1aff37
+--- /dev/null
++++ b/bmlib/quality/quality_agent.py
+@@ -0,0 +1,148 @@
++"""Tier 3: Deep methodological quality assessment.
++
++Uses a more capable model (e.g. Sonnet) for comprehensive assessment
++including bias risk, strengths, and limitations.
++
++Cost: ~$0.003 per document.  Use selectively — only when detailed
++assessment is explicitly requested.
++"""
++
++from __future__ import annotations
++
++import json
++import logging
++from typing import Optional
++
++from bmlib.agents.base import BaseAgent
++from bmlib.quality.data_models import (
++    BiasRisk,
++    QualityAssessment,
++    QualityTier,
++    StudyDesign,
++    STUDY_DESIGN_MAPPING,
++    DESIGN_TO_TIER,
++)
++
++logger = logging.getLogger(__name__)
++
++ASSESSMENT_SYSTEM_PROMPT = """\
++You are a research quality assessment expert.
++Evaluate the methodological quality of biomedical research papers.
++
++CRITICAL RULES:
++1. Extract ONLY information that is ACTUALLY PRESENT in the text
++2. DO NOT invent, assume, or fabricate any information
++3. If information is unclear or not mentioned, use null or "unclear"
++4. Focus on THIS study's methodology, not studies it references
++5. Return ONLY valid JSON, no explanation"""
++
++
++ASSESSMENT_USER_TEMPLATE = """\
++Assess this research paper's methodological quality:
++
++Title: {title}
++Abstract: {abstract}
++
++Return JSON:
++{{
++    "study_design": "systematic_review|meta_analysis|rct|cohort_prospective|cohort_retrospective|case_control|cross_sectional|case_series|case_report|editorial|letter|guideline|other",
++    "quality_score": <1-10>,
++    "evidence_level": "1a|1b|2a|2b|3a|3b|4|5|null",
++    "design_characteristics": {{
++        "randomized": true|false|null,
++        "controlled": true|false|null,
++        "blinded": "none"|"single"|"double"|"triple"|null,
++        "prospective": true|false|null,
++        "multicenter": true|false|null
++    }},
++    "sample_size": <number or null>,
++    "bias_risk": {{
++        "selection": "low"|"unclear"|"high",
++        "performance": "low"|"unclear"|"high",
++        "detection": "low"|"unclear"|"high",
++        "attrition": "low"|"unclear"|"high",
++        "reporting": "low"|"unclear"|"high"
++    }},
++    "strengths": ["2-3 methodological strengths"],
++    "limitations": ["2-3 methodological limitations"],
++    "confidence": <0.0 to 1.0>
++}}
++
++Focus on THIS study's methodology, not studies it references."""
++
++
++class QualityAgent(BaseAgent):
++    """Tier 3 deep quality assessor."""
++
++    def assess(
++        self,
++        title: str,
++        abstract: str,
++    ) -> QualityAssessment:
++        """Perform detailed quality assessment.
++
++        Returns a Tier 3 :class:`QualityAssessment`.  On failure,
++        returns ``QualityAssessment.unclassified()``.
++        """
++        prompt = ASSESSMENT_USER_TEMPLATE.format(
++            title=title,
++            abstract=abstract[:4000],
++        )
++
++        try:
++            response = self.chat(
++                messages=[
++                    self.system_msg(ASSESSMENT_SYSTEM_PROMPT),
++                    self.user_msg(prompt),
++                ],
++                json_mode=True,
++                temperature=0.2,
++                max_tokens=1024,
++            )
++            return self._parse(response.content)
++        except Exception as e:
++            logger.warning("Quality assessment failed: %s", e)
++            return QualityAssessment.unclassified()
++
++    def _parse(self, text: str) -> QualityAssessment:
++        data = self.parse_json(text)
++
++        design_str = data.get("study_design", "unknown").lower().strip()
++        design = STUDY_DESIGN_MAPPING.get(design_str, StudyDesign.UNKNOWN)
++
++        chars = data.get("design_characteristics", {})
++        bias_data = data.get("bias_risk", {})
++
++        blinding = chars.get("blinded")
++        if blinding not in ("none", "single", "double", "triple"):
++            blinding = None
++
++        sample_size = None
++        if data.get("sample_size") is not None:
++            try:
++                sample_size = int(data["sample_size"])
++            except (ValueError, TypeError):
++                pass
++
++        quality_score = max(0.0, min(10.0, float(data.get("quality_score", 0))))
++        confidence = max(0.0, min(1.0, float(data.get("confidence", 0.5))))
++
++        return QualityAssessment(
++            assessment_tier=3,
++            extraction_method="llm_deep_assessment",
++            study_design=design,
++            quality_tier=DESIGN_TO_TIER.get(design, QualityTier.UNCLASSIFIED),
++            quality_score=quality_score,
++            evidence_level=data.get("evidence_level"),
++            is_randomized=chars.get("randomized"),
++            is_controlled=chars.get("controlled"),
++            is_blinded=blinding,
++            is_prospective=chars.get("prospective"),
++            is_multicenter=chars.get("multicenter"),
++            sample_size=sample_size,
++            confidence=confidence,
++            bias_risk=BiasRisk.from_dict(bias_data),
++            strengths=data.get("strengths", []),
++            limitations=data.get("limitations", []),
++            extraction_details=["Detailed assessment via LLM"],
++        )
+diff --git a/bmlib/quality/study_classifier.py b/bmlib/quality/study_classifier.py
+new file mode 100644
+index 0000000..20be827
+--- /dev/null
++++ b/bmlib/quality/study_classifier.py
+@@ -0,0 +1,106 @@
++"""Tier 2: LLM-based study-design classification.
++
++Uses a cheap/fast model (e.g. Haiku, or a local model via Ollama) to
++classify study design from title + abstract.  Cost: ~$0.001 per document.
++"""
++
++from __future__ import annotations
++
++import json
++import logging
++from typing import Optional
++
++from bmlib.agents.base import BaseAgent
++from bmlib.llm import LLMClient
++from bmlib.templates import TemplateEngine
++from bmlib.quality.data_models import (
++    QualityAssessment,
++    StudyDesign,
++    STUDY_DESIGN_MAPPING,
++    DESIGN_TO_TIER,
++    DESIGN_TO_SCORE,
++)
++
++logger = logging.getLogger(__name__)
++
++CLASSIFIER_SYSTEM_PROMPT = """\
++You are a biomedical study design classifier.  Classify the paper's OWN
++methodology — NOT the methodology of studies it references.
++
++Focus on language like "this study", "we conducted", "our analysis".
++Ignore phrases like "previous studies have shown" or "a recent meta-analysis found".
++
++Return ONLY valid JSON, no explanation."""
++
++
++CLASSIFIER_USER_TEMPLATE = """\
++Classify this paper's study design:
++
++Title: {title}
++Abstract: {abstract}
++
++Return JSON:
++{{
++    "study_design": "systematic_review|meta_analysis|rct|cohort_prospective|cohort_retrospective|case_control|cross_sectional|case_series|case_report|editorial|letter|guideline|other|unknown",
++    "confidence": <0.0 to 1.0>,
++    "sample_size": <number or null>,
++    "blinding": "none|single|double|triple|null"
++}}"""
++
++
++class StudyClassifier(BaseAgent):
++    """Tier 2 study-design classifier using a cheap LLM."""
++
++    def classify(
++        self,
++        title: str,
++        abstract: str,
++    ) -> QualityAssessment:
++        """Classify study design from title and abstract.
++
++        Returns a Tier 2 :class:`QualityAssessment`.  On failure,
++        returns ``QualityAssessment.unclassified()``.
++        """
++        prompt = CLASSIFIER_USER_TEMPLATE.format(
++            title=title,
++            abstract=abstract[:3000],
++        )
++
++        try:
++            response = self.chat(
++                messages=[
++                    self.system_msg(CLASSIFIER_SYSTEM_PROMPT),
++                    self.user_msg(prompt),
++                ],
++                json_mode=True,
++                temperature=0.1,
++                max_tokens=256,
++            )
++            return self._parse(response.content)
++        except Exception as e:
++            logger.warning("Study classification failed: %s", e)
++            return QualityAssessment.unclassified()
++
++    def _parse(self, text: str) -> QualityAssessment:
++        data = self.parse_json(text)
++        design_str = data.get("study_design", "unknown").lower().strip()
++        design = STUDY_DESIGN_MAPPING.get(design_str, StudyDesign.UNKNOWN)
++        confidence = max(0.0, min(1.0, float(data.get("confidence", 0.5))))
++
++        sample_size = None
++        if data.get("sample_size") is not None:
++            try:
++                sample_size = int(data["sample_size"])
++            except (ValueError, TypeError):
++                pass
++
++        blinding = data.get("blinding")
++        if blinding not in ("none", "single", "double", "triple"):
++            blinding = None
++
++        return QualityAssessment.from_classification(
++            study_design=design,
++            confidence=confidence,
++            sample_size=sample_size,
++            is_blinded=blinding,
++        )
+diff --git a/bmlib/templates/__init__.py b/bmlib/templates/__init__.py
+new file mode 100644
+index 0000000..1b164cc
+--- /dev/null
++++ b/bmlib/templates/__init__.py
+@@ -0,0 +1,20 @@
++"""Jinja2 template engine for prompt files.
++
++Loads templates from user-configurable directories with fallback to
++package-shipped defaults.  Supports full Jinja2 syntax (conditionals,
++loops, filters).
++
++Usage::
++
++    from bmlib.templates import TemplateEngine
++
++    engine = TemplateEngine(
++        user_dir=Path("~/.myapp/prompts"),
++        default_dir=Path(__file__).parent / "defaults",
++    )
++    rendered = engine.render("scoring.txt", title="...", abstract="...")
++"""
++
++from bmlib.templates.engine import TemplateEngine
++
++__all__ = ["TemplateEngine"]
+diff --git a/bmlib/templates/engine.py b/bmlib/templates/engine.py
+new file mode 100644
+index 0000000..61ca65f
+--- /dev/null
++++ b/bmlib/templates/engine.py
+@@ -0,0 +1,99 @@
++"""Jinja2-based template loader with directory fallback.
++
++Resolution order when rendering ``engine.render("scoring.txt", ...)``:
++
++1. ``<user_dir>/scoring.txt`` — user's customised version
++2. ``<default_dir>/scoring.txt`` — package-shipped default
++
++This lets users override any prompt without touching installed code.
++"""
++
++from __future__ import annotations
++
++import logging
++from pathlib import Path
++from typing import Any
++
++from jinja2 import BaseLoader, Environment, TemplateNotFound
++
++logger = logging.getLogger(__name__)
++
++
++class _FallbackLoader(BaseLoader):
++    """Jinja2 loader that checks user dir first, then default dir."""
++
++    def __init__(
++        self,
++        user_dir: Path | None = None,
++        default_dir: Path | None = None,
++    ) -> None:
++        self.user_dir = user_dir
++        self.default_dir = default_dir
++
++    def get_source(self, environment: Environment, template: str):
++        for directory in (self.user_dir, self.default_dir):
++            if directory is None:
++                continue
++            path = directory / template
++            if path.is_file():
++                source = path.read_text(encoding="utf-8")
++                mtime = path.stat().st_mtime
++                return source, str(path), lambda: path.stat().st_mtime == mtime
++        raise TemplateNotFound(template)
++
++
++class TemplateEngine:
++    """Load and render Jinja2 prompt templates from disk.
++
++    Args:
++        user_dir: User override directory (checked first).
++        default_dir: Package default directory (fallback).
++    """
++
++    def __init__(
++        self,
++        user_dir: Path | None = None,
++        default_dir: Path | None = None,
++    ) -> None:
++        self.user_dir = Path(user_dir).expanduser() if user_dir else None
++        self.default_dir = Path(default_dir).expanduser() if default_dir else None
++        self._env = Environment(
++            loader=_FallbackLoader(self.user_dir, self.default_dir),
++            keep_trailing_newline=True,
++            autoescape=False,  # Templates are plain-text prompts, not HTML
++        )
++
++    def render(self, template_name: str, **variables: Any) -> str:
++        """Render a template file with the given variables.
++
++        Raises ``jinja2.TemplateNotFound`` if the template does not
++        exist in either directory.
++        """
++        tmpl = self._env.get_template(template_name)
++        return tmpl.render(**variables)
++
++    def has_template(self, template_name: str) -> bool:
++        """Check whether a template exists in either directory."""
++        try:
++            self._env.get_template(template_name)
++            return True
++        except TemplateNotFound:
++            return False
++
++    def install_defaults(self) -> None:
++        """Copy all default templates to the user directory.
++
++        Skips templates that already exist in the user directory.
++        """
++        if self.user_dir is None or self.default_dir is None:
++            return
++        if not self.default_dir.is_dir():
++            return
++
++        self.user_dir.mkdir(parents=True, exist_ok=True)
++        for src in self.default_dir.iterdir():
++            if src.is_file() and src.suffix in (".txt", ".j2", ".jinja2"):
++                dest = self.user_dir / src.name
++                if not dest.exists():
++                    dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
++                    logger.info("Installed default template: %s", dest)
+diff --git a/bmlib/transparency/__init__.py b/bmlib/transparency/__init__.py
+new file mode 100644
+index 0000000..a17a60e
+--- /dev/null
++++ b/bmlib/transparency/__init__.py
+@@ -0,0 +1,22 @@
++"""Transparency analysis for biomedical publications.
++
++Queries external APIs (PubMed, CrossRef, ClinicalTrials.gov, EuropePMC,
++OpenAlex) to assess funding, data availability, COI disclosure, and
++trial registration compliance.
++"""
++
++from bmlib.transparency.models import (
++    TransparencyResult,
++    TransparencyRisk,
++    TransparencySettings,
++    calculate_risk_level,
++)
++from bmlib.transparency.analyzer import TransparencyAnalyzer
++
++__all__ = [
++    "TransparencyAnalyzer",
++    "TransparencyResult",
++    "TransparencyRisk",
++    "TransparencySettings",
++    "calculate_risk_level",
++]
+diff --git a/bmlib/transparency/analyzer.py b/bmlib/transparency/analyzer.py
+new file mode 100644
+index 0000000..ccae082
+--- /dev/null
++++ b/bmlib/transparency/analyzer.py
+@@ -0,0 +1,300 @@
++"""Multi-API transparency analyzer.
++
++Queries PubMed, CrossRef, EuropePMC, ClinicalTrials.gov, and OpenAlex
++to assess transparency of biomedical publications.
++
++Requires ``httpx`` (install with ``pip install bmlib[transparency]``).
++"""
++
++from __future__ import annotations
++
++import logging
++import re
++import time
++from typing import Optional
++
++from bmlib.transparency.models import (
++    TransparencyResult,
++    TransparencyRisk,
++    TransparencySettings,
++    calculate_risk_level,
++)
++
++logger = logging.getLogger(__name__)
++
++# Known pharma / industry funder keywords
++_INDUSTRY_KEYWORDS = [
++    "pharma", "biotech", "therapeutics", "inc.", "corp.", "ltd.",
++    "gmbh", "laboratories", "employee of", "speaker fee",
++    "consultant for", "advisory board",
++]
++
++# Rate limiting
++_MIN_REQUEST_INTERVAL = 0.35  # seconds between API calls
++
++
++class TransparencyAnalyzer:
++    """Analyze transparency of a biomedical publication via external APIs.
++
++    Args:
++        email: Contact email for API politeness headers.
++        pubmed_api_key: Optional NCBI API key for higher rate limits.
++        settings: Transparency settings (thresholds, etc.).
++    """
++
++    def __init__(
++        self,
++        email: str = "user@example.com",
++        pubmed_api_key: Optional[str] = None,
++        settings: TransparencySettings | None = None,
++    ) -> None:
++        self.email = email
++        self.pubmed_api_key = pubmed_api_key
++        self.settings = settings or TransparencySettings()
++        self._last_request: float = 0.0
++
++    def analyze(
++        self,
++        document_id: str,
++        *,
++        pmid: Optional[str] = None,
++        doi: Optional[str] = None,
++    ) -> TransparencyResult:
++        """Run transparency analysis for a single document.
++
++        At least one of *pmid* or *doi* must be provided.
++        """
++        try:
++            import httpx
++        except ImportError:
++            raise ImportError(
++                "httpx is required for transparency analysis. "
++                "Install with: pip install bmlib[transparency]"
++            )
++
++        if not pmid and not doi:
++            return TransparencyResult(
++                document_id=document_id,
++                transparency_score=0,
++                risk_level=TransparencyRisk.UNKNOWN,
++                risk_indicators=["No PMID or DOI provided"],
++            )
++
++        score = 0
++        indicators: list[str] = []
++        industry_funding = False
++        industry_confidence = 0.0
++        data_level = "unknown"
++        coi_disclosed = False
++        trial_registered = False
++        results_compliant = False
++
++        with httpx.Client(
++            timeout=15.0,
++            headers={"User-Agent": f"bmlib/0.1 (mailto:{self.email})"},
++        ) as client:
++            # --- CrossRef (funder info) ---
++            if doi:
++                cr = self._query_crossref(client, doi)
++                if cr:
++                    funders = cr.get("message", {}).get("funder", [])
++                    if funders:
++                        score += 15
++                        for funder in funders:
++                            name = (funder.get("name") or "").lower()
++                            if any(kw in name for kw in _INDUSTRY_KEYWORDS):
++                                industry_funding = True
++                                industry_confidence = max(industry_confidence, 0.8)
++                                indicators.append(f"Industry funder: {funder.get('name')}")
++                    else:
++                        indicators.append("No funder information in CrossRef")
++
++            # --- EuropePMC (abstract, COI) ---
++            epmc = None
++            if doi:
++                epmc = self._query_europepmc(client, f'DOI:"{doi}"')
++            elif pmid:
++                epmc = self._query_europepmc(client, f'EXT_ID:{pmid}')
++
++            if epmc:
++                result_list = epmc.get("resultList", {}).get("result", [])
++                if result_list:
++                    paper = result_list[0]
++                    abstract_text = (paper.get("abstractText") or "").lower()
++
++                    # COI detection
++                    coi_patterns = [
++                        "conflict of interest", "competing interest",
++                        "no conflict", "nothing to disclose",
++                        "declare no", "financial disclosure",
++                    ]
++                    for pat in coi_patterns:
++                        if pat in abstract_text:
++                            coi_disclosed = True
++                            score += 10
++                            break
++
++                    if not coi_disclosed:
++                        indicators.append("No COI disclosure found")
++
++                    # Data availability
++                    data_patterns = {
++                        "zenodo": "full_open",
++                        "figshare": "full_open",
++                        "dryad": "full_open",
++                        "github": "full_open",
++                        "available upon request": "on_request",
++                        "upon reasonable request": "on_request",
++                        "not available": "not_available",
++                    }
++                    for pattern, level in data_patterns.items():
++                        if pattern in abstract_text:
++                            data_level = level
++                            break
++
++                    if data_level == "full_open":
++                        score += 20
++                    elif data_level == "on_request":
++                        score += 10
++                    elif data_level == "not_available":
++                        indicators.append("Data explicitly not available")
++
++            # --- OpenAlex (additional metadata) ---
++            if doi:
++                oa = self._query_openalex(client, doi)
++                if oa:
++                    # Open access check
++                    oa_info = oa.get("open_access", {})
++                    if oa_info.get("is_oa"):
++                        score += 15
++
++                    # Cited by count as a weak signal
++                    cited = oa.get("cited_by_count", 0)
++                    if cited > 0:
++                        score += 5
++
++            # --- ClinicalTrials.gov (trial registration) ---
++            if doi or pmid:
++                ct_ids = self._find_trial_ids(client, pmid, doi)
++                if ct_ids:
++                    trial_registered = True
++                    score += 20
++                    # Check results posting
++                    for tid in ct_ids[:3]:
++                        has_results = self._check_trial_results(client, tid)
++                        if has_results:
++                            results_compliant = True
++                            score += 15
++                            break
++                    if not results_compliant:
++                        indicators.append("Registered trial without posted results")
++
++        # Cap score
++        score = min(score, 100)
++
++        risk_level = calculate_risk_level(
++            score=score,
++            industry_funding=industry_funding,
++            data_availability=data_level,
++            coi_disclosed=coi_disclosed,
++            settings=self.settings,
++        )
++
++        return TransparencyResult(
++            document_id=document_id,
++            transparency_score=score,
++            risk_level=risk_level,
++            industry_funding_detected=industry_funding,
++            industry_funding_confidence=industry_confidence,
++            data_availability_level=data_level,
++            coi_disclosed=coi_disclosed,
++            trial_registered=trial_registered,
++            trial_results_compliant=results_compliant,
++            risk_indicators=indicators,
++            tier_downgrade_applied=(
++                self.settings.tier_downgrade_amount
++                if risk_level == TransparencyRisk.HIGH
++                else 0
++            ),
++        )
++
++    # --- API query helpers ---
++
++    def _rate_limit(self) -> None:
++        elapsed = time.time() - self._last_request
++        if elapsed < _MIN_REQUEST_INTERVAL:
++            time.sleep(_MIN_REQUEST_INTERVAL - elapsed)
++        self._last_request = time.time()
++
++    def _query_crossref(self, client, doi: str) -> dict | None:
++        self._rate_limit()
++        try:
++            resp = client.get(
++                f"https://api.crossref.org/works/{doi}",
++                headers={"Accept": "application/json"},
++            )
++            if resp.status_code == 200:
++                return resp.json()
++        except Exception as e:
++            logger.debug("CrossRef query failed for %s: %s", doi, e)
++        return None
++
++    def _query_europepmc(self, client, query: str) -> dict | None:
++        self._rate_limit()
++        try:
++            resp = client.get(
++                "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
++                params={"query": query, "format": "json", "resultType": "core"},
++            )
++            if resp.status_code == 200:
++                return resp.json()
++        except Exception as e:
++            logger.debug("EuropePMC query failed: %s", e)
++        return None
++
++    def _query_openalex(self, client, doi: str) -> dict | None:
++        self._rate_limit()
++        try:
++            resp = client.get(
++                f"https://api.openalex.org/works/doi:{doi}",
++                headers={"Accept": "application/json"},
++            )
++            if resp.status_code == 200:
++                return resp.json()
++        except Exception as e:
++            logger.debug("OpenAlex query failed for %s: %s", doi, e)
++        return None
++
++    def _find_trial_ids(
++        self, client, pmid: str | None, doi: str | None
++    ) -> list[str]:
++        """Look for clinical trial IDs linked to this paper."""
++        ids: list[str] = []
++
++        # Search EuropePMC for linked databanks
++        query = f'DOI:"{doi}"' if doi else f"EXT_ID:{pmid}"
++        data = self._query_europepmc(client, query)
++        if data:
++            results = data.get("resultList", {}).get("result", [])
++            if results:
++                abstract = (results[0].get("abstractText") or "")
++                # Extract NCT IDs from text
++                nct_matches = re.findall(r"NCT\d{8}", abstract)
++                ids.extend(nct_matches)
++
++        return list(set(ids))
++
++    def _check_trial_results(self, client, nct_id: str) -> bool:
++        """Check if a ClinicalTrials.gov trial has posted results."""
++        self._rate_limit()
++        try:
++            resp = client.get(
++                f"https://clinicaltrials.gov/api/v2/studies/{nct_id}",
++                params={"fields": "ResultsSection"},
++            )
++            if resp.status_code == 200:
++                data = resp.json()
++                return bool(data.get("resultsSection"))
++        except Exception as e:
++            logger.debug("ClinicalTrials.gov query failed for %s: %s", nct_id, e)
++        return False
+diff --git a/bmlib/transparency/models.py b/bmlib/transparency/models.py
+new file mode 100644
+index 0000000..bc08673
+--- /dev/null
++++ b/bmlib/transparency/models.py
+@@ -0,0 +1,126 @@
++"""Data models for transparency analysis."""
++
++from __future__ import annotations
++
++from dataclasses import dataclass, field
++from datetime import datetime
++from enum import Enum
++from typing import Any
++
++
++MEDIUM_RISK_SCORE_THRESHOLD = 70
++
++
++class TransparencyRisk(Enum):
++    """Risk level based on transparency analysis."""
++    LOW = "low"
++    MEDIUM = "medium"
++    HIGH = "high"
++    UNKNOWN = "unknown"
++
++
++@dataclass
++class TransparencySettings:
++    """User-configurable transparency thresholds."""
++    enabled: bool = True
++    score_threshold: int = 40          # Below this → HIGH risk
++    industry_funding_triggers_downgrade: bool = True
++    missing_coi_triggers_downgrade: bool = True
++    tier_downgrade_amount: int = 1
++    filtering_enabled: bool = False    # Whether to exclude high-risk papers
++    max_concurrent_analyses: int = 3
++    cache_results: bool = True
++
++
++@dataclass
++class TransparencyResult:
++    """Result of a transparency analysis for a single document."""
++    document_id: str
++    transparency_score: int                    # 0–100
++    risk_level: TransparencyRisk
++
++    industry_funding_detected: bool = False
++    industry_funding_confidence: float = 0.0
++    data_availability_level: str = "unknown"
++    coi_disclosed: bool = True
++    trial_registered: bool = False
++    trial_results_compliant: bool = False
++    outcome_switching_detected: bool = False
++
++    risk_indicators: list[str] = field(default_factory=list)
++    tier_downgrade_applied: int = 0
++
++    analyzed_at: datetime = field(default_factory=datetime.now)
++    analyzer_version: str = "1.0"
++    full_text_analyzed: bool = False
++
++    def to_dict(self) -> dict[str, Any]:
++        return {
++            "document_id": self.document_id,
++            "transparency_score": self.transparency_score,
++            "risk_level": self.risk_level.value,
++            "industry_funding_detected": self.industry_funding_detected,
++            "industry_funding_confidence": self.industry_funding_confidence,
++            "data_availability_level": self.data_availability_level,
++            "coi_disclosed": self.coi_disclosed,
++            "trial_registered": self.trial_registered,
++            "trial_results_compliant": self.trial_results_compliant,
++            "outcome_switching_detected": self.outcome_switching_detected,
++            "risk_indicators": self.risk_indicators,
++            "tier_downgrade_applied": self.tier_downgrade_applied,
++            "analyzed_at": self.analyzed_at.isoformat(),
++            "analyzer_version": self.analyzer_version,
++        }
++
++    @classmethod
++    def from_dict(cls, data: dict[str, Any]) -> TransparencyResult:
++        return cls(
++            document_id=data["document_id"],
++            transparency_score=data["transparency_score"],
++            risk_level=TransparencyRisk(data["risk_level"]),
++            industry_funding_detected=data.get("industry_funding_detected", False),
++            industry_funding_confidence=data.get("industry_funding_confidence", 0.0),
++            data_availability_level=data.get("data_availability_level", "unknown"),
++            coi_disclosed=data.get("coi_disclosed", True),
++            trial_registered=data.get("trial_registered", False),
++            trial_results_compliant=data.get("trial_results_compliant", False),
++            outcome_switching_detected=data.get("outcome_switching_detected", False),
++            risk_indicators=data.get("risk_indicators", []),
++            tier_downgrade_applied=data.get("tier_downgrade_applied", 0),
++            analyzed_at=datetime.fromisoformat(data["analyzed_at"]),
++            analyzer_version=data.get("analyzer_version", "1.0"),
++        )
++
++
++def calculate_risk_level(
++    score: int,
++    industry_funding: bool,
++    data_availability: str,
++    coi_disclosed: bool,
++    settings: TransparencySettings,
++) -> TransparencyRisk:
++    """Determine risk level from transparency metrics.
++
++    Risk levels:
++    - HIGH: score < threshold OR (industry + restricted data) OR missing COI
++    - MEDIUM: score ≤ 70 OR industry funding present
++    - LOW: score > 70 and transparent
++    """
++    if score < settings.score_threshold:
++        return TransparencyRisk.HIGH
++
++    if settings.industry_funding_triggers_downgrade:
++        restricted = data_availability in ("restricted", "not_available", "not_stated")
++        if industry_funding and restricted:
++            return TransparencyRisk.HIGH
++
++    if settings.missing_coi_triggers_downgrade and not coi_disclosed:
++        return TransparencyRisk.HIGH
++
++    if score <= MEDIUM_RISK_SCORE_THRESHOLD:
++        return TransparencyRisk.MEDIUM
++
++    if industry_funding:
++        return TransparencyRisk.MEDIUM
++
++    return TransparencyRisk.LOW
+diff --git a/pyproject.toml b/pyproject.toml
+new file mode 100644
+index 0000000..11a74f7
+--- /dev/null
++++ b/pyproject.toml
+@@ -0,0 +1,44 @@
++[build-system]
++requires = ["setuptools>=68.0"]
++build-backend = "setuptools.build_meta"
++
++[project]
++name = "bmlib"
++version = "0.1.0"
++description = "Shared library for biomedical literature tools — LLM abstraction, quality assessment, transparency analysis, and database utilities"
++readme = "README.md"
++license = "AGPL-3.0-or-later"
++requires-python = ">=3.11"
++authors = [
++    { name = "Horst Herb", email = "my.list.subscriptions@gmail.com" },
++]
++keywords = ["biomedical", "llm", "quality-assessment", "literature"]
++classifiers = [
++    "Development Status :: 3 - Alpha",
++    "Intended Audience :: Science/Research",
++    "Programming Language :: Python :: 3.11",
++    "Programming Language :: Python :: 3.12",
++    "Programming Language :: Python :: 3.13",
++    "Topic :: Scientific/Engineering :: Bio-Informatics",
++]
++dependencies = [
++    "jinja2>=3.1",
++]
++
++[project.optional-dependencies]
++anthropic = ["anthropic>=0.30"]
++ollama = ["ollama>=0.3"]
++postgresql = ["psycopg2-binary>=2.9"]
++transparency = ["httpx>=0.25"]
++dev = ["pytest>=7.0", "pytest-cov", "ruff"]
++all = ["bmlib[anthropic,ollama,postgresql,transparency,dev]"]
++
++[tool.ruff]
++target-version = "py311"
++line-length = 100
++
++[tool.ruff.lint]
++select = ["E", "F", "I", "N", "W", "UP"]
++
++[tool.pytest.ini_options]
++testpaths = ["tests"]
+diff --git a/tests/__init__.py b/tests/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/test_agents.py b/tests/test_agents.py
+new file mode 100644
+index 0000000..5ad3b05
+--- /dev/null
++++ b/tests/test_agents.py
+@@ -0,0 +1,40 @@
++"""Tests for bmlib.agents.base JSON parsing."""
++
++from __future__ import annotations
++
++import pytest
++
++from bmlib.agents.base import BaseAgent
++
++
++class TestParseJson:
++    def test_plain_json(self):
++        result = BaseAgent.parse_json('{"key": "value"}')
++        assert result == {"key": "value"}
++
++    def test_json_in_code_block(self):
++        text = '```json\n{"key": "value"}\n```'
++        result = BaseAgent.parse_json(text)
++        assert result == {"key": "value"}
++
++    def test_json_in_generic_code_block(self):
++        text = '```\n{"key": 42}\n```'
++        result = BaseAgent.parse_json(text)
++        assert result == {"key": 42}
++
++    def test_json_with_surrounding_text(self):
++        text = 'Here is the result: {"score": 0.8, "design": "rct"} end.'
++        result = BaseAgent.parse_json(text)
++        assert result["score"] == 0.8
++
++    def test_invalid_json_raises(self):
++        with pytest.raises(ValueError, match="Could not parse JSON"):
++            BaseAgent.parse_json("not json at all")
++
++    def test_message_helpers(self):
++        sys = BaseAgent.system_msg("sys")
++        usr = BaseAgent.user_msg("usr")
++        asst = BaseAgent.assistant_msg("asst")
++        assert sys.role == "system"
++        assert usr.role == "user"
++        assert asst.role == "assistant"
+diff --git a/tests/test_db.py b/tests/test_db.py
+new file mode 100644
+index 0000000..7ce5625
+--- /dev/null
++++ b/tests/test_db.py
+@@ -0,0 +1,93 @@
++"""Tests for bmlib.db — connection, operations, and transactions."""
++
++from __future__ import annotations
++
++from bmlib.db import (
++    connect_sqlite,
++    create_tables,
++    execute,
++    executemany,
++    fetch_all,
++    fetch_one,
++    fetch_scalar,
++    table_exists,
++    transaction,
++)
++
++
++def _mem_conn():
++    return connect_sqlite(":memory:")
++
++
++class TestConnection:
++    def test_sqlite_memory(self):
++        conn = _mem_conn()
++        assert conn is not None
++        conn.close()
++
++
++class TestOperations:
++    def test_create_and_query(self):
++        conn = _mem_conn()
++        create_tables(conn, "CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY, name TEXT);")
++        assert table_exists(conn, "t")
++        assert not table_exists(conn, "nonexistent")
++
++    def test_execute_insert_and_fetch(self):
++        conn = _mem_conn()
++        create_tables(conn, "CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT);")
++
++        cur = execute(conn, "INSERT INTO t (val) VALUES (?)", ("hello",))
++        assert cur.lastrowid == 1
++
++        row = fetch_one(conn, "SELECT val FROM t WHERE id=?", (1,))
++        assert row["val"] == "hello"
++
++        rows = fetch_all(conn, "SELECT * FROM t")
++        assert len(rows) == 1
++
++    def test_fetch_scalar(self):
++        conn = _mem_conn()
++        create_tables(conn, "CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER);")
++        execute(conn, "INSERT INTO t (n) VALUES (?)", (42,))
++        conn.commit()
++
++        val = fetch_scalar(conn, "SELECT n FROM t WHERE id=1")
++        assert val == 42
++
++    def test_fetch_one_returns_none(self):
++        conn = _mem_conn()
++        create_tables(conn, "CREATE TABLE t (id INTEGER PRIMARY KEY);")
++        assert fetch_one(conn, "SELECT * FROM t WHERE id=999") is None
++
++    def test_executemany(self):
++        conn = _mem_conn()
++        create_tables(conn, "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT);")
++        executemany(conn, "INSERT INTO t (v) VALUES (?)", [("a",), ("b",), ("c",)])
++        conn.commit()
++        rows = fetch_all(conn, "SELECT v FROM t ORDER BY v")
++        assert [r["v"] for r in rows] == ["a", "b", "c"]
++
++
++class TestTransaction:
++    def test_commit_on_success(self):
++        conn = _mem_conn()
++        create_tables(conn, "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT);")
++
++        with transaction(conn):
++            execute(conn, "INSERT INTO t (v) VALUES (?)", ("committed",))
++
++        assert fetch_scalar(conn, "SELECT v FROM t") == "committed"
++
++    def test_rollback_on_error(self):
++        conn = _mem_conn()
++        create_tables(conn, "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT);")
++
++        try:
++            with transaction(conn):
++                execute(conn, "INSERT INTO t (v) VALUES (?)", ("rollback",))
++                raise RuntimeError("boom")
++        except RuntimeError:
++            pass
++
++        assert fetch_one(conn, "SELECT * FROM t") is None
+diff --git a/tests/test_llm.py b/tests/test_llm.py
+new file mode 100644
+index 0000000..e206312
+--- /dev/null
++++ b/tests/test_llm.py
+@@ -0,0 +1,70 @@
++"""Tests for bmlib.llm data types, token tracker, and client routing."""
++
++from __future__ import annotations
++
++from bmlib.llm.data_types import LLMMessage, LLMResponse
++from bmlib.llm.token_tracker import TokenTracker
++
++
++class TestLLMMessage:
++    def test_construction(self):
++        msg = LLMMessage(role="user", content="Hello")
++        assert msg.role == "user"
++        assert msg.content == "Hello"
++
++
++class TestLLMResponse:
++    def test_auto_total(self):
++        resp = LLMResponse(content="Hi", input_tokens=10, output_tokens=5)
++        assert resp.total_tokens == 15
++
++    def test_explicit_total(self):
++        resp = LLMResponse(content="Hi", input_tokens=10, output_tokens=5, total_tokens=20)
++        assert resp.total_tokens == 20
++
++
++class TestTokenTracker:
++    def test_record_and_summary(self):
++        tracker = TokenTracker()
++        tracker.record_usage("test:model", 100, 50, cost=0.001)
++        tracker.record_usage("test:model", 200, 100, cost=0.003)
++
++        s = tracker.get_summary()
++        assert s.total_input_tokens == 300
++        assert s.total_output_tokens == 150
++        assert s.total_tokens == 450
++        assert s.call_count == 2
++        assert abs(s.total_cost_usd - 0.004) < 1e-9
++        assert "test:model" in s.by_model
++        assert s.by_model["test:model"]["calls"] == 2
++
++    def test_reset(self):
++        tracker = TokenTracker()
++        tracker.record_usage("m", 10, 5)
++        tracker.reset()
++        assert tracker.get_summary().call_count == 0
++
++    def test_recent_records(self):
++        tracker = TokenTracker()
++        for i in range(5):
++            tracker.record_usage(f"m{i}", i, i)
++        recent = tracker.get_recent_records(3)
++        assert len(recent) == 3
++        assert recent[0].model == "m2"
++
++
++class TestProviderRegistry:
++    def test_list_providers_includes_builtins(self):
++        from bmlib.llm.providers import list_providers
++        # Even without the actual packages installed, the registry
++        # should at least attempt to register them.  If neither
++        # anthropic nor ollama is installed, the list may be empty —
++        # but the function itself should not raise.
++        names = list_providers()
++        assert isinstance(names, list)
++
++    def test_unknown_provider_raises(self):
++        from bmlib.llm.providers import get_provider
++        import pytest
++        with pytest.raises(ValueError, match="Unknown provider"):
++            get_provider("nonexistent_provider_xyz")
+diff --git a/tests/test_quality.py b/tests/test_quality.py
+new file mode 100644
+index 0000000..4757f21
+--- /dev/null
++++ b/tests/test_quality.py
+@@ -0,0 +1,119 @@
++"""Tests for bmlib.quality data models and metadata filter."""
++
++from __future__ import annotations
++
++from bmlib.quality.data_models import (
++    BiasRisk,
++    QualityAssessment,
++    QualityFilter,
++    QualityTier,
++    StudyDesign,
++    DESIGN_TO_TIER,
++)
++from bmlib.quality.metadata_filter import classify_from_metadata
++
++
++class TestStudyDesign:
++    def test_all_designs_have_tier_mapping(self):
++        for design in StudyDesign:
++            assert design in DESIGN_TO_TIER
++
++
++class TestQualityTier:
++    def test_ordering(self):
++        assert QualityTier.TIER_5_SYNTHESIS > QualityTier.TIER_4_EXPERIMENTAL
++        assert QualityTier.TIER_4_EXPERIMENTAL > QualityTier.TIER_1_ANECDOTAL
++        assert QualityTier.UNCLASSIFIED < QualityTier.TIER_1_ANECDOTAL
++
++
++class TestBiasRisk:
++    def test_roundtrip(self):
++        br = BiasRisk(selection="low", performance="high", detection="unclear",
++                      attrition="low", reporting="high")
++        d = br.to_dict()
++        br2 = BiasRisk.from_dict(d)
++        assert br2.selection == "low"
++        assert br2.performance == "high"
++
++    def test_invalid_values_default_to_unclear(self):
++        br = BiasRisk.from_dict({"selection": "invalid", "performance": None})
++        assert br.selection == "unclear"
++        assert br.performance == "unclear"
++
++
++class TestQualityAssessment:
++    def test_unclassified(self):
++        a = QualityAssessment.unclassified()
++        assert a.quality_tier == QualityTier.UNCLASSIFIED
++        assert a.assessment_tier == 0
++
++    def test_from_metadata(self):
++        a = QualityAssessment.from_metadata(StudyDesign.RCT)
++        assert a.quality_tier == QualityTier.TIER_4_EXPERIMENTAL
++        assert a.assessment_tier == 1
++        assert a.confidence == 0.9
++
++    def test_from_classification(self):
++        a = QualityAssessment.from_classification(
++            StudyDesign.COHORT_PROSPECTIVE, confidence=0.75, sample_size=500,
++        )
++        assert a.quality_tier == QualityTier.TIER_3_CONTROLLED
++        assert a.assessment_tier == 2
++        assert a.sample_size == 500
++
++    def test_passes_filter_min_tier(self):
++        a = QualityAssessment.from_metadata(StudyDesign.CASE_REPORT)
++        f = QualityFilter(min_tier=QualityTier.TIER_3_CONTROLLED)
++        assert not a.passes_filter(f)
++
++        a2 = QualityAssessment.from_metadata(StudyDesign.RCT)
++        assert a2.passes_filter(f)
++
++    def test_passes_filter_defaults(self):
++        a = QualityAssessment.unclassified()
++        f = QualityFilter()
++        assert a.passes_filter(f)
++
++    def test_serialisation_roundtrip(self):
++        a = QualityAssessment(
++            assessment_tier=3,
++            extraction_method="llm_deep_assessment",
++            study_design=StudyDesign.RCT,
++            quality_tier=QualityTier.TIER_4_EXPERIMENTAL,
++            quality_score=8.0,
++            confidence=0.85,
++            bias_risk=BiasRisk(selection="low", performance="low",
++                               detection="unclear", attrition="low",
++                               reporting="low"),
++            strengths=["Large sample"],
++            limitations=["Single center"],
++        )
++        d = a.to_dict()
++        a2 = QualityAssessment.from_dict(d)
++        assert a2.study_design == StudyDesign.RCT
++        assert a2.quality_score == 8.0
++        assert a2.bias_risk.selection == "low"
++
++
++class TestMetadataFilter:
++    def test_rct_classification(self):
++        result = classify_from_metadata(["Randomized Controlled Trial"])
++        assert result.study_design == StudyDesign.RCT
++        assert result.quality_tier == QualityTier.TIER_4_EXPERIMENTAL
++
++    def test_systematic_review(self):
++        result = classify_from_metadata(["Systematic Review", "Meta-Analysis"])
++        assert result.study_design == StudyDesign.SYSTEMATIC_REVIEW
++
++    def test_empty_types(self):
++        result = classify_from_metadata([])
++        assert result.quality_tier == QualityTier.UNCLASSIFIED
++
++    def test_unknown_type(self):
++        result = classify_from_metadata(["Some Unknown Type"])
++        assert result.quality_tier == QualityTier.UNCLASSIFIED
++
++    def test_priority_resolution(self):
++        # RCT should take priority over editorial
++        result = classify_from_metadata(["Editorial", "Randomized Controlled Trial"])
++        assert result.study_design == StudyDesign.RCT
+diff --git a/tests/test_templates.py b/tests/test_templates.py
+new file mode 100644
+index 0000000..cf4d650
+--- /dev/null
++++ b/tests/test_templates.py
+@@ -0,0 +1,106 @@
++"""Tests for bmlib.templates."""
++
++from __future__ import annotations
++
++import tempfile
++from pathlib import Path
++
++import pytest
++from jinja2 import TemplateNotFound
++
++from bmlib.templates import TemplateEngine
++
++
++def test_render_from_default_dir(tmp_path):
++    default_dir = tmp_path / "defaults"
++    default_dir.mkdir()
++    (default_dir / "test.txt").write_text("Hello {{ name }}!")
++
++    engine = TemplateEngine(default_dir=default_dir)
++    assert engine.render("test.txt", name="World") == "Hello World!"
++
++
++def test_user_dir_overrides_default(tmp_path):
++    default_dir = tmp_path / "defaults"
++    default_dir.mkdir()
++    (default_dir / "test.txt").write_text("default: {{ x }}")
++
++    user_dir = tmp_path / "user"
++    user_dir.mkdir()
++    (user_dir / "test.txt").write_text("custom: {{ x }}")
++
++    engine = TemplateEngine(user_dir=user_dir, default_dir=default_dir)
++    assert engine.render("test.txt", x="val") == "custom: val"
++
++
++def test_fallback_to_default(tmp_path):
++    default_dir = tmp_path / "defaults"
++    default_dir.mkdir()
++    (default_dir / "only_default.txt").write_text("from default")
++
++    user_dir = tmp_path / "user"
++    user_dir.mkdir()
++
++    engine = TemplateEngine(user_dir=user_dir, default_dir=default_dir)
++    assert engine.render("only_default.txt") == "from default"
++
++
++def test_missing_template_raises(tmp_path):
++    engine = TemplateEngine(default_dir=tmp_path)
++    with pytest.raises(TemplateNotFound):
++        engine.render("nonexistent.txt")
++
++
++def test_has_template(tmp_path):
++    default_dir = tmp_path / "defaults"
++    default_dir.mkdir()
++    (default_dir / "exists.txt").write_text("yes")
++
++    engine = TemplateEngine(default_dir=default_dir)
++    assert engine.has_template("exists.txt")
++    assert not engine.has_template("nope.txt")
++
++
++def test_jinja_conditionals(tmp_path):
++    d = tmp_path / "d"
++    d.mkdir()
++    (d / "cond.txt").write_text(
++        "{% if include_methods %}Methods: {{ methods }}{% endif %}"
++    )
++
++    engine = TemplateEngine(default_dir=d)
++    assert engine.render("cond.txt", include_methods=True, methods="RCT") == "Methods: RCT"
++    assert engine.render("cond.txt", include_methods=False, methods="RCT") == ""
++
++
++def test_jinja_loops(tmp_path):
++    d = tmp_path / "d"
++    d.mkdir()
++    (d / "loop.txt").write_text(
++        "{% for item in items %}- {{ item }}\n{% endfor %}"
++    )
++
++    engine = TemplateEngine(default_dir=d)
++    result = engine.render("loop.txt", items=["a", "b", "c"])
++    assert "- a" in result
++    assert "- c" in result
++
++
++def test_install_defaults(tmp_path):
++    default_dir = tmp_path / "defaults"
++    default_dir.mkdir()
++    (default_dir / "a.txt").write_text("alpha")
++    (default_dir / "b.txt").write_text("beta")
++
++    user_dir = tmp_path / "user"
++    # User dir doesn't exist yet — install_defaults should create it
++    engine = TemplateEngine(user_dir=user_dir, default_dir=default_dir)
++    engine.install_defaults()
++
++    assert (user_dir / "a.txt").read_text() == "alpha"
++    assert (user_dir / "b.txt").read_text() == "beta"
++
++    # Existing files are not overwritten
++    (user_dir / "a.txt").write_text("modified")
++    engine.install_defaults()
++    assert (user_dir / "a.txt").read_text() == "modified"
+diff --git a/tests/test_transparency.py b/tests/test_transparency.py
+new file mode 100644
+index 0000000..a33c296
+--- /dev/null
++++ b/tests/test_transparency.py
+@@ -0,0 +1,80 @@
++"""Tests for bmlib.transparency models."""
++
++from __future__ import annotations
++
++from bmlib.transparency.models import (
++    TransparencyResult,
++    TransparencyRisk,
++    TransparencySettings,
++    calculate_risk_level,
++)
++
++
++class TestTransparencyRisk:
++    def test_high_risk_low_score(self):
++        settings = TransparencySettings(score_threshold=40)
++        risk = calculate_risk_level(
++            score=20, industry_funding=False, data_availability="full_open",
++            coi_disclosed=True, settings=settings,
++        )
++        assert risk == TransparencyRisk.HIGH
++
++    def test_high_risk_industry_restricted(self):
++        settings = TransparencySettings(industry_funding_triggers_downgrade=True)
++        risk = calculate_risk_level(
++            score=60, industry_funding=True, data_availability="restricted",
++            coi_disclosed=True, settings=settings,
++        )
++        assert risk == TransparencyRisk.HIGH
++
++    def test_high_risk_missing_coi(self):
++        settings = TransparencySettings(missing_coi_triggers_downgrade=True)
++        risk = calculate_risk_level(
++            score=80, industry_funding=False, data_availability="full_open",
++            coi_disclosed=False, settings=settings,
++        )
++        assert risk == TransparencyRisk.HIGH
++
++    def test_medium_risk_borderline(self):
++        settings = TransparencySettings()
++        risk = calculate_risk_level(
++            score=60, industry_funding=False, data_availability="full_open",
++            coi_disclosed=True, settings=settings,
++        )
++        assert risk == TransparencyRisk.MEDIUM
++
++    def test_medium_risk_industry(self):
++        settings = TransparencySettings()
++        risk = calculate_risk_level(
++            score=80, industry_funding=True, data_availability="full_open",
++            coi_disclosed=True, settings=settings,
++        )
++        assert risk == TransparencyRisk.MEDIUM
++
++    def test_low_risk(self):
++        settings = TransparencySettings()
++        risk = calculate_risk_level(
++            score=85, industry_funding=False, data_availability="full_open",
++            coi_disclosed=True, settings=settings,
++        )
++        assert risk == TransparencyRisk.LOW
++
++
++class TestTransparencyResult:
++    def test_roundtrip(self):
++        result = TransparencyResult(
++            document_id="doc1",
++            transparency_score=75,
++            risk_level=TransparencyRisk.LOW,
++            industry_funding_detected=False,
++            coi_disclosed=True,
++            trial_registered=True,
++            risk_indicators=["Minor concern"],
++        )
++        d = result.to_dict()
++        r2 = TransparencyResult.from_dict(d)
++        assert r2.document_id == "doc1"
++        assert r2.transparency_score == 75
++        assert r2.risk_level == TransparencyRisk.LOW
++        assert r2.trial_registered is True
++        assert len(r2.risk_indicators) == 1
