@@ -22,6 +22,7 @@ from bmnews.db.operations import (
     get_unscored_papers,
     save_score,
     get_papers_for_digest,
+    get_cached_digest_papers,
     record_digest,
 )
 from bmnews.fetchers import FetchedPaper, fetch_medrxiv, fetch_biorxiv, fetch_europepmc
@@ -202,8 +203,55 @@ def run_digest(config: AppConfig, output: str | None = None) -> str:
     return text_body
 
 
-def run_pipeline(config: AppConfig) -> None:
-    """Execute the full pipeline: fetch → store → score → digest."""
+def show_cached_digests(config: AppConfig, days: int | None = None) -> str:
+    """Re-render previously digested papers to stdout.
+
+    Args:
+        config: Application config.
+        days: If provided, filter to papers published in the last N days.
+
+    Returns:
+        Rendered text, or empty string if no cached papers.
+    """
+    conn = open_db(config)
+    init_db(conn)
+
+    papers = get_cached_digest_papers(conn, days=days)
+    conn.close()
+
+    if not papers:
+        logger.info("No cached digest papers found")
+        return ""
+
+    templates = build_template_engine(config)
+    text_body = render_digest(
+        papers, templates,
+        subject_prefix=config.email.subject_prefix,
+        fmt="text",
+    )
+    print(text_body)
+    return text_body
+
+
+def run_pipeline(
+    config: AppConfig,
+    days: int | None = None,
+    show_cached: bool = False,
+) -> None:
+    """Execute the full pipeline: fetch → store → score → digest.
+
+    Args:
+        config: Application config.
+        days: Override lookback_days for fetching.
+        show_cached: If True, skip pipeline and show cached digests.
+    """
+    if show_cached:
+        show_cached_digests(config, days=days)
+        return
+
+    if days is not None:
+        config.sources.lookback_days = days
+
     logger.info("Starting pipeline run")
 
     papers = run_fetch(config)
