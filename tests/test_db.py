@@ -12,6 +12,7 @@ from bmnews.db.operations import (
     save_score,
     get_scored_papers,
     get_papers_for_digest,
+    get_cached_digest_papers,
     record_digest,
     paper_exists,
 )
@@ -109,3 +110,54 @@ class TestDigests:
         available = get_papers_for_digest(conn, min_combined=0.5)
         assert len(available) == 1
         assert available[0]["doi"] == "10.1101/d2"
+
+
+class TestCachedDigestPapers:
+    def test_returns_papers_from_previous_digests(self):
+        conn = _db()
+        pid1 = upsert_paper(conn, doi="10.1101/c1", title="Cached 1",
+                            abstract="A1", published_date="2026-02-10")
+        pid2 = upsert_paper(conn, doi="10.1101/c2", title="Not in digest",
+                            abstract="A2", published_date="2026-02-10")
+        save_score(conn, paper_id=pid1, combined_score=0.8, summary="Sum1")
+        save_score(conn, paper_id=pid2, combined_score=0.7, summary="Sum2")
+        record_digest(conn, [pid1], delivery_method="stdout")
+
+        cached = get_cached_digest_papers(conn)
+        assert len(cached) == 1
+        assert cached[0]["doi"] == "10.1101/c1"
+        assert cached[0]["combined_score"] == 0.8
+
+    def test_filters_by_published_date(self):
+        conn = _db()
+        pid_old = upsert_paper(conn, doi="10.1101/old", title="Old Paper",
+                               abstract="A", published_date="2020-01-01")
+        pid_new = upsert_paper(conn, doi="10.1101/new", title="New Paper",
+                               abstract="B", published_date="2026-02-12")
+        save_score(conn, paper_id=pid_old, combined_score=0.8)
+        save_score(conn, paper_id=pid_new, combined_score=0.9)
+        record_digest(conn, [pid_old, pid_new], delivery_method="stdout")
+
+        cached = get_cached_digest_papers(conn, days=7)
+        assert len(cached) == 1
+        assert cached[0]["doi"] == "10.1101/new"
+
+    def test_no_days_returns_all_cached(self):
+        conn = _db()
+        pid_old = upsert_paper(conn, doi="10.1101/old2", title="Old",
+                               abstract="A", published_date="2020-01-01")
+        pid_new = upsert_paper(conn, doi="10.1101/new2", title="New",
+                               abstract="B", published_date="2026-02-12")
+        save_score(conn, paper_id=pid_old, combined_score=0.8)
+        save_score(conn, paper_id=pid_new, combined_score=0.9)
+        record_digest(conn, [pid_old, pid_new], delivery_method="stdout")
+
+        cached = get_cached_digest_papers(conn)
+        assert len(cached) == 2
+
+    def test_empty_when_no_digests(self):
+        conn = _db()
+        upsert_paper(conn, doi="10.1101/x", title="X", abstract="A",
+                     published_date="2026-02-10")
+        cached = get_cached_digest_papers(conn)
+        assert cached == []

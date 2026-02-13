@@ -215,6 +215,49 @@ def get_papers_for_digest(
     return [_row_to_dict(r) for r in rows]
 
 
+def get_cached_digest_papers(conn: Any, days: int | None = None) -> list[dict]:
+    """Get papers that were included in previous digests.
+
+    Args:
+        conn: DB-API connection.
+        days: If provided, only return papers with published_date
+              within the last N days.
+
+    Returns:
+        List of paper dicts with scoring data, same format as
+        get_papers_for_digest.
+    """
+    ph = _placeholder(conn)
+    is_sqlite = "sqlite3" in type(conn).__module__
+
+    if days is not None:
+        if is_sqlite:
+            date_filter = f"AND p.published_date >= date('now', '-' || {ph} || ' days')"
+        else:
+            date_filter = (
+                f"AND p.published_date >= (CURRENT_DATE - ({ph} || ' days')::interval)::text"
+            )
+        params: tuple = (days,)
+    else:
+        date_filter = ""
+        params = ()
+
+    rows = fetch_all(
+        conn,
+        f"""
+        SELECT DISTINCT p.*, s.relevance_score, s.quality_score, s.combined_score,
+               s.summary, s.study_design, s.quality_tier
+        FROM papers p
+        JOIN scores s ON s.paper_id = p.id
+        JOIN digest_papers dp ON dp.paper_id = p.id
+        WHERE 1=1 {date_filter}
+        ORDER BY s.combined_score DESC
+        """,
+        params,
+    )
+    return [_row_to_dict(r) for r in rows]
+
+
 # --- Digests ---
 
 
