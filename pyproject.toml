@@ -23,7 +23,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Medical Science Apps.",
 ]
 dependencies = [
-    "bmlib @ file:///home/user/bmlib",
+    "bmlib @ git+https://github.com/hherb/bmlib.git",
     "httpx>=0.25",
     "click>=8.0",
     "jinja2>=3.1",
