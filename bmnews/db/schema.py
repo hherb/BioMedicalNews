@@ -1,6 +1,8 @@
-"""Database schema definitions and initialization.
+"""Database schema initialization and migration.
 
-All SQL DDL lives here. Backend-aware: uses ``?`` for SQLite params.
+Delegates DDL to the versioned migration system in ``bmnews.db.migrations``.
+The ``init_db`` function is called on every connection open and is safe to
+call multiple times (idempotent).
 """
 
 from __future__ import annotations
@@ -8,121 +10,22 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from bmlib.db import connect_sqlite, connect_postgresql, create_tables, table_exists
+from bmlib.db import connect_sqlite, connect_postgresql, run_migrations
+
+from bmnews.db.migrations import MIGRATIONS
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_SQLITE = """\
-CREATE TABLE IF NOT EXISTS papers (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    doi TEXT UNIQUE NOT NULL,
-    title TEXT NOT NULL,
-    authors TEXT NOT NULL DEFAULT '',
-    abstract TEXT NOT NULL DEFAULT '',
-    url TEXT NOT NULL DEFAULT '',
-    source TEXT NOT NULL DEFAULT '',
-    published_date TEXT NOT NULL DEFAULT '',
-    categories TEXT NOT NULL DEFAULT '',
-    metadata_json TEXT NOT NULL DEFAULT '{}',
-    fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE INDEX IF NOT EXISTS idx_papers_doi ON papers (doi);
-CREATE INDEX IF NOT EXISTS idx_papers_published ON papers (published_date);
-CREATE INDEX IF NOT EXISTS idx_papers_source ON papers (source);
-
-CREATE TABLE IF NOT EXISTS scores (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    paper_id INTEGER NOT NULL REFERENCES papers(id),
-    relevance_score REAL NOT NULL DEFAULT 0.0,
-    quality_score REAL NOT NULL DEFAULT 0.0,
-    combined_score REAL NOT NULL DEFAULT 0.0,
-    summary TEXT NOT NULL DEFAULT '',
-    study_design TEXT NOT NULL DEFAULT '',
-    quality_tier TEXT NOT NULL DEFAULT '',
-    assessment_json TEXT NOT NULL DEFAULT '{}',
-    scored_at TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(paper_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_scores_combined ON scores (combined_score);
-
-CREATE TABLE IF NOT EXISTS digests (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    sent_at TEXT NOT NULL DEFAULT (datetime('now')),
-    paper_count INTEGER NOT NULL DEFAULT 0,
-    delivery_method TEXT NOT NULL DEFAULT 'stdout',
-    status TEXT NOT NULL DEFAULT 'sent'
-);
-
-CREATE TABLE IF NOT EXISTS digest_papers (
-    digest_id INTEGER NOT NULL REFERENCES digests(id),
-    paper_id INTEGER NOT NULL REFERENCES papers(id),
-    PRIMARY KEY (digest_id, paper_id)
-);
-"""
-
-SCHEMA_POSTGRESQL = """\
-CREATE TABLE IF NOT EXISTS papers (
-    id SERIAL PRIMARY KEY,
-    doi TEXT UNIQUE NOT NULL,
-    title TEXT NOT NULL,
-    authors TEXT NOT NULL DEFAULT '',
-    abstract TEXT NOT NULL DEFAULT '',
-    url TEXT NOT NULL DEFAULT '',
-    source TEXT NOT NULL DEFAULT '',
-    published_date TEXT NOT NULL DEFAULT '',
-    categories TEXT NOT NULL DEFAULT '',
-    metadata_json TEXT NOT NULL DEFAULT '{}',
-    fetched_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    created_at TIMESTAMP NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_papers_doi ON papers (doi);
-CREATE INDEX IF NOT EXISTS idx_papers_published ON papers (published_date);
-CREATE INDEX IF NOT EXISTS idx_papers_source ON papers (source);
-
-CREATE TABLE IF NOT EXISTS scores (
-    id SERIAL PRIMARY KEY,
-    paper_id INTEGER NOT NULL REFERENCES papers(id),
-    relevance_score REAL NOT NULL DEFAULT 0.0,
-    quality_score REAL NOT NULL DEFAULT 0.0,
-    combined_score REAL NOT NULL DEFAULT 0.0,
-    summary TEXT NOT NULL DEFAULT '',
-    study_design TEXT NOT NULL DEFAULT '',
-    quality_tier TEXT NOT NULL DEFAULT '',
-    assessment_json TEXT NOT NULL DEFAULT '{}',
-    scored_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    UNIQUE(paper_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_scores_combined ON scores (combined_score);
-
-CREATE TABLE IF NOT EXISTS digests (
-    id SERIAL PRIMARY KEY,
-    sent_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    paper_count INTEGER NOT NULL DEFAULT 0,
-    delivery_method TEXT NOT NULL DEFAULT 'stdout',
-    status TEXT NOT NULL DEFAULT 'sent'
-);
-
-CREATE TABLE IF NOT EXISTS digest_papers (
-    digest_id INTEGER NOT NULL REFERENCES digests(id),
-    paper_id INTEGER NOT NULL REFERENCES papers(id),
-    PRIMARY KEY (digest_id, paper_id)
-);
-"""
-
 
 def init_db(conn: Any) -> None:
-    """Create all tables if they don't already exist."""
-    module_name = type(conn).__module__
-    if "sqlite3" in module_name:
-        create_tables(conn, SCHEMA_SQLITE)
-    else:
-        create_tables(conn, SCHEMA_POSTGRESQL)
-    logger.info("Database schema initialized")
+    """Create or migrate the database schema.
+
+    Applies any pending migrations from ``MIGRATIONS``. Safe to call
+    repeatedly — already-applied migrations are skipped.
+    """
+    applied = run_migrations(conn, MIGRATIONS)
+    if applied:
+        logger.info("Database schema initialized (%d migration(s) applied)", applied)
 
 
 def open_db(config) -> Any:

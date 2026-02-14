@@ -5,6 +5,7 @@ You must respond with valid JSON only, no additional text. The JSON must contain
 - "summary": a concise 2-3 sentence summary of the paper's key findings and significance
 - "relevance_rationale": a brief explanation of why this paper is or is not relevant
 - "key_findings": a list of 1-3 key findings or contributions
+- "matched_tags": a list of short interest tags (2-5 words each) extracted from the researcher's interests description that this paper matches. Only include tags that genuinely apply to this paper. If none match, return an empty list.
 
 Scoring guidelines:
 - 0.0-0.2: Not relevant to the researcher's interests
@@ -12,5 +13,7 @@ Scoring guidelines:
 - 0.4-0.6: Moderately relevant, addresses related topics
 - 0.6-0.8: Highly relevant, directly addresses research interests
 - 0.8-1.0: Extremely relevant, core to the researcher's focus area
+
+For matched_tags, analyze the researcher's interest description and extract distinct topic tags (e.g., "emergency medicine", "AI diagnostics", "clinical trials"). Then determine which of those tags apply to this specific paper. A paper can match zero, one, or multiple tags.
 
 Be accurate and honest in your assessment. Do not inflate scores.

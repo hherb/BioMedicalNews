@@ -1,8 +1,7 @@
 Evaluate the following publication for relevance to the researcher's interests and provide a concise summary.
 
 ## Researcher's Interests
-{% for interest in interests %}- {{ interest }}
-{% endfor %}
+{{ interests }}
 
 ## Publication
 **Title:** {{ title }}
@@ -11,4 +10,4 @@ Evaluate the following publication for relevance to the researcher's interests a
 **Abstract:**
 {{ abstract }}
 
-Respond with a JSON object containing: relevance_score, summary, relevance_rationale, and key_findings.
+Respond with a JSON object containing: relevance_score, summary, relevance_rationale, key_findings, and matched_tags.

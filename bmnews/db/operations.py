@@ -383,6 +383,58 @@ def record_digest(
     return digest_id
 
 
+# --- Paper Tags ---
+
+
+def save_paper_tags(conn: Any, *, paper_id: int, tags: list[str]) -> None:
+    """Replace all tags for a paper with the given list."""
+    ph = _placeholder(conn)
+    with transaction(conn):
+        execute(conn, f"DELETE FROM paper_tags WHERE paper_id = {ph}", (paper_id,))
+        for tag in tags:
+            execute(
+                conn,
+                f"INSERT INTO paper_tags (paper_id, tag) VALUES ({ph}, {ph})",
+                (paper_id, tag),
+            )
+
+
+def get_paper_tags(conn: Any, paper_id: int) -> list[str]:
+    """Get all tags for a paper."""
+    ph = _placeholder(conn)
+    rows = fetch_all(
+        conn,
+        f"SELECT tag FROM paper_tags WHERE paper_id = {ph} ORDER BY tag",
+        (paper_id,),
+    )
+    return [r["tag"] if isinstance(r, dict) else r[0] for r in rows]
+
+
+def get_all_tags(conn: Any) -> list[str]:
+    """Get all distinct tags in the database."""
+    rows = fetch_all(conn, "SELECT DISTINCT tag FROM paper_tags ORDER BY tag")
+    return [r["tag"] if isinstance(r, dict) else r[0] for r in rows]
+
+
+def get_papers_by_tag(conn: Any, tag: str) -> list[dict]:
+    """Get all papers that have a specific tag, joined with scores."""
+    ph = _placeholder(conn)
+    rows = fetch_all(
+        conn,
+        f"""
+        SELECT p.*, s.relevance_score, s.quality_score, s.combined_score,
+               s.summary, s.study_design, s.quality_tier
+        FROM papers p
+        JOIN scores s ON s.paper_id = p.id
+        JOIN paper_tags pt ON pt.paper_id = p.id
+        WHERE pt.tag = {ph}
+        ORDER BY s.combined_score DESC
+        """,
+        (tag,),
+    )
+    return [_row_to_dict(r) for r in rows]
+
+
 # --- Helpers ---
 
 

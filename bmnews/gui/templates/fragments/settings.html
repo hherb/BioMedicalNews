@@ -51,9 +51,9 @@
                     <h2>User</h2>
                     <label>Name: <input type="text" name="user.name" value="{{ config.user.name }}"></label>
                     <label>Email: <input type="email" name="user.email" value="{{ config.user.email }}"></label>
-                    <label>Research interests (comma-separated):
-                        <input type="text" name="user.research_interests"
-                               value="{{ config.user.research_interests|join(', ') }}">
+                    <label class="interests-label">Research interests:
+                        <textarea name="user.research_interests" rows="4"
+                                  class="interests-textarea">{{ config.user.research_interests }}</textarea>
                     </label>
                 </section>
 

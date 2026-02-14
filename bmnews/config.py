@@ -74,7 +74,7 @@ class TransparencyConfig:
 class UserConfig:
     name: str = ""
     email: str = ""
-    research_interests: list[str] = field(default_factory=list)
+    research_interests: str = ""
 
 
 @dataclass
@@ -109,6 +109,9 @@ def _apply_section(dc: Any, data: dict) -> None:
     """Apply dict values onto a dataclass, ignoring unknown keys."""
     for key, value in data.items():
         if hasattr(dc, key):
+            # Backward compat: old configs have research_interests as a list
+            if key == "research_interests" and isinstance(value, list):
+                value = ", ".join(value)
             setattr(dc, key, value)
 
 
@@ -255,10 +258,7 @@ min_score_threshold = 0.6
 [user]
 name = "Your Name"
 email = "your@email.com"
-research_interests = [
-    "clinical trials",
-    "oncology",
-]
+research_interests = "I am interested in clinical trials and oncology research."
 
 [email]
 enabled = false

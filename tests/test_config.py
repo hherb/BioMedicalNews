@@ -59,7 +59,29 @@ research_interests = ["genomics", "CRISPR"]
         assert config.llm.provider == "anthropic"
         assert config.llm.concurrency == 4
         assert config.user.name == "Dr. Test"
-        assert config.user.research_interests == ["genomics", "CRISPR"]
+        assert config.user.research_interests == "genomics, CRISPR"
+
+
+    def test_load_string_interests(self, tmp_path):
+        cfg = tmp_path / "config.toml"
+        cfg.write_text("""\
+[user]
+research_interests = "I am interested in AI in medicine and emergency care."
+""")
+        config = load_config(cfg)
+        assert config.user.research_interests == "I am interested in AI in medicine and emergency care."
+
+    def test_load_legacy_list_interests(self, tmp_path):
+        """Old TOML files with list format should be migrated to string."""
+        cfg = tmp_path / "config.toml"
+        cfg.write_text("""\
+[user]
+research_interests = ["genomics", "CRISPR"]
+""")
+        config = load_config(cfg)
+        assert isinstance(config.user.research_interests, str)
+        assert "genomics" in config.user.research_interests
+        assert "CRISPR" in config.user.research_interests
 
 
 class TestWriteDefault:

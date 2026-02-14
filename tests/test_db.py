@@ -12,6 +12,10 @@ from bmnews.db.operations import (
     get_paper_with_score,
     get_papers_filtered,
     save_score,
+    save_paper_tags,
+    get_paper_tags,
+    get_all_tags,
+    get_papers_by_tag,
     get_scored_papers,
     get_papers_for_digest,
     get_cached_digest_papers,
@@ -34,6 +38,22 @@ class TestSchema:
         assert table_exists(conn, "scores")
         assert table_exists(conn, "digests")
         assert table_exists(conn, "digest_papers")
+        assert table_exists(conn, "paper_tags")
+        assert table_exists(conn, "schema_version")
+
+    def test_init_is_idempotent(self):
+        conn = _db()
+        init_db(conn)  # second call
+        from bmlib.db import table_exists
+        assert table_exists(conn, "papers")
+        assert table_exists(conn, "paper_tags")
+
+    def test_migrations_recorded(self):
+        conn = _db()
+        from bmlib.db.migrations import get_applied_versions
+        versions = get_applied_versions(conn)
+        assert 1 in versions
+        assert 2 in versions
 
 
 class TestPapers:
@@ -271,3 +291,62 @@ class TestCachedDigestPapers:
                      published_date="2026-02-10")
         cached = get_cached_digest_papers(conn)
         assert cached == []
+
+
+class TestPaperTags:
+    def test_save_and_retrieve_tags(self):
+        conn = _db()
+        pid = upsert_paper(conn, doi="10.1101/t1", title="Tagged Paper",
+                           abstract="A")
+        save_paper_tags(conn, paper_id=pid, tags=["AI", "oncology", "clinical trials"])
+        tags = get_paper_tags(conn, pid)
+        assert set(tags) == {"AI", "oncology", "clinical trials"}
+
+    def test_replace_tags(self):
+        conn = _db()
+        pid = upsert_paper(conn, doi="10.1101/t2", title="Re-tagged",
+                           abstract="B")
+        save_paper_tags(conn, paper_id=pid, tags=["old_tag"])
+        save_paper_tags(conn, paper_id=pid, tags=["new_tag1", "new_tag2"])
+        tags = get_paper_tags(conn, pid)
+        assert "old_tag" not in tags
+        assert set(tags) == {"new_tag1", "new_tag2"}
+
+    def test_get_all_tags(self):
+        conn = _db()
+        p1 = upsert_paper(conn, doi="10.1101/ta1", title="P1", abstract="A")
+        p2 = upsert_paper(conn, doi="10.1101/ta2", title="P2", abstract="B")
+        save_paper_tags(conn, paper_id=p1, tags=["AI", "genomics"])
+        save_paper_tags(conn, paper_id=p2, tags=["AI", "oncology"])
+        all_tags = get_all_tags(conn)
+        assert set(all_tags) == {"AI", "genomics", "oncology"}
+
+    def test_get_papers_by_tag(self):
+        conn = _db()
+        p1 = upsert_paper(conn, doi="10.1101/tb1", title="P1", abstract="A")
+        p2 = upsert_paper(conn, doi="10.1101/tb2", title="P2", abstract="B")
+        save_score(conn, paper_id=p1, combined_score=0.8)
+        save_score(conn, paper_id=p2, combined_score=0.7)
+        save_paper_tags(conn, paper_id=p1, tags=["AI", "genomics"])
+        save_paper_tags(conn, paper_id=p2, tags=["AI", "oncology"])
+        papers = get_papers_by_tag(conn, "AI")
+        assert len(papers) == 2
+        papers = get_papers_by_tag(conn, "genomics")
+        assert len(papers) == 1
+        assert papers[0]["doi"] == "10.1101/tb1"
+
+    def test_empty_tags(self):
+        conn = _db()
+        pid = upsert_paper(conn, doi="10.1101/t_empty", title="No Tags",
+                           abstract="C")
+        tags = get_paper_tags(conn, pid)
+        assert tags == []
+
+    def test_save_empty_tags_clears(self):
+        conn = _db()
+        pid = upsert_paper(conn, doi="10.1101/t_clear", title="Clear Tags",
+                           abstract="D")
+        save_paper_tags(conn, paper_id=pid, tags=["tag1", "tag2"])
+        save_paper_tags(conn, paper_id=pid, tags=[])
+        tags = get_paper_tags(conn, pid)
+        assert tags == []

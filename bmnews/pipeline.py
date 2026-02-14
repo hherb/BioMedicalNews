@@ -21,6 +21,7 @@ from bmnews.db.operations import (
     upsert_paper,
     get_unscored_papers,
     save_score,
+    save_paper_tags,
     get_papers_for_digest,
     get_cached_digest_papers,
     record_digest,
@@ -128,7 +129,10 @@ def run_score(config: AppConfig) -> int:
     )
 
     for result in results:
+        tags = result.pop("matched_tags", [])
         save_score(conn, **result)
+        if tags:
+            save_paper_tags(conn, paper_id=result["paper_id"], tags=tags)
 
     conn.close()
     logger.info("Scored %d papers", len(results))

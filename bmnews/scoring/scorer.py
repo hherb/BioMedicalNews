@@ -26,7 +26,7 @@ def score_papers(
     llm: LLMClient,
     model: str,
     template_engine: TemplateEngine,
-    interests: list[str],
+    interests: str,
     concurrency: int = 1,
     quality_tier: int = 2,
 ) -> list[dict]:
@@ -37,14 +37,14 @@ def score_papers(
         llm: LLM client instance.
         model: Model string (e.g. "ollama:medgemma4B_it_q8").
         template_engine: Template engine for prompt rendering.
-        interests: User research interests.
+        interests: Free-text description of user research interests.
         concurrency: Number of concurrent scoring tasks.
         quality_tier: Max quality assessment tier (1=metadata, 2=classifier, 3=deep).
 
     Returns:
         List of dicts with scoring results, each containing:
             paper_id, relevance_score, quality_score, combined_score,
-            summary, study_design, quality_tier, assessment_json
+            summary, study_design, quality_tier, matched_tags, assessment_json
     """
     agent = RelevanceAgent(llm=llm, model=model, template_engine=template_engine)
     results = []
@@ -73,7 +73,7 @@ def score_papers(
 def _score_single(
     paper: dict,
     agent: RelevanceAgent,
-    interests: list[str],
+    interests: str,
     quality_tier: int,
 ) -> dict:
     """Score a single paper: relevance (LLM) + quality (metadata/LLM)."""
@@ -109,6 +109,7 @@ def _score_single(
         "summary": summary,
         "study_design": study_design,
         "quality_tier": quality_tier_name,
+        "matched_tags": relevance_result.get("matched_tags", []),
         "assessment_json": json.dumps({
             "relevance": relevance_result,
             "quality": quality_assessment.to_dict(),

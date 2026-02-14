@@ -22,7 +22,7 @@ class RelevanceAgent(BaseAgent):
         self,
         title: str,
         abstract: str,
-        interests: list[str],
+        interests: str,
         categories: str = "",
     ) -> dict[str, Any]:
         """Score a paper for relevance and generate a summary.
@@ -32,6 +32,7 @@ class RelevanceAgent(BaseAgent):
             - summary (str, 2–3 sentence summary)
             - relevance_rationale (str, brief explanation)
             - key_findings (list[str])
+            - matched_tags (list[str])
         """
         prompt = self.render_template(
             "relevance_scoring.txt",
@@ -57,6 +58,7 @@ class RelevanceAgent(BaseAgent):
                 "summary": "",
                 "relevance_rationale": "Parse error",
                 "key_findings": [],
+                "matched_tags": [],
             }
 
         # Clamp score
