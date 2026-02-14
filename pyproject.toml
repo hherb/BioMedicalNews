@@ -34,8 +34,9 @@ anthropic = ["bmlib[anthropic]"]
 ollama = ["bmlib[ollama]"]
 postgresql = ["bmlib[postgresql]"]
 transparency = ["bmlib[transparency]"]
+gui = ["pywebview>=5.0", "flask>=3.0"]
 dev = ["pytest>=7.0", "pytest-cov", "ruff"]
-all = ["bmnews[anthropic,ollama,postgresql,transparency,dev]"]
+all = ["bmnews[anthropic,ollama,postgresql,transparency,gui,dev]"]
 
 [project.scripts]
 bmnews = "bmnews.cli:main"
