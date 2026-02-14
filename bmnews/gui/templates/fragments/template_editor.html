@@ -1,0 +1,21 @@
+<div class="template-editor">
+    <select onchange="if(this.value) htmx.ajax('GET', '/settings/template/' + this.value, {target:'#template-area', swap:'innerHTML'})">
+        <option value="">Select a template...</option>
+        {% for name in template_names %}
+        <option value="{{ name }}" {% if name == current %}selected{% endif %}>{{ name }}</option>
+        {% endfor %}
+    </select>
+
+    {% if current %}
+    <form hx-post="/settings/template/{{ current }}" hx-target="#template-flash" hx-swap="innerHTML">
+        <textarea name="content" class="template-textarea" rows="20">{{ content }}</textarea>
+        <div class="template-actions">
+            <button type="submit" class="btn btn-primary">Save Template</button>
+            <button type="button" class="btn btn-secondary"
+                    hx-post="/settings/template/{{ current }}/reset"
+                    hx-target="#template-area" hx-swap="innerHTML">Reset to Default</button>
+        </div>
+        <div id="template-flash"></div>
+    </form>
+    {% endif %}
+</div>

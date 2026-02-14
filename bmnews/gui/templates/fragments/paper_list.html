@@ -1,0 +1,28 @@
+{% for paper in papers %}
+    {% include "fragments/paper_card.html" %}
+{% endfor %}
+
+{% if papers|length == 0 %}
+    <div class="empty-state">
+        <p>No papers found.</p>
+    </div>
+{% endif %}
+
+{% if papers|length >= limit and not append %}
+    <button class="load-more"
+            hx-get="/papers/more?offset={{ offset + limit }}&sort={{ sort }}&source={{ source }}&tier={{ tier }}&design={{ design }}"
+            hx-target="this"
+            hx-swap="outerHTML">
+        Load more
+    </button>
+{% endif %}
+
+{% if total is not none %}
+<div id="paper-count" hx-swap-oob="innerHTML:#status-bar">
+    Showing {{ papers|length }}{% if total > papers|length %} of {{ total }}{% endif %} papers · Sorted by {{ sort }}
+    <button class="pipeline-btn"
+            hx-post="/pipeline/run" hx-target="#status-bar" hx-swap="innerHTML">
+        Fetch &amp; Score
+    </button>
+</div>
+{% endif %}

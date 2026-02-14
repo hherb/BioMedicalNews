@@ -170,6 +170,48 @@ def write_default_config(path: str | Path | None = None) -> Path:
     return path
 
 
+def save_config(config: AppConfig, path: str | Path | None = None) -> Path:
+    """Write current config values back to TOML file."""
+    if path is None:
+        path = DEFAULT_CONFIG_PATH
+    path = Path(path).expanduser()
+
+    lines = []
+    lines.append("[general]")
+    lines.append(f'log_level = "{config.log_level}"')
+    if config.template_dir:
+        lines.append(f'template_dir = "{config.template_dir}"')
+    lines.append("")
+
+    def _write_section(name: str, dc) -> None:
+        lines.append(f"[{name}]")
+        for field_name in dc.__dataclass_fields__:
+            value = getattr(dc, field_name)
+            if isinstance(value, bool):
+                lines.append(f"{field_name} = {'true' if value else 'false'}")
+            elif isinstance(value, (int, float)):
+                lines.append(f"{field_name} = {value}")
+            elif isinstance(value, list):
+                items = ", ".join(f'"{v}"' for v in value)
+                lines.append(f"{field_name} = [{items}]")
+            elif isinstance(value, str):
+                lines.append(f'{field_name} = "{value}"')
+        lines.append("")
+
+    _write_section("database", config.database)
+    _write_section("sources", config.sources)
+    _write_section("llm", config.llm)
+    _write_section("scoring", config.scoring)
+    _write_section("quality", config.quality)
+    _write_section("transparency", config.transparency)
+    _write_section("user", config.user)
+    _write_section("email", config.email)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
 DEFAULT_CONFIG_TOML = """\
 [general]
 log_level = "INFO"

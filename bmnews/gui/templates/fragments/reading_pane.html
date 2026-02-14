@@ -1,0 +1,41 @@
+<article class="paper-detail">
+    <h1 class="paper-title">{{ paper.title }}</h1>
+
+    <div class="paper-meta">
+        <span class="authors">{{ paper.authors }}</span>
+        <span class="sep">·</span>
+        <span class="date">{{ paper.published_date }}</span>
+        <span class="sep">·</span>
+        <span class="source-badge source-{{ paper.source }}">{{ paper.source }}</span>
+    </div>
+
+    <div class="score-section">
+        <span class="score-badge {% if paper.relevance_score >= 0.7 %}score-high{% elif paper.relevance_score >= 0.5 %}score-mid{% else %}score-low{% endif %}">
+            Relevance: {{ (paper.relevance_score * 100)|int }}%
+        </span>
+        <span class="tier-badge">{{ paper.quality_tier|replace("_", " ") }}</span>
+        {% if paper.study_design %}
+        <span class="design-badge">{{ paper.study_design|upper }}</span>
+        {% endif %}
+    </div>
+
+    {% if paper.summary %}
+    <section class="summary-section">
+        <h2>Summary</h2>
+        <p>{{ paper.summary }}</p>
+    </section>
+    {% endif %}
+
+    <section class="abstract-section">
+        <h2>Abstract</h2>
+        <p>{{ paper.abstract }}</p>
+    </section>
+
+    <div class="paper-actions">
+        {% if paper.url %}
+        <a href="{{ paper.url }}" target="_blank" class="btn btn-primary">Open DOI ↗</a>
+        {% elif paper.doi %}
+        <a href="https://doi.org/{{ paper.doi }}" target="_blank" class="btn btn-primary">Open DOI ↗</a>
+        {% endif %}
+    </div>
+</article>
