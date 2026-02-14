@@ -1,78 +1,88 @@
-<div class="settings-page">
-    <h1>Settings</h1>
+<div class="split-container settings-split">
+    <div class="settings-pane">
+        <div class="settings-page">
+            <h1>Settings</h1>
 
-    <form hx-post="/settings/save" hx-target="#settings-flash" hx-swap="innerHTML">
-        <section class="settings-section">
-            <h2>Sources</h2>
-            <label><input type="checkbox" name="sources.medrxiv" value="true"
-                   {% if config.sources.medrxiv %}checked{% endif %}> medRxiv</label>
-            <label><input type="checkbox" name="sources.biorxiv" value="true"
-                   {% if config.sources.biorxiv %}checked{% endif %}> bioRxiv</label>
-            <label><input type="checkbox" name="sources.europepmc" value="true"
-                   {% if config.sources.europepmc %}checked{% endif %}> Europe PMC</label>
-            <label>Lookback days:
-                <input type="number" name="sources.lookback_days" value="{{ config.sources.lookback_days }}" min="1" max="90">
-            </label>
-        </section>
+            <form hx-post="/settings/save" hx-target="#settings-flash" hx-swap="innerHTML">
+                <section class="settings-section">
+                    <h2>Sources</h2>
+                    <label><input type="checkbox" name="sources.medrxiv" value="true"
+                           {% if config.sources.medrxiv %}checked{% endif %}> medRxiv</label>
+                    <label><input type="checkbox" name="sources.biorxiv" value="true"
+                           {% if config.sources.biorxiv %}checked{% endif %}> bioRxiv</label>
+                    <label><input type="checkbox" name="sources.europepmc" value="true"
+                           {% if config.sources.europepmc %}checked{% endif %}> Europe PMC</label>
+                    <label>Lookback days:
+                        <input type="number" name="sources.lookback_days" value="{{ config.sources.lookback_days }}" min="1" max="90">
+                    </label>
+                </section>
 
-        <section class="settings-section">
-            <h2>Scoring</h2>
-            <label>Min relevance:
-                <input type="range" name="scoring.min_relevance" min="0" max="1" step="0.05"
-                       value="{{ config.scoring.min_relevance }}"
-                       oninput="this.nextElementSibling.textContent = this.value">
-                <span>{{ config.scoring.min_relevance }}</span>
-            </label>
-            <label>Min combined:
-                <input type="range" name="scoring.min_combined" min="0" max="1" step="0.05"
-                       value="{{ config.scoring.min_combined }}"
-                       oninput="this.nextElementSibling.textContent = this.value">
-                <span>{{ config.scoring.min_combined }}</span>
-            </label>
-        </section>
+                <section class="settings-section">
+                    <h2>Scoring</h2>
+                    <label>Min relevance:
+                        <input type="range" name="scoring.min_relevance" min="0" max="1" step="0.05"
+                               value="{{ config.scoring.min_relevance }}"
+                               oninput="this.nextElementSibling.textContent = this.value">
+                        <span>{{ config.scoring.min_relevance }}</span>
+                    </label>
+                    <label>Min combined:
+                        <input type="range" name="scoring.min_combined" min="0" max="1" step="0.05"
+                               value="{{ config.scoring.min_combined }}"
+                               oninput="this.nextElementSibling.textContent = this.value">
+                        <span>{{ config.scoring.min_combined }}</span>
+                    </label>
+                </section>
 
-        <section class="settings-section">
-            <h2>LLM</h2>
-            <label>Provider:
-                <select name="llm.provider">
-                    <option value="ollama" {% if config.llm.provider == "ollama" %}selected{% endif %}>Ollama</option>
-                    <option value="anthropic" {% if config.llm.provider == "anthropic" %}selected{% endif %}>Anthropic</option>
-                </select>
-            </label>
-            <label>Model: <input type="text" name="llm.model" value="{{ config.llm.model }}"></label>
-            <label>Concurrency:
-                <input type="number" name="llm.concurrency" value="{{ config.llm.concurrency }}" min="1" max="10">
-            </label>
-        </section>
+                <section class="settings-section">
+                    <h2>LLM</h2>
+                    <label>Provider:
+                        <select name="llm.provider">
+                            <option value="ollama" {% if config.llm.provider == "ollama" %}selected{% endif %}>Ollama</option>
+                            <option value="anthropic" {% if config.llm.provider == "anthropic" %}selected{% endif %}>Anthropic</option>
+                        </select>
+                    </label>
+                    <label>Model: <input type="text" name="llm.model" value="{{ config.llm.model }}"></label>
+                    <label>Concurrency:
+                        <input type="number" name="llm.concurrency" value="{{ config.llm.concurrency }}" min="1" max="10">
+                    </label>
+                </section>
 
-        <section class="settings-section">
-            <h2>User</h2>
-            <label>Name: <input type="text" name="user.name" value="{{ config.user.name }}"></label>
-            <label>Email: <input type="email" name="user.email" value="{{ config.user.email }}"></label>
-            <label>Research interests (comma-separated):
-                <input type="text" name="user.research_interests"
-                       value="{{ config.user.research_interests|join(', ') }}">
-            </label>
-        </section>
+                <section class="settings-section">
+                    <h2>User</h2>
+                    <label>Name: <input type="text" name="user.name" value="{{ config.user.name }}"></label>
+                    <label>Email: <input type="email" name="user.email" value="{{ config.user.email }}"></label>
+                    <label>Research interests (comma-separated):
+                        <input type="text" name="user.research_interests"
+                               value="{{ config.user.research_interests|join(', ') }}">
+                    </label>
+                </section>
 
-        <section class="settings-section">
-            <h2>Email Delivery</h2>
-            <label><input type="checkbox" name="email.enabled" value="true"
-                   {% if config.email.enabled %}checked{% endif %}> Enable email</label>
-            <label>SMTP host: <input type="text" name="email.smtp_host" value="{{ config.email.smtp_host }}"></label>
-            <label>SMTP port: <input type="number" name="email.smtp_port" value="{{ config.email.smtp_port }}"></label>
-            <label>Subject prefix: <input type="text" name="email.subject_prefix" value="{{ config.email.subject_prefix }}"></label>
-            <label>Max papers: <input type="number" name="email.max_papers" value="{{ config.email.max_papers }}"></label>
-        </section>
+                <section class="settings-section">
+                    <h2>Email Delivery</h2>
+                    <label><input type="checkbox" name="email.enabled" value="true"
+                           {% if config.email.enabled %}checked{% endif %}> Enable email</label>
+                    <label>SMTP host: <input type="text" name="email.smtp_host" value="{{ config.email.smtp_host }}"></label>
+                    <label>SMTP port: <input type="number" name="email.smtp_port" value="{{ config.email.smtp_port }}"></label>
+                    <label>Subject prefix: <input type="text" name="email.subject_prefix" value="{{ config.email.subject_prefix }}"></label>
+                    <label>Max papers: <input type="number" name="email.max_papers" value="{{ config.email.max_papers }}"></label>
+                </section>
 
-        <div class="settings-actions">
-            <button type="submit" class="btn btn-primary">Save Settings</button>
+                <div class="settings-actions">
+                    <button type="submit" class="btn btn-primary">Save Settings</button>
+                </div>
+                <div id="settings-flash"></div>
+            </form>
         </div>
-        <div id="settings-flash"></div>
-    </form>
+    </div>
 
-    <section class="settings-section">
-        <h2>Templates</h2>
-        <div hx-get="/settings/templates" hx-trigger="load" hx-swap="innerHTML" id="template-area"></div>
-    </section>
+    <div class="gutter settings-gutter" id="settings-gutter"></div>
+
+    <div class="template-pane">
+        <div class="template-pane-inner">
+            <h2>Templates</h2>
+            <div id="template-area">
+                {% include "fragments/template_editor.html" %}
+            </div>
+        </div>
+    </div>
 </div>

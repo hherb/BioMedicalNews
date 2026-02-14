@@ -15,7 +15,9 @@ settings_bp = Blueprint("settings", __name__)
 @settings_bp.route("/settings")
 def settings_page():
     config: AppConfig = current_app.config["BMNEWS_CONFIG"]
-    return render_template("fragments/settings.html", config=config)
+    templates = sorted(TEMPLATES_DIR.glob("*.*"))
+    template_names = [t.name for t in templates]
+    return render_template("fragments/settings.html", config=config, template_names=template_names)
 
 
 @settings_bp.route("/settings/save", methods=["POST"])
