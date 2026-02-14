@@ -162,3 +162,29 @@ class TestEndToEnd:
         assert resp.status_code == 200
         config = seeded_client.application.config["BMNEWS_CONFIG"]
         assert config.sources.lookback_days == 30
+
+
+class TestLauncher:
+    def test_find_free_port(self):
+        from bmnews.gui.launcher import _find_free_port
+        port = _find_free_port()
+        assert 1024 < port < 65536
+
+    def test_build_app(self, tmp_path):
+        from bmnews.gui.launcher import _build_app
+        config = AppConfig()
+        config.database.sqlite_path = str(tmp_path / "test.db")
+        app, conn = _build_app(config)
+        assert app is not None
+        assert conn is not None
+        conn.close()
+
+
+class TestGuiCLI:
+    def test_gui_command_exists(self):
+        from click.testing import CliRunner
+        from bmnews.cli import main
+        runner = CliRunner()
+        result = runner.invoke(main, ["gui", "--help"])
+        assert result.exit_code == 0
+        assert "Launch" in result.output or "GUI" in result.output

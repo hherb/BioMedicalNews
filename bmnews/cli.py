@@ -102,6 +102,20 @@ def init(ctx: click.Context, config_path: str | None) -> None:
 
 
 @main.command()
+@click.option("--port", default=None, type=int, help="Fixed port for Flask server (default: auto).")
+@click.pass_context
+def gui(ctx: click.Context, port: int | None) -> None:
+    """Launch the desktop GUI."""
+    try:
+        from bmnews.gui.launcher import launch
+    except ImportError:
+        click.echo("GUI dependencies not installed. Run: uv pip install bmnews[gui]")
+        sys.exit(1)
+
+    launch(ctx.obj["config"], port=port)
+
+
+@main.command()
 @click.argument("query")
 @click.pass_context
 def search(ctx: click.Context, query: str) -> None:
