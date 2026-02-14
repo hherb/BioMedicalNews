@@ -10,6 +10,7 @@ from bmnews.db.operations import (
     get_paper_by_doi,
     get_unscored_papers,
     get_paper_with_score,
+    get_papers_filtered,
     save_score,
     get_scored_papers,
     get_papers_for_digest,
@@ -146,6 +147,79 @@ class TestPaperWithScore:
             abstract="No score here.",
         )
         assert get_paper_with_score(conn, pid) is None
+
+
+class TestPapersFiltered:
+    def _seed(self, conn):
+        p1 = upsert_paper(conn, doi="10.1101/f1", title="Alpha Paper",
+                          authors="Smith", abstract="Cancer immunotherapy trial",
+                          source="medrxiv", published_date="2026-02-10")
+        save_score(conn, paper_id=p1, relevance_score=0.9, quality_score=0.8,
+                   combined_score=0.86, study_design="rct",
+                   quality_tier="TIER_4_EXPERIMENTAL", summary="Sum1")
+
+        p2 = upsert_paper(conn, doi="10.1101/f2", title="Beta Paper",
+                          authors="Jones", abstract="Genomics cohort study",
+                          source="biorxiv", published_date="2026-02-12")
+        save_score(conn, paper_id=p2, relevance_score=0.7, quality_score=0.6,
+                   combined_score=0.66, study_design="cohort",
+                   quality_tier="TIER_3_CONTROLLED", summary="Sum2")
+
+        p3 = upsert_paper(conn, doi="10.1101/f3", title="Gamma Paper",
+                          authors="Lee", abstract="Case report on rare disease",
+                          source="europepmc", published_date="2026-02-14")
+        save_score(conn, paper_id=p3, relevance_score=0.5, quality_score=0.3,
+                   combined_score=0.42, study_design="case_report",
+                   quality_tier="TIER_1_ANECDOTAL", summary="Sum3")
+        return p1, p2, p3
+
+    def test_default_returns_all_sorted_by_combined(self):
+        conn = _db()
+        self._seed(conn)
+        results = get_papers_filtered(conn)
+        assert len(results) == 3
+        assert results[0]["doi"] == "10.1101/f1"
+
+    def test_sort_by_date(self):
+        conn = _db()
+        self._seed(conn)
+        results = get_papers_filtered(conn, sort="date")
+        assert results[0]["doi"] == "10.1101/f3"
+
+    def test_filter_by_source(self):
+        conn = _db()
+        self._seed(conn)
+        results = get_papers_filtered(conn, source="medrxiv")
+        assert len(results) == 1
+        assert results[0]["doi"] == "10.1101/f1"
+
+    def test_filter_by_quality_tier(self):
+        conn = _db()
+        self._seed(conn)
+        results = get_papers_filtered(conn, quality_tier="TIER_4_EXPERIMENTAL")
+        assert len(results) == 1
+
+    def test_search_query(self):
+        conn = _db()
+        self._seed(conn)
+        results = get_papers_filtered(conn, search="immunotherapy")
+        assert len(results) == 1
+        assert results[0]["doi"] == "10.1101/f1"
+
+    def test_pagination(self):
+        conn = _db()
+        self._seed(conn)
+        page1 = get_papers_filtered(conn, limit=2, offset=0)
+        page2 = get_papers_filtered(conn, limit=2, offset=2)
+        assert len(page1) == 2
+        assert len(page2) == 1
+
+    def test_returns_total_count(self):
+        conn = _db()
+        self._seed(conn)
+        results, total = get_papers_filtered(conn, limit=2, offset=0, with_total=True)
+        assert len(results) == 2
+        assert total == 3
 
 
 class TestCachedDigestPapers:

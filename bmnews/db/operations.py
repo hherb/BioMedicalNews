@@ -232,6 +232,78 @@ def get_papers_for_digest(
     return [_row_to_dict(r) for r in rows]
 
 
+def get_papers_filtered(
+    conn: Any,
+    *,
+    sort: str = "combined",
+    source: str = "",
+    quality_tier: str = "",
+    study_design: str = "",
+    search: str = "",
+    limit: int = 20,
+    offset: int = 0,
+    with_total: bool = False,
+) -> list[dict] | tuple[list[dict], int]:
+    """Flexible paper query with sorting, filtering, search, and pagination."""
+    ph = _placeholder(conn)
+    params: list = []
+    conditions: list[str] = []
+
+    if source:
+        conditions.append(f"p.source = {ph}")
+        params.append(source)
+    if quality_tier:
+        conditions.append(f"s.quality_tier = {ph}")
+        params.append(quality_tier)
+    if study_design:
+        conditions.append(f"s.study_design = {ph}")
+        params.append(study_design)
+    if search:
+        conditions.append(f"(p.title LIKE {ph} OR p.abstract LIKE {ph})")
+        params.extend([f"%{search}%", f"%{search}%"])
+
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+
+    sort_map = {
+        "combined": "s.combined_score DESC",
+        "relevance": "s.relevance_score DESC",
+        "quality": "s.quality_score DESC",
+        "date": "p.published_date DESC",
+    }
+    order_by = sort_map.get(sort, "s.combined_score DESC")
+
+    base_query = f"""
+        FROM papers p
+        JOIN scores s ON s.paper_id = p.id
+        {where}
+    """
+
+    total = 0
+    if with_total:
+        total = fetch_scalar(
+            conn,
+            f"SELECT COUNT(*) {base_query}",
+            tuple(params),
+        ) or 0
+
+    rows = fetch_all(
+        conn,
+        f"""
+        SELECT p.*, s.relevance_score, s.quality_score, s.combined_score,
+               s.summary, s.study_design, s.quality_tier
+        {base_query}
+        ORDER BY {order_by}
+        LIMIT {ph} OFFSET {ph}
+        """,
+        tuple(params + [limit, offset]),
+    )
+
+    results = [_row_to_dict(r) for r in rows]
+    if with_total:
+        return results, total
+    return results
+
+
 def get_cached_digest_papers(conn: Any, days: int | None = None) -> list[dict]:
     """Get papers that were included in previous digests.
 
