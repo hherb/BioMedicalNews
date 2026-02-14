@@ -93,6 +93,23 @@ def get_paper_by_doi(conn: Any, doi: str) -> dict | None:
     return _row_to_dict(row) if row else None
 
 
+def get_paper_with_score(conn: Any, paper_id: int) -> dict | None:
+    """Fetch a single paper with its score data joined. Returns dict or None."""
+    ph = _placeholder(conn)
+    row = fetch_one(
+        conn,
+        f"""
+        SELECT p.*, s.relevance_score, s.quality_score, s.combined_score,
+               s.summary, s.study_design, s.quality_tier, s.assessment_json
+        FROM papers p
+        JOIN scores s ON s.paper_id = p.id
+        WHERE p.id = {ph}
+        """,
+        (paper_id,),
+    )
+    return _row_to_dict(row) if row else None
+
+
 def get_unscored_papers(conn: Any, limit: int = 100) -> list[dict]:
     """Get papers that haven't been scored yet."""
     ph = _placeholder(conn)

@@ -9,6 +9,7 @@ from bmnews.db.operations import (
     upsert_paper,
     get_paper_by_doi,
     get_unscored_papers,
+    get_paper_with_score,
     save_score,
     get_scored_papers,
     get_papers_for_digest,
@@ -110,6 +111,41 @@ class TestDigests:
         available = get_papers_for_digest(conn, min_combined=0.5)
         assert len(available) == 1
         assert available[0]["doi"] == "10.1101/d2"
+
+
+
+class TestPaperWithScore:
+    def test_returns_paper_and_score_data(self):
+        conn = _db()
+        pid = upsert_paper(
+            conn, doi="10.1101/pws1", title="PaperWithScore Test",
+            authors="Doe J", abstract="Some abstract.",
+            source="medrxiv", published_date="2025-06-01",
+        )
+        save_score(
+            conn, paper_id=pid, relevance_score=0.85,
+            quality_score=0.70, combined_score=0.78,
+            summary="An excellent study.", study_design="RCT",
+            quality_tier="high",
+        )
+        result = get_paper_with_score(conn, pid)
+        assert result is not None
+        assert result["title"] == "PaperWithScore Test"
+        assert result["relevance_score"] == 0.85
+        assert result["summary"] == "An excellent study."
+        assert result["study_design"] == "RCT"
+
+    def test_returns_none_for_missing_id(self):
+        conn = _db()
+        assert get_paper_with_score(conn, 9999) is None
+
+    def test_returns_none_for_unscored_paper(self):
+        conn = _db()
+        pid = upsert_paper(
+            conn, doi="10.1101/pws_unscored", title="Unscored Paper",
+            abstract="No score here.",
+        )
+        assert get_paper_with_score(conn, pid) is None
 
 
 class TestCachedDigestPapers:
