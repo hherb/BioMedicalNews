@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 
-from flask import Blueprint, current_app, make_response, render_template
+from flask import Blueprint, current_app, render_template
 
 from bmnews.config import AppConfig
 
@@ -80,12 +80,8 @@ def status():
     refresh = _pipeline_status["refresh_list"]
     if refresh:
         _pipeline_status["refresh_list"] = False
-    resp = make_response(render_template(
-        "fragments/status_bar.html",
-        message=_pipeline_status["message"],
-        status=_pipeline_status["status"],
-        running=_pipeline_status["running"],
-    ))
-    if refresh:
-        resp.headers["HX-Trigger"] = "refreshPapers"
-    return resp
+    return render_template("fragments/status_bar.html",
+                           message=_pipeline_status["message"],
+                           status=_pipeline_status["status"],
+                           running=_pipeline_status["running"],
+                           refresh_list=refresh)

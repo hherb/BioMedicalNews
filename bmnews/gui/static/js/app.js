@@ -35,12 +35,17 @@ document.addEventListener("DOMContentLoaded", function () {
         }
     });
 
-    // Relay refreshPapers event to #paper-list (HX-Trigger fires on swap target
-    // #status-right; we re-dispatch it directly on #paper-list)
-    document.body.addEventListener("refreshPapers", function (evt) {
-        var paperList = document.getElementById("paper-list");
-        if (paperList && evt.target !== paperList) {
-            htmx.trigger(paperList, "refreshPapers");
+    // Refresh paper list when pipeline status indicates new data
+    document.body.addEventListener("htmx:afterSettle", function (evt) {
+        if (evt.detail.target && evt.detail.target.id === "status-right") {
+            var marker = document.querySelector("#status-right [data-refresh-list]");
+            if (marker) {
+                marker.removeAttribute("data-refresh-list");
+                var paperList = document.getElementById("paper-list");
+                if (paperList) {
+                    htmx.trigger(paperList, "refreshPapers");
+                }
+            }
         }
     });
 
