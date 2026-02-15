@@ -19,12 +19,34 @@ _WINDOW_STATE_PATH = DEFAULT_CONFIG_DIR / "window_state.json"
 _DEFAULT_GEOMETRY = {"x": None, "y": None, "width": 1200, "height": 800}
 
 
+def _position_on_screen(x: int | None, y: int | None) -> bool:
+    """Check whether (x, y) falls within any connected display."""
+    if x is None or y is None:
+        return False
+    try:
+        from AppKit import NSScreen  # type: ignore[import-untyped]
+        for screen in NSScreen.screens():
+            f = screen.frame()
+            if f.origin.x <= x <= f.origin.x + f.size.width and \
+               f.origin.y <= y <= f.origin.y + f.size.height:
+                return True
+    except Exception:
+        # AppKit unavailable — skip validation and trust the values
+        return True
+    return False
+
+
 def _load_window_state() -> dict:
     """Load saved window geometry, falling back to defaults."""
     try:
         if _WINDOW_STATE_PATH.exists():
             data = json.loads(_WINDOW_STATE_PATH.read_text(encoding="utf-8"))
-            return {**_DEFAULT_GEOMETRY, **data}
+            geo = {**_DEFAULT_GEOMETRY, **data}
+            # Discard position if it would land off-screen (e.g. detached monitor)
+            if not _position_on_screen(geo.get("x"), geo.get("y")):
+                geo["x"] = None
+                geo["y"] = None
+            return geo
     except Exception:
         logger.debug("Could not load window state, using defaults")
     return dict(_DEFAULT_GEOMETRY)

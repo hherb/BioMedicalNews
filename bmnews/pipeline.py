@@ -212,11 +212,21 @@ def run_score(
     templates = build_template_engine(config)
     model = config.llm.model or f"{config.llm.provider}:"
 
-    def _score_progress(i: int, _total: int, _result: Any) -> None:
+    scored_count = 0
+
+    def _score_progress(i: int, _total: int, result: Any) -> None:
+        nonlocal scored_count
+        # Save each score immediately so the GUI sees updates
+        if isinstance(result, dict):
+            tags = result.pop("matched_tags", [])
+            save_score(conn, **result)
+            if tags:
+                save_paper_tags(conn, paper_id=result["paper_id"], tags=tags)
+            scored_count += 1
         if on_progress:
             on_progress(f"Scoring paper {i}/{_total}...")
 
-    results = score_papers(
+    score_papers(
         papers=unscored,
         llm=llm,
         model=model,
@@ -227,15 +237,9 @@ def run_score(
         progress_callback=_score_progress,
     )
 
-    for result in results:
-        tags = result.pop("matched_tags", [])
-        save_score(conn, **result)
-        if tags:
-            save_paper_tags(conn, paper_id=result["paper_id"], tags=tags)
-
     conn.close()
-    logger.info("Scored %d papers", len(results))
-    return len(results)
+    logger.info("Scored %d papers", scored_count)
+    return scored_count
 
 
 def run_digest(config: AppConfig, output: str | None = None) -> str:

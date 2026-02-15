@@ -13,6 +13,7 @@
         <span class="source-badge source-{{ paper.source }}">{{ paper.source }}</span>
     </div>
 
+    {% if paper.relevance_score is not none %}
     <div class="score-section">
         <span class="score-badge {% if paper.relevance_score >= 0.7 %}score-high{% elif paper.relevance_score >= 0.5 %}score-mid{% else %}score-low{% endif %}">
             Relevance: {{ (paper.relevance_score * 100)|int }}%
@@ -22,6 +23,11 @@
         <span class="design-badge">{{ paper.study_design|upper }}</span>
         {% endif %}
     </div>
+    {% else %}
+    <div class="score-section">
+        <span class="score-badge score-low">pending</span>
+    </div>
+    {% endif %}
 
     {% if paper.summary %}
     <section class="summary-section">

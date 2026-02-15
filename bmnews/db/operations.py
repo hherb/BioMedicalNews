@@ -102,7 +102,7 @@ def get_paper_with_score(conn: Any, paper_id: int) -> dict | None:
         SELECT p.*, s.relevance_score, s.quality_score, s.combined_score,
                s.summary, s.study_design, s.quality_tier, s.assessment_json
         FROM papers p
-        JOIN scores s ON s.paper_id = p.id
+        LEFT JOIN scores s ON s.paper_id = p.id
         WHERE p.id = {ph}
         """,
         (paper_id,),
