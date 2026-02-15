@@ -293,6 +293,22 @@ class TestCachedDigestPapers:
         assert cached == []
 
 
+class TestMigration003:
+    def test_fulltext_columns_exist(self):
+        conn = _db()
+        columns = [r[1] for r in conn.execute("PRAGMA table_info(papers)").fetchall()]
+        assert "pmid" in columns
+        assert "pmcid" in columns
+        assert "fulltext_html" in columns
+        assert "fulltext_source" in columns
+
+    def test_migration_recorded(self):
+        conn = _db()
+        from bmlib.db.migrations import get_applied_versions
+        versions = get_applied_versions(conn)
+        assert 3 in versions
+
+
 class TestPaperTags:
     def test_save_and_retrieve_tags(self):
         conn = _db()

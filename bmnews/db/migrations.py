@@ -162,10 +162,56 @@ def _m002_add_paper_tags(conn: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Migration 3: fulltext columns on papers
+# ---------------------------------------------------------------------------
+
+
+def _m003_add_fulltext_columns(conn: Any) -> None:
+    """Add pmid, pmcid, fulltext_html, fulltext_source columns to papers."""
+    is_sqlite = _is_sqlite(conn)
+
+    if is_sqlite:
+        existing = {r[1] for r in conn.execute("PRAGMA table_info(papers)").fetchall()}
+        for col_def in [
+            "pmid TEXT",
+            "pmcid TEXT",
+            "fulltext_html TEXT",
+            "fulltext_source TEXT NOT NULL DEFAULT ''",
+        ]:
+            col_name = col_def.split()[0]
+            if col_name not in existing:
+                conn.execute(f"ALTER TABLE papers ADD COLUMN {col_def}")
+        conn.commit()
+    else:
+        create_tables(
+            conn,
+            """\
+ALTER TABLE papers ADD COLUMN IF NOT EXISTS pmid TEXT;
+ALTER TABLE papers ADD COLUMN IF NOT EXISTS pmcid TEXT;
+ALTER TABLE papers ADD COLUMN IF NOT EXISTS fulltext_html TEXT;
+ALTER TABLE papers ADD COLUMN IF NOT EXISTS fulltext_source TEXT NOT NULL DEFAULT '';
+""",
+        )
+
+    # Backfill pmid/pmcid from metadata_json for existing europepmc papers
+    if is_sqlite:
+        conn.execute("""
+            UPDATE papers SET
+                pmid = json_extract(metadata_json, '$.pmid'),
+                pmcid = json_extract(metadata_json, '$.pmcid')
+            WHERE source = 'europepmc'
+              AND metadata_json != '{}'
+              AND pmid IS NULL
+        """)
+        conn.commit()
+
+
+# ---------------------------------------------------------------------------
 # Migration registry
 # ---------------------------------------------------------------------------
 
 MIGRATIONS: list[Migration] = [
     Migration(1, "initial_schema", _m001_initial_schema),
     Migration(2, "add_paper_tags", _m002_add_paper_tags),
+    Migration(3, "add_fulltext_columns", _m003_add_fulltext_columns),
 ]
