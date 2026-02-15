@@ -110,6 +110,8 @@ class LLMConfig:
     max_tokens: int = 4096
     ollama_host: str = ""
     anthropic_api_key: str = ""
+    api_key: str = ""
+    base_url: str = ""
     concurrency: int = 1
 
 
@@ -303,6 +305,8 @@ temperature = 0.3
 max_tokens = 4096
 # ollama_host = "http://localhost:11434"
 # anthropic_api_key = ""
+# api_key = ""
+# base_url = ""
 concurrency = 1
 
 [scoring]

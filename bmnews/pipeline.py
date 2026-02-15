@@ -52,6 +52,8 @@ def build_llm_client(config: AppConfig) -> LLMClient:
         default_provider=config.llm.provider,
         ollama_host=config.llm.ollama_host or None,
         anthropic_api_key=config.llm.anthropic_api_key or None,
+        api_key=config.llm.api_key or None,
+        base_url=config.llm.base_url or None,
     )
 
 
