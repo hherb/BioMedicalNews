@@ -34,12 +34,42 @@
                 <section class="settings-section">
                     <h2>LLM</h2>
                     <label>Provider:
-                        <select name="llm.provider">
+                        <select name="llm.provider" id="llm-provider"
+                                hx-get="/settings/models"
+                                hx-target="#model-options"
+                                hx-trigger="change"
+                                hx-vals="js:{provider: document.getElementById('llm-provider').value}">
                             <option value="ollama" {% if config.llm.provider == "ollama" %}selected{% endif %}>Ollama</option>
                             <option value="anthropic" {% if config.llm.provider == "anthropic" %}selected{% endif %}>Anthropic</option>
+                            <option value="openai" {% if config.llm.provider == "openai" %}selected{% endif %}>OpenAI</option>
+                            <option value="deepseek" {% if config.llm.provider == "deepseek" %}selected{% endif %}>DeepSeek</option>
+                            <option value="mistral" {% if config.llm.provider == "mistral" %}selected{% endif %}>Mistral AI</option>
+                            <option value="gemini" {% if config.llm.provider == "gemini" %}selected{% endif %}>Google Gemini</option>
                         </select>
                     </label>
-                    <label>Model: <input type="text" name="llm.model" value="{{ config.llm.model }}"></label>
+                    <label>Model:
+                        <span style="display: flex; gap: 0.25rem; align-items: center;">
+                            <input type="text" name="llm.model" id="llm-model"
+                                   value="{{ config.llm.model }}" list="model-options"
+                                   placeholder="Select or type a model name"
+                                   style="flex: 1;">
+                            <datalist id="model-options"
+                                      hx-get="/settings/models?provider={{ config.llm.provider }}"
+                                      hx-trigger="load"
+                                      hx-swap="innerHTML">
+                            </datalist>
+                            <button type="button" class="btn btn-sm"
+                                    title="Refresh model list from provider"
+                                    onclick="htmx.ajax('GET', '/settings/models?provider=' + document.getElementById('llm-provider').value + '&refresh=1', {target: '#model-options', swap: 'innerHTML'})">
+                                &#x21bb;
+                            </button>
+                        </span>
+                    </label>
+                    <label>API Key:
+                        <input type="password" name="llm.api_key"
+                               value="{{ config.llm.api_key }}"
+                               placeholder="Provider API key (or set env var)">
+                    </label>
                     <label>Concurrency:
                         <input type="number" name="llm.concurrency" value="{{ config.llm.concurrency }}" min="1" max="10">
                     </label>

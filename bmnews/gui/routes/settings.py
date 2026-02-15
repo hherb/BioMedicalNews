@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import json
+import logging
 from pathlib import Path
 
 from flask import Blueprint, current_app, render_template, request
 
+from bmlib.llm import LLMClient
 from bmlib.publications.fetchers import list_sources as bmlib_list_sources
 from bmlib.publications.models import SourceDescriptor
 
 from bmnews.config import AppConfig
 from bmnews.pipeline import TEMPLATES_DIR, _LOCAL_SOURCES
+
+logger = logging.getLogger(__name__)
 
 settings_bp = Blueprint("settings", __name__)
 
@@ -78,6 +83,69 @@ def save_settings():
         save_config(config)
 
     return '<div class="flash success">Settings saved.</div>'
+
+
+# ---------------------------------------------------------------------------
+# Model list endpoint (auto-populate model selector)
+# ---------------------------------------------------------------------------
+
+_MODEL_CACHE_PATH = Path("~/.bmnews/model_cache.json").expanduser()
+
+
+def _load_model_cache() -> dict[str, list[str]]:
+    """Load cached model lists from disk."""
+    if _MODEL_CACHE_PATH.exists():
+        try:
+            return json.loads(_MODEL_CACHE_PATH.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def _save_model_cache(cache: dict[str, list[str]]) -> None:
+    """Persist model cache to disk."""
+    _MODEL_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _MODEL_CACHE_PATH.write_text(json.dumps(cache), encoding="utf-8")
+
+
+@settings_bp.route("/settings/models")
+def list_models():
+    """Return ``<option>`` elements for a provider's available models.
+
+    Query params:
+        provider: provider name (default ``"ollama"``)
+        refresh: ``"1"`` to bypass cache and re-fetch from API
+    """
+    provider = request.args.get("provider", "ollama")
+    refresh = request.args.get("refresh", "") == "1"
+    config: AppConfig = current_app.config["BMNEWS_CONFIG"]
+
+    cache = _load_model_cache()
+
+    if not refresh and provider in cache:
+        model_ids = cache[provider]
+    else:
+        try:
+            client = LLMClient(
+                default_provider=provider,
+                ollama_host=config.llm.ollama_host or None,
+                anthropic_api_key=config.llm.anthropic_api_key or None,
+                api_key=config.llm.api_key or None,
+                base_url=config.llm.base_url or None,
+            )
+            raw = client.list_models(provider=provider)
+            model_ids = [m if isinstance(m, str) else "" for m in raw]
+            model_ids = [m for m in model_ids if m]
+        except Exception as e:
+            logger.warning("Failed to list models for %s: %s", provider, e)
+            model_ids = []
+
+        if model_ids:
+            cache[provider] = model_ids
+            _save_model_cache(cache)
+
+    options_html = "".join(f'<option value="{mid}">' for mid in model_ids)
+    return options_html
 
 
 @settings_bp.route("/settings/templates")
