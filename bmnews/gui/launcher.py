@@ -41,6 +41,7 @@ def launch(config: AppConfig, port: int | None = None) -> None:
     import webview
 
     logging.getLogger("werkzeug").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
     if port is None:
         port = _find_free_port()
