@@ -32,11 +32,74 @@ class DatabaseConfig:
 
 @dataclass
 class SourcesConfig:
-    medrxiv: bool = True
-    biorxiv: bool = False
-    europepmc: bool = True
+    enabled: list[str] = field(default_factory=lambda: ["medrxiv", "europepmc"])
     lookback_days: int = 7
-    europepmc_query: str = ""
+    source_options: dict[str, dict[str, str]] = field(default_factory=dict)
+
+    # -- Backward-compat properties for old TOML configs with per-source booleans --
+
+    @property
+    def medrxiv(self) -> bool:
+        return "medrxiv" in self.enabled
+
+    @medrxiv.setter
+    def medrxiv(self, value: bool) -> None:
+        if value and "medrxiv" not in self.enabled:
+            self.enabled.append("medrxiv")
+        elif not value and "medrxiv" in self.enabled:
+            self.enabled.remove("medrxiv")
+
+    @property
+    def biorxiv(self) -> bool:
+        return "biorxiv" in self.enabled
+
+    @biorxiv.setter
+    def biorxiv(self, value: bool) -> None:
+        if value and "biorxiv" not in self.enabled:
+            self.enabled.append("biorxiv")
+        elif not value and "biorxiv" in self.enabled:
+            self.enabled.remove("biorxiv")
+
+    @property
+    def europepmc(self) -> bool:
+        return "europepmc" in self.enabled
+
+    @europepmc.setter
+    def europepmc(self, value: bool) -> None:
+        if value and "europepmc" not in self.enabled:
+            self.enabled.append("europepmc")
+        elif not value and "europepmc" in self.enabled:
+            self.enabled.remove("europepmc")
+
+    @property
+    def pubmed(self) -> bool:
+        return "pubmed" in self.enabled
+
+    @pubmed.setter
+    def pubmed(self, value: bool) -> None:
+        if value and "pubmed" not in self.enabled:
+            self.enabled.append("pubmed")
+        elif not value and "pubmed" in self.enabled:
+            self.enabled.remove("pubmed")
+
+    @property
+    def openalex(self) -> bool:
+        return "openalex" in self.enabled
+
+    @openalex.setter
+    def openalex(self, value: bool) -> None:
+        if value and "openalex" not in self.enabled:
+            self.enabled.append("openalex")
+        elif not value and "openalex" in self.enabled:
+            self.enabled.remove("openalex")
+
+    @property
+    def europepmc_query(self) -> str:
+        return self.source_options.get("europepmc", {}).get("query", "")
+
+    @europepmc_query.setter
+    def europepmc_query(self, value: str) -> None:
+        self.source_options.setdefault("europepmc", {})["query"] = value
 
 
 @dataclass
@@ -197,6 +260,8 @@ def save_config(config: AppConfig, path: str | Path | None = None) -> Path:
             elif isinstance(value, list):
                 items = ", ".join(f'"{v}"' for v in value)
                 lines.append(f"{field_name} = [{items}]")
+            elif isinstance(value, dict):
+                pass  # dicts are written as sub-tables below
             elif isinstance(value, str):
                 lines.append(f'{field_name} = "{value}"')
         lines.append("")
@@ -226,11 +291,10 @@ sqlite_path = "~/.bmnews/bmnews.db"
 # pg_dsn = ""
 
 [sources]
-medrxiv = true
-biorxiv = false
-europepmc = true
+enabled = ["medrxiv", "europepmc"]
 lookback_days = 7
-# europepmc_query = "cancer immunotherapy"
+# To enable more sources, add them to the list above:
+# enabled = ["medrxiv", "biorxiv", "europepmc", "pubmed", "openalex"]
 
 [llm]
 provider = "ollama"

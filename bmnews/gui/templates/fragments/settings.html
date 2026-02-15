@@ -6,12 +6,10 @@
             <form hx-post="/settings/save" hx-target="#settings-flash" hx-swap="innerHTML">
                 <section class="settings-section">
                     <h2>Sources</h2>
-                    <label><input type="checkbox" name="sources.medrxiv" value="true"
-                           {% if config.sources.medrxiv %}checked{% endif %}> medRxiv</label>
-                    <label><input type="checkbox" name="sources.biorxiv" value="true"
-                           {% if config.sources.biorxiv %}checked{% endif %}> bioRxiv</label>
-                    <label><input type="checkbox" name="sources.europepmc" value="true"
-                           {% if config.sources.europepmc %}checked{% endif %}> Europe PMC</label>
+                    {% for src in available_sources %}
+                    <label><input type="checkbox" name="sources.enabled" value="{{ src.name }}"
+                           {% if src.name in config.sources.enabled %}checked{% endif %}> {{ src.display_name }}</label>
+                    {% endfor %}
                     <label>Lookback days:
                         <input type="number" name="sources.lookback_days" value="{{ config.sources.lookback_days }}" min="1" max="90">
                     </label>

@@ -6,10 +6,23 @@ from pathlib import Path
 
 from flask import Blueprint, current_app, render_template, request
 
+from bmlib.publications.fetchers import list_sources as bmlib_list_sources
+from bmlib.publications.models import SourceDescriptor
+
 from bmnews.config import AppConfig
-from bmnews.pipeline import TEMPLATES_DIR
+from bmnews.pipeline import TEMPLATES_DIR, _LOCAL_SOURCES
 
 settings_bp = Blueprint("settings", __name__)
+
+
+def _available_sources() -> list[dict[str, str]]:
+    """Build a list of all available sources (bmlib registry + local)."""
+    sources = []
+    for desc in bmlib_list_sources():
+        sources.append({"name": desc.name, "display_name": desc.display_name})
+    for name, display_name in _LOCAL_SOURCES.items():
+        sources.append({"name": name, "display_name": display_name})
+    return sources
 
 
 @settings_bp.route("/settings")
@@ -17,30 +30,47 @@ def settings_page():
     config: AppConfig = current_app.config["BMNEWS_CONFIG"]
     templates = sorted(TEMPLATES_DIR.glob("*.*"))
     template_names = [t.name for t in templates]
-    return render_template("fragments/settings.html", config=config, template_names=template_names)
+    available_sources = _available_sources()
+    return render_template(
+        "fragments/settings.html",
+        config=config,
+        template_names=template_names,
+        available_sources=available_sources,
+    )
 
 
 @settings_bp.route("/settings/save", methods=["POST"])
 def save_settings():
     config: AppConfig = current_app.config["BMNEWS_CONFIG"]
 
+    # Handle sources.enabled from multi-value checkboxes
+    enabled_sources = request.form.getlist("sources.enabled")
+    if enabled_sources is not None:
+        config.sources.enabled = enabled_sources
+
     for key, value in request.form.items():
+        if key == "sources.enabled":
+            continue  # already handled above
         parts = key.split(".", 1)
         if len(parts) == 2:
             section_name, field_name = parts
             section = getattr(config, section_name, None)
             if section is not None and hasattr(section, field_name):
-                field = section.__dataclass_fields__[field_name]
-                ftype = str(field.type)
-                if "bool" in ftype:
-                    setattr(section, field_name, value.lower() in ("true", "1", "on", "yes"))
-                elif "int" in ftype:
-                    setattr(section, field_name, int(value))
-                elif "float" in ftype:
-                    setattr(section, field_name, float(value))
-                elif "list" in ftype:
-                    setattr(section, field_name, [v.strip() for v in value.split(",") if v.strip()])
+                if field_name in getattr(section, "__dataclass_fields__", {}):
+                    field = section.__dataclass_fields__[field_name]
+                    ftype = str(field.type)
+                    if "bool" in ftype:
+                        setattr(section, field_name, value.lower() in ("true", "1", "on", "yes"))
+                    elif "int" in ftype:
+                        setattr(section, field_name, int(value))
+                    elif "float" in ftype:
+                        setattr(section, field_name, float(value))
+                    elif "list" in ftype:
+                        setattr(section, field_name, [v.strip() for v in value.split(",") if v.strip()])
+                    else:
+                        setattr(section, field_name, value)
                 else:
+                    # Handle property setters (e.g. backward-compat booleans)
                     setattr(section, field_name, value)
 
     if not current_app.config.get("TESTING"):

@@ -27,7 +27,10 @@ from bmnews.db.operations import (
     get_cached_digest_papers,
     record_digest,
 )
-from bmnews.fetchers import FetchedPaper, fetch_medrxiv, fetch_biorxiv, fetch_europepmc
+from bmlib.publications.fetchers import list_sources, get_fetcher, source_names
+from bmlib.publications.models import FetchedRecord
+
+from bmnews.fetchers import FetchedPaper, fetch_europepmc
 from bmnews.scoring.scorer import score_papers
 from bmnews.digest.renderer import render_digest
 from bmnews.digest.sender import send_email
@@ -52,6 +55,70 @@ def build_llm_client(config: AppConfig) -> LLMClient:
     )
 
 
+def _record_to_fetched_paper(record: FetchedRecord) -> FetchedPaper:
+    """Convert a bmlib :class:`FetchedRecord` to a bmnews :class:`FetchedPaper`."""
+    doi = record.doi or ""
+    url = f"https://doi.org/{doi}" if doi else ""
+    authors = "; ".join(record.authors) if record.authors else ""
+    categories = "; ".join(record.keywords) if record.keywords else ""
+    metadata: dict[str, Any] = {}
+    if record.pmid:
+        metadata["pmid"] = record.pmid
+    if record.pmc_id:
+        metadata["pmcid"] = record.pmc_id
+    if record.extras:
+        metadata.update(record.extras)
+    return FetchedPaper(
+        doi=doi,
+        title=record.title,
+        authors=authors,
+        abstract=record.abstract or "",
+        url=url,
+        source=record.source,
+        published_date=record.publication_date or "",
+        categories=categories,
+        metadata=metadata,
+    )
+
+
+def _fetch_via_registry(
+    source_name: str,
+    lookback_days: int,
+    source_config: dict[str, str],
+    on_progress: Callable[[str], None] | None = None,
+) -> list[FetchedPaper]:
+    """Fetch papers from a bmlib-registered source via the registry."""
+    import httpx
+    from datetime import date, timedelta
+
+    fetcher = get_fetcher(source_name)
+    end = date.today()
+    start = end - timedelta(days=lookback_days)
+
+    papers: list[FetchedPaper] = []
+
+    with httpx.Client(timeout=30.0) as client:
+        current = start
+        while current <= end:
+            collected: list[FetchedRecord] = []
+            fetcher(
+                client, current,
+                on_record=collected.append,
+                **source_config,
+            )
+            for record in collected:
+                papers.append(_record_to_fetched_paper(record))
+            current += timedelta(days=1)
+
+    return papers
+
+
+# Sources handled locally (not in bmlib registry)
+_LOCAL_SOURCES: dict[str, str] = {
+    "europepmc": "Europe PMC",
+}
+
+
 def run_fetch(
     config: AppConfig,
     on_progress: Callable[[str], None] | None = None,
@@ -59,27 +126,30 @@ def run_fetch(
     """Fetch papers from all configured sources."""
     papers: list[FetchedPaper] = []
     lookback = config.sources.lookback_days
+    registry_names = set(source_names())
 
-    if config.sources.medrxiv:
-        if on_progress:
-            on_progress("Fetching from medRxiv...")
-        logger.info("Fetching from medRxiv...")
-        papers.extend(fetch_medrxiv(lookback_days=lookback))
-
-    if config.sources.biorxiv:
-        if on_progress:
-            on_progress("Fetching from bioRxiv...")
-        logger.info("Fetching from bioRxiv...")
-        papers.extend(fetch_biorxiv(lookback_days=lookback))
-
-    if config.sources.europepmc:
-        if on_progress:
-            on_progress("Fetching from EuropePMC...")
-        logger.info("Fetching from EuropePMC...")
-        papers.extend(fetch_europepmc(
-            query=config.sources.europepmc_query,
-            lookback_days=lookback,
-        ))
+    for source_name in config.sources.enabled:
+        if source_name in registry_names:
+            if on_progress:
+                on_progress(f"Fetching from {source_name}...")
+            logger.info("Fetching from %s (registry)...", source_name)
+            src_config = dict(config.sources.source_options.get(source_name, {}))
+            # Provide email for openalex if available
+            if source_name == "openalex" and "email" not in src_config and config.user.email:
+                src_config["email"] = config.user.email
+            papers.extend(_fetch_via_registry(
+                source_name, lookback, src_config, on_progress,
+            ))
+        elif source_name == "europepmc":
+            if on_progress:
+                on_progress("Fetching from Europe PMC...")
+            logger.info("Fetching from EuropePMC...")
+            papers.extend(fetch_europepmc(
+                query=config.sources.europepmc_query,
+                lookback_days=lookback,
+            ))
+        else:
+            logger.warning("Unknown source %r — skipping", source_name)
 
     logger.info("Total papers fetched: %d", len(papers))
     return papers

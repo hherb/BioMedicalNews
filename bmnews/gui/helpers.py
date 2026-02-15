@@ -5,14 +5,47 @@ from __future__ import annotations
 import re
 from html import escape
 
+# Section heading tags used by PubMed/bioRxiv abstracts (e.g. <h4>Background</h4>)
+_HTML_HEADING_RE = re.compile(
+    r"<(h[1-6]|b|strong|i|em)>(.*?)</\1>",
+    re.IGNORECASE,
+)
+
+# Proper HTML tags for stripping (requires a letter after <, avoids matching "<5mg")
+_HTML_TAG_RE = re.compile(r"</?[a-zA-Z][a-zA-Z0-9]*\b[^>]*>")
+
 # Common section labels in structured abstracts
+_SECTION_LABELS = (
+    "Background|Objective|Purpose|Introduction|Methods|Study Design|"
+    "Setting|Participants|Interventions|Main Outcome Measures|"
+    "Results|Findings|Conclusions?|Discussion|Significance|"
+    "Context|Design|Measurements|Limitations|Interpretation"
+)
 _SECTION_PATTERN = re.compile(
-    r"^(Background|Objective|Purpose|Introduction|Methods|Study Design|"
-    r"Setting|Participants|Interventions|Main Outcome Measures|"
-    r"Results|Findings|Conclusions?|Discussion|Significance|"
-    r"Context|Design|Measurements|Limitations|Interpretation)\s*:",
+    rf"^({_SECTION_LABELS})\s*:",
     re.IGNORECASE | re.MULTILINE,
 )
+
+
+def _normalise_abstract(text: str) -> str:
+    """Convert HTML-tagged abstracts into plain-text with section labels.
+
+    PubMed abstracts often arrive with ``<h4>Background</h4>`` style headings.
+    This converts them into ``Background:`` so the downstream formatter can
+    detect structured sections.  All remaining HTML tags are stripped and the
+    text is then HTML-escaped for safe rendering.
+    """
+
+    def _heading_to_label(m: re.Match) -> str:
+        label = m.group(2).strip()
+        # Only convert if the heading text is a known section label
+        if re.match(rf"^({_SECTION_LABELS})$", label, re.IGNORECASE):
+            return f"\n{label}:"
+        return label
+
+    text = _HTML_HEADING_RE.sub(_heading_to_label, text)
+    text = _HTML_TAG_RE.sub("", text)
+    return text
 
 
 def format_abstract_html(text: str | None) -> str:
@@ -20,7 +53,8 @@ def format_abstract_html(text: str | None) -> str:
     if not text:
         return ""
 
-    escaped = escape(text)
+    normalised = _normalise_abstract(text)
+    escaped = escape(normalised)
 
     # Try structured abstract (has labeled sections)
     parts = _SECTION_PATTERN.split(escaped)
