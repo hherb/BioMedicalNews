@@ -29,6 +29,7 @@ def score_papers(
     interests: str,
     concurrency: int = 1,
     quality_tier: int = 2,
+    progress_callback: Any = None,
 ) -> list[dict]:
     """Score a list of papers for relevance and quality.
 
@@ -40,6 +41,7 @@ def score_papers(
         interests: Free-text description of user research interests.
         concurrency: Number of concurrent scoring tasks.
         quality_tier: Max quality assessment tier (1=metadata, 2=classifier, 3=deep).
+        progress_callback: Optional callback(current, total, result) called after each paper.
 
     Returns:
         List of dicts with scoring results, each containing:
@@ -55,12 +57,16 @@ def score_papers(
     )
     quality_filter = _build_quality_filter(quality_tier)
     results = []
+    total = len(papers)
 
     if concurrency <= 1:
-        for paper in papers:
+        for i, paper in enumerate(papers):
             result = _score_single(paper, agent, quality_mgr, quality_filter, interests)
             results.append(result)
+            if progress_callback:
+                progress_callback(i + 1, total, result)
     else:
+        completed = 0
         with ThreadPoolExecutor(max_workers=concurrency) as pool:
             futures = {
                 pool.submit(
@@ -73,6 +79,9 @@ def score_papers(
                 try:
                     result = future.result()
                     results.append(result)
+                    completed += 1
+                    if progress_callback:
+                        progress_callback(completed, total, result)
                 except Exception:
                     logger.exception("Error scoring paper %s", paper.get("doi", "?"))
 

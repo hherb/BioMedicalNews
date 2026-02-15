@@ -196,6 +196,19 @@ body {
 .status-error { color: var(--danger); }
 .status-busy { color: var(--warning); }
 
+.spinner {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--border);
+    border-top-color: var(--warning);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    vertical-align: middle;
+    margin-left: 0.5rem;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
 /* Settings split layout */
 .settings-split {
     grid-template-columns: minmax(300px, 40%) 6px 1fr;

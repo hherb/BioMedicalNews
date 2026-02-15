@@ -9,7 +9,7 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from bmlib.db import transaction
 from bmlib.llm import LLMClient
@@ -52,20 +52,29 @@ def build_llm_client(config: AppConfig) -> LLMClient:
     )
 
 
-def run_fetch(config: AppConfig) -> list[FetchedPaper]:
+def run_fetch(
+    config: AppConfig,
+    on_progress: Callable[[str], None] | None = None,
+) -> list[FetchedPaper]:
     """Fetch papers from all configured sources."""
     papers: list[FetchedPaper] = []
     lookback = config.sources.lookback_days
 
     if config.sources.medrxiv:
+        if on_progress:
+            on_progress("Fetching from medRxiv...")
         logger.info("Fetching from medRxiv...")
         papers.extend(fetch_medrxiv(lookback_days=lookback))
 
     if config.sources.biorxiv:
+        if on_progress:
+            on_progress("Fetching from bioRxiv...")
         logger.info("Fetching from bioRxiv...")
         papers.extend(fetch_biorxiv(lookback_days=lookback))
 
     if config.sources.europepmc:
+        if on_progress:
+            on_progress("Fetching from EuropePMC...")
         logger.info("Fetching from EuropePMC...")
         papers.extend(fetch_europepmc(
             query=config.sources.europepmc_query,
@@ -110,7 +119,10 @@ def run_store(config: AppConfig, papers: list[FetchedPaper]) -> int:
     return stored
 
 
-def run_score(config: AppConfig) -> int:
+def run_score(
+    config: AppConfig,
+    on_progress: Callable[[str], None] | None = None,
+) -> int:
     """Score unscored papers. Returns count of papers scored."""
     conn = open_db(config)
     init_db(conn)
@@ -121,11 +133,18 @@ def run_score(config: AppConfig) -> int:
         conn.close()
         return 0
 
-    logger.info("Scoring %d papers...", len(unscored))
+    total = len(unscored)
+    logger.info("Scoring %d papers...", total)
+    if on_progress:
+        on_progress(f"Scoring {total} papers...")
 
     llm = build_llm_client(config)
     templates = build_template_engine(config)
     model = config.llm.model or f"{config.llm.provider}:"
+
+    def _score_progress(i: int, _total: int, _result: Any) -> None:
+        if on_progress:
+            on_progress(f"Scoring paper {i}/{_total}...")
 
     results = score_papers(
         papers=unscored,
@@ -135,6 +154,7 @@ def run_score(config: AppConfig) -> int:
         interests=config.user.research_interests,
         concurrency=config.llm.concurrency,
         quality_tier=config.quality.default_tier,
+        progress_callback=_score_progress,
     )
 
     for result in results:
@@ -250,6 +270,7 @@ def run_pipeline(
     config: AppConfig,
     days: int | None = None,
     show_cached: bool = False,
+    on_progress: Callable[[str], None] | None = None,
 ) -> None:
     """Execute the full pipeline: fetch → store → score → digest.
 
@@ -257,6 +278,7 @@ def run_pipeline(
         config: Application config.
         days: Override lookback_days for fetching.
         show_cached: If True, skip pipeline and show cached digests.
+        on_progress: Optional callback receiving a status message string.
     """
     if show_cached:
         show_cached_digests(config, days=days)
@@ -267,12 +289,16 @@ def run_pipeline(
 
     logger.info("Starting pipeline run")
 
-    papers = run_fetch(config)
+    papers = run_fetch(config, on_progress=on_progress)
     if papers:
+        if on_progress:
+            on_progress(f"Storing {len(papers)} papers...")
         run_store(config, papers)
 
-    scored = run_score(config)
+    scored = run_score(config, on_progress=on_progress)
     if scored > 0:
+        if on_progress:
+            on_progress("Generating digest...")
         run_digest(config)
 
     logger.info("Pipeline complete")

@@ -1,1 +1,10 @@
 <span class="status-{{ status }}">{{ message }}</span>
+{% if running %}
+<span class="spinner"></span>
+<span hx-get="/pipeline/status" hx-trigger="every 2s" hx-target="#status-bar" hx-swap="innerHTML"></span>
+{% else %}
+<button class="pipeline-btn"
+        hx-post="/pipeline/run" hx-target="#status-bar" hx-swap="innerHTML">
+    Fetch &amp; Score
+</button>
+{% endif %}
