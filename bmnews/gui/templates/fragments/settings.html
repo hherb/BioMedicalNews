@@ -51,13 +51,9 @@
                     <label>Model:
                         <span style="display: flex; gap: 0.25rem; align-items: center;">
                             <select id="llm-model-select"
-                                    hx-get="/settings/models?provider={{ config.llm.provider }}&current={{ config.llm.model|urlencode }}"
-                                    hx-trigger="load"
-                                    hx-swap="innerHTML"
-                                    hx-on::after-settle="syncModelSelect()"
                                     onchange="onModelSelectChange(this)"
                                     style="flex: 1;">
-                                <option value="">Loading models...</option>
+                                {{ initial_model_options|safe }}
                             </select>
                             <button type="button" class="btn btn-sm"
                                     title="Refresh model list from provider"

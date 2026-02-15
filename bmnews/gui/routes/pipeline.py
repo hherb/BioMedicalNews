@@ -20,6 +20,7 @@ _pipeline_status: dict = {
     "running": False,
     "message": "Ready",
     "status": "idle",
+    "refresh_list": False,  # Signal the next status poll to reload #paper-list
 }
 # Paper IDs scored since last status poll, consumed on each poll.
 _scored_paper_ids: deque[int] = deque()
@@ -49,17 +50,24 @@ def run():
     _pipeline_status.update(running=True, message="Starting pipeline...", status="busy")
 
     def _run():
+        def _progress_with_refresh(message: str) -> None:
+            _on_progress(message)
+            # After storing completes, the paper list needs a full reload
+            if "Scoring" in message and not _pipeline_status.get("refresh_list"):
+                _pipeline_status["refresh_list"] = True
+
         try:
             with app.app_context():
                 run_pipeline(
                     config,
-                    on_progress=_on_progress,
+                    on_progress=_progress_with_refresh,
                     on_scored=_scored_paper_ids.append,
                 )
             _pipeline_status.update(
                 running=False,
                 message="Pipeline complete — papers fetched, scored, and digested.",
                 status="success",
+                refresh_list=True,
             )
         except Exception as e:
             logger.exception("Pipeline error")
@@ -137,20 +145,29 @@ def resume():
 def status():
     conn = current_app.config["BMNEWS_DB"]
 
+    # If the pipeline stored new papers, reload the full paper list via OOB
+    needs_list_refresh = _pipeline_status.get("refresh_list", False)
+    if needs_list_refresh:
+        _pipeline_status["refresh_list"] = False
+
     # Drain any paper IDs scored since last poll and render OOB card updates
     oob_cards: list[str] = []
-    while _scored_paper_ids:
-        pid = _scored_paper_ids.popleft()
-        paper = get_paper_with_score(conn, pid)
-        if paper:
-            card_html = render_template("fragments/paper_card.html", paper=paper)
-            # Inject hx-swap-oob so HTMX replaces the existing card in-place
-            card_html = card_html.replace(
-                f'id="paper-card-{pid}"',
-                f'id="paper-card-{pid}" hx-swap-oob="outerHTML"',
-                1,
-            )
-            oob_cards.append(card_html)
+    if not needs_list_refresh:
+        # Only do per-card OOB updates when we're NOT doing a full list refresh
+        # (a full refresh already includes the latest card state)
+        while _scored_paper_ids:
+            pid = _scored_paper_ids.popleft()
+            paper = get_paper_with_score(conn, pid)
+            if paper:
+                card_html = render_template("fragments/paper_card.html", paper=paper)
+                card_html = card_html.replace(
+                    f'id="paper-card-{pid}"',
+                    f'id="paper-card-{pid}" hx-swap-oob="outerHTML"',
+                    1,
+                )
+                oob_cards.append(card_html)
+    else:
+        _scored_paper_ids.clear()
 
     html = render_template(
         "fragments/status_bar.html",
@@ -159,7 +176,19 @@ def status():
         running=_pipeline_status["running"],
     )
 
-    if oob_cards:
+    if needs_list_refresh:
+        # Trigger a full paper list reload via OOB swap
+        from bmnews.db.operations import get_papers_filtered
+        papers, total = get_papers_filtered(
+            conn, sort="date", limit=20, offset=0, with_total=True,
+        )
+        list_html = render_template(
+            "fragments/paper_list.html",
+            papers=papers, total=total, offset=0, limit=20,
+            sort="date", source="", tier="", design="",
+        )
+        html += f'<div id="paper-list" hx-swap-oob="innerHTML">{list_html}</div>'
+    elif oob_cards:
         html += "\n".join(oob_cards)
 
     return html

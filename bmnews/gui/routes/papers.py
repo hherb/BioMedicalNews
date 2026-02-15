@@ -5,13 +5,13 @@ from __future__ import annotations
 import json
 import logging
 
-from flask import Blueprint, current_app, render_template, request, abort
-
-from bmlib.fulltext import FullTextService, FullTextError
+from bmlib.fulltext import FullTextError, FullTextService
 from bmlib.fulltext.models import FullTextSourceEntry
+from flask import Blueprint, abort, current_app, render_template, request
+
 from bmnews.db.operations import (
-    get_papers_filtered,
     get_paper_with_score,
+    get_papers_filtered,
     save_fulltext,
 )
 
@@ -102,6 +102,14 @@ def paper_fulltext(paper_id: int):
     # Check if already cached in DB
     if paper.get("fulltext_html"):
         source = paper.get("fulltext_source", "")
+        if source == "pdf_cached":
+            path = paper["fulltext_html"]
+            return (
+                '<div class="fulltext-pdf">'
+                "<p>PDF cached locally:</p>"
+                f'<a href="file://{path}" target="_blank" '
+                'class="btn btn-primary">Open PDF &#x2197;</a></div>'
+            )
         if source == "unpaywall_pdf":
             url = paper["fulltext_html"]
             return (
@@ -135,6 +143,7 @@ def paper_fulltext(paper_id: int):
         result = service.fetch_fulltext(
             fulltext_sources=sources or None,
             pmc_id=pmc_id or None, doi=doi or None, pmid=pmid,
+            identifier=doi or None,
         )
     except FullTextError:
         return (
@@ -142,6 +151,7 @@ def paper_fulltext(paper_id: int):
             "<p>Full text is not available for this paper.</p></div>"
         )
 
+    # Inline HTML (JATS-parsed or cached HTML)
     if result.html:
         save_fulltext(
             conn, paper_id=paper_id, html=result.html, source=result.source,
@@ -150,6 +160,19 @@ def paper_fulltext(paper_id: int):
         paper["fulltext_source"] = result.source
         return render_template("fragments/fulltext_content.html", paper=paper)
 
+    # Cached PDF on disk — store path in DB as metadata, link to local file
+    if result.file_path:
+        save_fulltext(
+            conn, paper_id=paper_id, html=result.file_path, source="pdf_cached",
+        )
+        return (
+            '<div class="fulltext-pdf">'
+            "<p>PDF cached locally:</p>"
+            f'<a href="file://{result.file_path}" target="_blank" '
+            'class="btn btn-primary">Open PDF &#x2197;</a></div>'
+        )
+
+    # Remote PDF URL (download failed or no caching)
     if result.pdf_url:
         link_html = (
             f'<a href="{result.pdf_url}" target="_blank" '

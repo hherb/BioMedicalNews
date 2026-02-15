@@ -36,11 +36,16 @@ def settings_page():
     templates = sorted(TEMPLATES_DIR.glob("*.*"))
     template_names = [t.name for t in templates]
     available_sources = _available_sources()
+    # Pre-fetch model list so the dropdown is populated on first render
+    initial_models = _get_model_options(
+        config, provider=config.llm.provider, current=config.llm.model,
+    )
     return render_template(
         "fragments/settings.html",
         config=config,
         template_names=template_names,
         available_sources=available_sources,
+        initial_model_options=initial_models,
     )
 
 
@@ -108,20 +113,24 @@ def _save_model_cache(cache: dict[str, list[str]]) -> None:
     _MODEL_CACHE_PATH.write_text(json.dumps(cache), encoding="utf-8")
 
 
-@settings_bp.route("/settings/models")
-def list_models():
-    """Return ``<option>`` elements for a provider's model ``<select>``.
+def _get_model_options(
+    config: AppConfig,
+    *,
+    provider: str = "ollama",
+    current: str = "",
+    refresh: bool = False,
+) -> str:
+    """Build ``<option>`` HTML for a provider's model list.
 
-    Query params:
-        provider: provider name (default ``"ollama"``)
-        refresh: ``"1"`` to bypass cache and re-fetch from API
-        current: currently configured model name (to pre-select)
+    Args:
+        config: App configuration (for API keys / hosts).
+        provider: Provider name.
+        current: Currently configured model name (to pre-select).
+        refresh: If True, bypass cache and re-fetch from API.
+
+    Returns:
+        Concatenated ``<option>`` elements as an HTML string.
     """
-    provider = request.args.get("provider", "ollama")
-    refresh = request.args.get("refresh", "") == "1"
-    current = request.args.get("current", "")
-    config: AppConfig = current_app.config["BMNEWS_CONFIG"]
-
     if not current:
         current = config.llm.model
 
@@ -163,6 +172,24 @@ def list_models():
         parts.insert(0, f'<option value="{current}" selected>{current}</option>')
     parts.append('<option value="__custom__">Custom...</option>')
     return "".join(parts)
+
+
+@settings_bp.route("/settings/models")
+def list_models():
+    """Return ``<option>`` elements for a provider's model ``<select>``.
+
+    Query params:
+        provider: provider name (default ``"ollama"``)
+        refresh: ``"1"`` to bypass cache and re-fetch from API
+        current: currently configured model name (to pre-select)
+    """
+    config: AppConfig = current_app.config["BMNEWS_CONFIG"]
+    return _get_model_options(
+        config,
+        provider=request.args.get("provider", "ollama"),
+        current=request.args.get("current", ""),
+        refresh=request.args.get("refresh", "") == "1",
+    )
 
 
 @settings_bp.route("/settings/templates")

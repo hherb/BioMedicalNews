@@ -48,7 +48,9 @@
         <a href="https://doi.org/{{ paper.doi }}" target="_blank" class="btn btn-primary">Open DOI &#x2197;</a>
         {% endif %}
 
-        {% if paper.fulltext_source == 'unpaywall_pdf' and paper.fulltext_html %}
+        {% if paper.fulltext_source == 'pdf_cached' and paper.fulltext_html %}
+        <a href="file://{{ paper.fulltext_html }}" target="_blank" class="btn btn-secondary">Open PDF &#x2197;</a>
+        {% elif paper.fulltext_source == 'unpaywall_pdf' and paper.fulltext_html %}
         <a href="{{ paper.fulltext_html }}" target="_blank" class="btn btn-secondary">Open PDF &#x2197;</a>
         {% elif paper.fulltext_source == 'publisher_url' and paper.fulltext_html %}
         <a href="{{ paper.fulltext_html }}" target="_blank" class="btn btn-secondary">Open Publisher Page &#x2197;</a>
@@ -69,7 +71,7 @@
     </div>
 
     <div id="fulltext-container">
-        {% if paper.fulltext_html and paper.fulltext_source not in ('unpaywall_pdf', 'publisher_url') %}
+        {% if paper.fulltext_html and paper.fulltext_source not in ('unpaywall_pdf', 'publisher_url', 'pdf_cached') %}
         <section class="fulltext-section" id="fulltext-display" style="display:none;">
             <h2>Full Text <span class="fulltext-source-badge">{{ paper.fulltext_source }}</span></h2>
             <div class="fulltext-content">
