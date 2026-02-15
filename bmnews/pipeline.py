@@ -66,6 +66,8 @@ def _record_to_fetched_paper(record: FetchedRecord) -> FetchedPaper:
         metadata["pmid"] = record.pmid
     if record.pmc_id:
         metadata["pmcid"] = record.pmc_id
+    if record.fulltext_sources:
+        metadata["fulltext_sources"] = [s.to_dict() for s in record.fulltext_sources]
     if record.extras:
         metadata.update(record.extras)
     return FetchedPaper(
@@ -192,8 +194,16 @@ def run_store(config: AppConfig, papers: list[FetchedPaper]) -> int:
 def run_score(
     config: AppConfig,
     on_progress: Callable[[str], None] | None = None,
+    on_scored: Callable[[int], None] | None = None,
 ) -> int:
-    """Score unscored papers. Returns count of papers scored."""
+    """Score unscored papers. Returns count of papers scored.
+
+    Args:
+        config: Application config.
+        on_progress: Optional callback receiving a status message string.
+        on_scored: Optional callback receiving the paper_id after each
+            score is committed to the database.
+    """
     conn = open_db(config)
     init_db(conn)
 
@@ -218,11 +228,14 @@ def run_score(
         nonlocal scored_count
         # Save each score immediately so the GUI sees updates
         if isinstance(result, dict):
+            paper_id = result["paper_id"]
             tags = result.pop("matched_tags", [])
             save_score(conn, **result)
             if tags:
-                save_paper_tags(conn, paper_id=result["paper_id"], tags=tags)
+                save_paper_tags(conn, paper_id=paper_id, tags=tags)
             scored_count += 1
+            if on_scored:
+                on_scored(paper_id)
         if on_progress:
             on_progress(f"Scoring paper {i}/{_total}...")
 
@@ -345,6 +358,7 @@ def run_pipeline(
     days: int | None = None,
     show_cached: bool = False,
     on_progress: Callable[[str], None] | None = None,
+    on_scored: Callable[[int], None] | None = None,
 ) -> None:
     """Execute the full pipeline: fetch → store → score → digest.
 
@@ -353,6 +367,8 @@ def run_pipeline(
         days: Override lookback_days for fetching.
         show_cached: If True, skip pipeline and show cached digests.
         on_progress: Optional callback receiving a status message string.
+        on_scored: Optional callback receiving the paper_id after each
+            score is committed.
     """
     if show_cached:
         show_cached_digests(config, days=days)
@@ -369,7 +385,7 @@ def run_pipeline(
             on_progress(f"Storing {len(papers)} papers...")
         run_store(config, papers)
 
-    scored = run_score(config, on_progress=on_progress)
+    scored = run_score(config, on_progress=on_progress, on_scored=on_scored)
     if scored > 0:
         if on_progress:
             on_progress("Generating digest...")

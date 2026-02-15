@@ -35,20 +35,6 @@ document.addEventListener("DOMContentLoaded", function () {
         }
     });
 
-    // Refresh paper list when pipeline status indicates new data
-    document.body.addEventListener("htmx:afterSettle", function (evt) {
-        if (evt.detail.target && evt.detail.target.id === "status-right") {
-            var marker = document.querySelector("#status-right [data-refresh-list]");
-            if (marker) {
-                marker.removeAttribute("data-refresh-list");
-                var paperList = document.getElementById("paper-list");
-                if (paperList) {
-                    htmx.trigger(paperList, "refreshPapers");
-                }
-            }
-        }
-    });
-
     // Tab switching
     document.body.addEventListener("click", function (evt) {
         var tab = evt.target.closest(".tab");

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bmnews"
-version = "0.2.0"
+version = "0.2.1"
 description = "Biomedical news reader — fetches, scores, and delivers biomedical preprints matching your research interests"
 readme = "README.md"
 license = "AGPL-3.0-or-later"

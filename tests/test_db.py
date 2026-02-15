@@ -162,13 +162,16 @@ class TestPaperWithScore:
         conn = _db()
         assert get_paper_with_score(conn, 9999) is None
 
-    def test_returns_none_for_unscored_paper(self):
+    def test_returns_paper_without_score(self):
         conn = _db()
         pid = upsert_paper(
             conn, doi="10.1101/pws_unscored", title="Unscored Paper",
             abstract="No score here.",
         )
-        assert get_paper_with_score(conn, pid) is None
+        paper = get_paper_with_score(conn, pid)
+        assert paper is not None
+        assert paper["title"] == "Unscored Paper"
+        assert paper["relevance_score"] is None
 
 
 class TestPapersFiltered:

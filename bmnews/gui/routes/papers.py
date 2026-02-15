@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import json
+import logging
 
 from flask import Blueprint, current_app, render_template, request, abort
 
 from bmlib.fulltext import FullTextService, FullTextError
+from bmlib.fulltext.models import FullTextSourceEntry
 from bmnews.db.operations import (
     get_papers_filtered,
     get_paper_with_score,
     save_fulltext,
 )
+
+logger = logging.getLogger(__name__)
 
 papers_bp = Blueprint("papers", __name__)
 
@@ -116,22 +120,20 @@ def paper_fulltext(paper_id: int):
             )
         return render_template("fragments/fulltext_content.html", paper=paper)
 
-    # Extract identifiers
-    pmc_id = paper.get("pmcid") or ""
+    # Parse metadata for identifiers and source-provided fulltext URLs
+    meta = json.loads(paper.get("metadata_json") or "{}")
+    pmc_id = paper.get("pmcid") or meta.get("pmcid", "")
     doi = paper.get("doi") or ""
-    pmid = paper.get("pmid") or ""
+    pmid = paper.get("pmid") or meta.get("pmid", "")
 
-    # Also try metadata_json
-    if not pmc_id or not pmid:
-        meta = json.loads(paper.get("metadata_json") or "{}")
-        pmc_id = pmc_id or meta.get("pmcid", "")
-        pmid = pmid or meta.get("pmid", "")
+    raw_sources = meta.get("fulltext_sources") or []
+    sources = [FullTextSourceEntry.from_dict(s) for s in raw_sources]
 
     email = current_app.config.get("BMNEWS_EMAIL", "bmnews@example.com")
     service = FullTextService(email=email)
-
     try:
         result = service.fetch_fulltext(
+            fulltext_sources=sources or None,
             pmc_id=pmc_id or None, doi=doi or None, pmid=pmid,
         )
     except FullTextError:
@@ -140,15 +142,15 @@ def paper_fulltext(paper_id: int):
             "<p>Full text is not available for this paper.</p></div>"
         )
 
-    if result.source == "europepmc" and result.html:
+    if result.html:
         save_fulltext(
-            conn, paper_id=paper_id, html=result.html, source="europepmc",
+            conn, paper_id=paper_id, html=result.html, source=result.source,
         )
         paper["fulltext_html"] = result.html
-        paper["fulltext_source"] = "europepmc"
+        paper["fulltext_source"] = result.source
         return render_template("fragments/fulltext_content.html", paper=paper)
 
-    if result.source == "unpaywall" and result.pdf_url:
+    if result.pdf_url:
         link_html = (
             f'<a href="{result.pdf_url}" target="_blank" '
             'class="btn btn-primary">Open PDF &#x2197;</a>'

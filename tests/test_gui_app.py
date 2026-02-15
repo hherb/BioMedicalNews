@@ -53,7 +53,7 @@ class TestAppFactory:
     def test_index_returns_200(self, client):
         resp = client.get("/")
         assert resp.status_code == 200
-        assert b"BioMedical News" in resp.data
+        assert b"Bio-Medical News" in resp.data
 
     def test_static_files_served(self, client):
         resp = client.get("/static/vendor/htmx.min.js")
@@ -148,7 +148,7 @@ class TestEndToEnd:
     def test_full_workflow(self, seeded_client):
         resp = seeded_client.get("/")
         assert resp.status_code == 200
-        assert b"BioMedical News" in resp.data
+        assert b"Bio-Medical News" in resp.data
 
         resp = seeded_client.get("/papers")
         assert resp.status_code == 200

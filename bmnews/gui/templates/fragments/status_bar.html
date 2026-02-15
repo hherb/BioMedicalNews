@@ -1,11 +1,11 @@
 {% if running %}
-<span class="status-progress active" {{ 'data-refresh-list' if refresh_list }}>
+<span class="status-progress active">
     <span class="spinner"></span>
     <span class="status-{{ status }}">{{ message }}</span>
     <span hx-get="/pipeline/status" hx-trigger="every 2s" hx-target="#status-right" hx-swap="innerHTML"></span>
 </span>
 {% else %}
-<span {{ 'data-refresh-list' if refresh_list }}>
+<span>
 {% if status and status != 'idle' %}
 <span class="status-{{ status }}">{{ message }}</span>
 {% endif %}
