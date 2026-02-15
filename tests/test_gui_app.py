@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from unittest.mock import patch
 from bmlib.db import connect_sqlite
+from bmlib.fulltext import FullTextResult
 from bmnews.config import AppConfig
 from bmnews.db.schema import init_db
 from bmnews.db.operations import upsert_paper, save_score, get_paper_by_doi
@@ -162,6 +163,35 @@ class TestEndToEnd:
         assert resp.status_code == 200
         config = seeded_client.application.config["BMNEWS_CONFIG"]
         assert config.sources.lookback_days == 30
+
+
+class TestFullTextRoute:
+    def test_fulltext_endpoint_exists(self, seeded_client):
+        conn = seeded_client.application.config["BMNEWS_DB"]
+        paper = get_paper_by_doi(conn, "10.1101/g1")
+        with patch("bmnews.gui.routes.papers.FullTextService") as MockSvc:
+            instance = MockSvc.return_value
+            instance.fetch_fulltext.return_value = FullTextResult(
+                source="europepmc", html="<p>Full text content</p>",
+            )
+            resp = seeded_client.post(f"/papers/{paper['id']}/fulltext")
+            assert resp.status_code == 200
+
+    def test_fulltext_returns_html_fragment(self, seeded_client):
+        conn = seeded_client.application.config["BMNEWS_DB"]
+        paper = get_paper_by_doi(conn, "10.1101/g1")
+        with patch("bmnews.gui.routes.papers.FullTextService") as MockSvc:
+            instance = MockSvc.return_value
+            instance.fetch_fulltext.return_value = FullTextResult(
+                source="europepmc", html="<p>Full text content</p>",
+            )
+            resp = seeded_client.post(f"/papers/{paper['id']}/fulltext")
+            assert resp.status_code == 200
+            assert b"Full text content" in resp.data
+
+    def test_fulltext_not_found(self, seeded_client):
+        resp = seeded_client.post("/papers/99999/fulltext")
+        assert resp.status_code == 404
 
 
 class TestLauncher:

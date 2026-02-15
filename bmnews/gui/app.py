@@ -9,6 +9,7 @@ from typing import Any
 from flask import Flask
 
 from bmnews.config import AppConfig
+from bmnews.gui.helpers import format_abstract_html
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,8 @@ def create_app(config: AppConfig, conn: Any) -> Flask:
     )
     app.config["BMNEWS_CONFIG"] = config
     app.config["BMNEWS_DB"] = conn
+    app.config["BMNEWS_EMAIL"] = getattr(config.user, "email", "bmnews@example.com")
+    app.jinja_env.filters["format_abstract"] = format_abstract_html
 
     from bmnews.gui.routes.papers import papers_bp
     from bmnews.gui.routes.settings import settings_bp

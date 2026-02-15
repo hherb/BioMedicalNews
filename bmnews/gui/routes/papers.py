@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+import json
+
 from flask import Blueprint, current_app, render_template, request, abort
 
-from bmnews.db.operations import get_papers_filtered, get_paper_with_score
+from bmlib.fulltext import FullTextService, FullTextError
+from bmnews.db.operations import (
+    get_papers_filtered,
+    get_paper_with_score,
+    save_fulltext,
+)
 
 papers_bp = Blueprint("papers", __name__)
 
@@ -76,4 +83,70 @@ def search():
         "fragments/paper_list.html",
         papers=papers, total=total, offset=0, limit=20,
         sort="combined", source="", tier="", design="",
+    )
+
+
+@papers_bp.route("/papers/<int:paper_id>/fulltext", methods=["POST"])
+def paper_fulltext(paper_id: int):
+    """Fetch and display full text for a paper."""
+    conn = current_app.config["BMNEWS_DB"]
+    paper = get_paper_with_score(conn, paper_id)
+    if paper is None:
+        abort(404)
+
+    # Check if already cached in DB
+    if paper.get("fulltext_html"):
+        return render_template("fragments/fulltext_content.html", paper=paper)
+
+    # Extract identifiers
+    pmc_id = paper.get("pmcid") or ""
+    doi = paper.get("doi") or ""
+    pmid = paper.get("pmid") or ""
+
+    # Also try metadata_json
+    if not pmc_id or not pmid:
+        meta = json.loads(paper.get("metadata_json") or "{}")
+        pmc_id = pmc_id or meta.get("pmcid", "")
+        pmid = pmid or meta.get("pmid", "")
+
+    email = current_app.config.get("BMNEWS_EMAIL", "bmnews@example.com")
+    service = FullTextService(email=email)
+
+    try:
+        result = service.fetch_fulltext(
+            pmc_id=pmc_id or None, doi=doi or None, pmid=pmid,
+        )
+    except FullTextError:
+        return (
+            '<div class="fulltext-unavailable">'
+            "<p>Full text is not available for this paper.</p></div>"
+        )
+
+    if result.source == "europepmc" and result.html:
+        save_fulltext(
+            conn, paper_id=paper_id, html=result.html, source="europepmc",
+        )
+        paper["fulltext_html"] = result.html
+        paper["fulltext_source"] = "europepmc"
+        return render_template("fragments/fulltext_content.html", paper=paper)
+
+    if result.source == "unpaywall" and result.pdf_url:
+        return (
+            '<div class="fulltext-pdf">'
+            "<p>PDF available from open-access source:</p>"
+            f'<a href="{result.pdf_url}" target="_blank" '
+            'class="btn btn-primary">Open PDF</a></div>'
+        )
+
+    if result.web_url:
+        return (
+            '<div class="fulltext-external">'
+            "<p>Full text available at publisher website:</p>"
+            f'<a href="{result.web_url}" target="_blank" '
+            'class="btn btn-primary">Open Publisher Page</a></div>'
+        )
+
+    return (
+        '<div class="fulltext-unavailable">'
+        "<p>Full text is not available for this paper.</p></div>"
     )
