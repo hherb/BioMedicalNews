@@ -44,3 +44,15 @@ document.addEventListener("DOMContentLoaded", function () {
         }
     });
 });
+
+function toggleFulltext() {
+    var el = document.getElementById("fulltext-display");
+    var btn = document.querySelector(".fulltext-toggle");
+    if (el.style.display === "none") {
+        el.style.display = "block";
+        btn.textContent = "Hide Full Text";
+    } else {
+        el.style.display = "none";
+        btn.textContent = "Show Full Text";
+    }
+}
