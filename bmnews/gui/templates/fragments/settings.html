@@ -69,6 +69,7 @@
                         <input type="password" name="llm.api_key"
                                value="{{ config.llm.api_key }}"
                                placeholder="Provider API key (or set env var)">
+                        <small class="settings-hint">Stored in plaintext in config file. Prefer environment variables for production use.</small>
                     </label>
                     <label>Concurrency:
                         <input type="number" name="llm.concurrency" value="{{ config.llm.concurrency }}" min="1" max="10">
