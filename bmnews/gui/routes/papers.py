@@ -65,6 +65,7 @@ def paper_detail(paper_id: int):
     paper = get_paper_with_score(conn, paper_id)
     if paper is None:
         abort(404)
+    _enrich_paper_metadata(paper)
     return render_template("fragments/reading_pane.html", paper=paper)
 
 
@@ -177,3 +178,13 @@ def paper_fulltext(paper_id: int):
         '<div class="fulltext-unavailable">'
         "<p>Full text is not available for this paper.</p></div>"
     )
+
+
+def _enrich_paper_metadata(paper: dict) -> None:
+    """Extract journal name from metadata_json into a top-level key."""
+    meta_str = paper.get("metadata_json") or "{}"
+    try:
+        meta = json.loads(meta_str) if isinstance(meta_str, str) else meta_str
+    except (json.JSONDecodeError, TypeError):
+        meta = {}
+    paper["journal"] = meta.get("journal", "")

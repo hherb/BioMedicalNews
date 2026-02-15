@@ -6,6 +6,10 @@
         <span class="sep">&middot;</span>
         <span class="date">{{ paper.published_date }}</span>
         <span class="sep">&middot;</span>
+        {% if paper.journal %}
+        <span class="journal-name">{{ paper.journal }}</span>
+        <span class="sep">&middot;</span>
+        {% endif %}
         <span class="source-badge source-{{ paper.source }}">{{ paper.source }}</span>
     </div>
 

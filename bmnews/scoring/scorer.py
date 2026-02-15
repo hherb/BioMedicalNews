@@ -13,8 +13,8 @@ from typing import Any
 
 from bmlib.llm import LLMClient
 from bmlib.templates import TemplateEngine
-from bmlib.quality.metadata_filter import classify_from_metadata
-from bmlib.quality.data_models import QualityAssessment
+from bmlib.quality.data_models import QualityAssessment, QualityFilter
+from bmlib.quality.manager import QualityManager
 
 from bmnews.scoring.relevance_agent import RelevanceAgent
 
@@ -47,16 +47,25 @@ def score_papers(
             summary, study_design, quality_tier, matched_tags, assessment_json
     """
     agent = RelevanceAgent(llm=llm, model=model, template_engine=template_engine)
+    quality_mgr = QualityManager(
+        llm=llm,
+        classifier_model=model,
+        assessor_model=model,
+        template_engine=template_engine,
+    )
+    quality_filter = _build_quality_filter(quality_tier)
     results = []
 
     if concurrency <= 1:
         for paper in papers:
-            result = _score_single(paper, agent, interests, quality_tier)
+            result = _score_single(paper, agent, quality_mgr, quality_filter, interests)
             results.append(result)
     else:
         with ThreadPoolExecutor(max_workers=concurrency) as pool:
             futures = {
-                pool.submit(_score_single, paper, agent, interests, quality_tier): paper
+                pool.submit(
+                    _score_single, paper, agent, quality_mgr, quality_filter, interests,
+                ): paper
                 for paper in papers
             }
             for future in as_completed(futures):
@@ -70,11 +79,22 @@ def score_papers(
     return results
 
 
+def _build_quality_filter(max_tier: int) -> QualityFilter:
+    """Map a max-tier integer to a QualityFilter."""
+    if max_tier <= 1:
+        return QualityFilter(use_metadata_only=True, use_llm_classification=False, use_detailed_assessment=False)
+    if max_tier == 2:
+        return QualityFilter(use_metadata_only=False, use_llm_classification=True, use_detailed_assessment=False)
+    # max_tier >= 3
+    return QualityFilter(use_metadata_only=False, use_llm_classification=True, use_detailed_assessment=True)
+
+
 def _score_single(
     paper: dict,
     agent: RelevanceAgent,
+    quality_mgr: QualityManager,
+    quality_filter: QualityFilter,
     interests: str,
-    quality_tier: int,
 ) -> dict:
     """Score a single paper: relevance (LLM) + quality (metadata/LLM)."""
     paper_id = paper.get("id", 0)
@@ -92,11 +112,24 @@ def _score_single(
     relevance_score = relevance_result.get("relevance_score", 0.0)
     summary = relevance_result.get("summary", "")
 
-    # --- Quality assessment (bmlib.quality) ---
-    quality_assessment = _assess_quality(paper, quality_tier)
+    # --- Quality assessment (bmlib.quality tiered pipeline) ---
+    pub_types = _extract_pub_types(paper)
+    logger.debug("Paper %s pub_types for classification: %s", paper_id, pub_types)
+    quality_assessment = quality_mgr.assess(
+        title=title,
+        abstract=abstract,
+        publication_types=pub_types,
+        filter_settings=quality_filter,
+    )
     quality_score = _quality_tier_to_score(quality_assessment)
     study_design = quality_assessment.study_design.value if quality_assessment.study_design else ""
     quality_tier_name = quality_assessment.quality_tier.name if quality_assessment.quality_tier else ""
+
+    logger.debug(
+        "Paper %s quality: design=%s tier=%s (assessment_tier=%d, confidence=%.2f)",
+        paper_id, study_design, quality_tier_name,
+        quality_assessment.assessment_tier, quality_assessment.confidence,
+    )
 
     # --- Combined score (weighted) ---
     combined = 0.6 * relevance_score + 0.4 * quality_score
@@ -115,20 +148,6 @@ def _score_single(
             "quality": quality_assessment.to_dict(),
         }),
     }
-
-
-def _assess_quality(paper: dict, max_tier: int) -> QualityAssessment:
-    """Run quality assessment up to the specified tier."""
-    # Tier 1: metadata-based classification (always free)
-    pub_types = _extract_pub_types(paper)
-    assessment = classify_from_metadata(pub_types)
-
-    # Tier 2+ would use LLM-based classification via bmlib.quality.manager
-    # but that requires a separate LLM call. For now, Tier 1 metadata
-    # classification covers the basic case. Tier 2/3 integration happens
-    # via the QualityManager in the pipeline when the user opts in.
-
-    return assessment
 
 
 def _extract_pub_types(paper: dict) -> list[str]:
@@ -160,7 +179,7 @@ def _quality_tier_to_score(assessment: QualityAssessment) -> float:
     tier_scores = {
         "UNCLASSIFIED": 0.3,
         "TIER_1_ANECDOTAL": 0.3,
-        "TIER_2_DESCRIPTIVE": 0.5,
+        "TIER_2_OBSERVATIONAL": 0.5,
         "TIER_3_CONTROLLED": 0.7,
         "TIER_4_EXPERIMENTAL": 0.85,
         "TIER_5_SYNTHESIS": 0.95,
