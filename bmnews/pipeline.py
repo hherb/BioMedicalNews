@@ -222,7 +222,22 @@ def run_score(
 
     llm = build_llm_client(config)
     templates = build_template_engine(config)
-    model = config.llm.model or f"{config.llm.provider}:"
+    # Always construct "provider:model" format for bmlib.
+    # config.llm.model stores the bare model name (e.g. "glm-4.7-flash:latest"),
+    # NOT the "provider:model" format that LLMClient expects.
+    raw_model = config.llm.model
+    if raw_model and ":" in raw_model:
+        # Could be "provider:model" OR "ollama_model:tag" — disambiguate
+        prefix = raw_model.split(":", 1)[0].lower()
+        known_providers = {"anthropic", "ollama", "openai", "deepseek", "mistral", "gemini"}
+        if prefix in known_providers:
+            model = raw_model  # already in provider:model format
+        else:
+            model = f"{config.llm.provider}:{raw_model}"  # bare model with tag
+    elif raw_model:
+        model = f"{config.llm.provider}:{raw_model}"
+    else:
+        model = f"{config.llm.provider}:"
 
     scored_count = 0
 

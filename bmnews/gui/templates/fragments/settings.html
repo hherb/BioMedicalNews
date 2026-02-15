@@ -38,7 +38,7 @@
                                 hx-get="/settings/models"
                                 hx-target="#llm-model-select"
                                 hx-trigger="change"
-                                hx-vals="js:{provider: document.getElementById('llm-provider').value}"
+                                hx-vals="js:{provider: document.getElementById('llm-provider').value, current: document.getElementById('llm-model').value}"
                                 hx-on::after-settle="syncModelSelect()">
                             <option value="ollama" {% if config.llm.provider == "ollama" %}selected{% endif %}>Ollama</option>
                             <option value="anthropic" {% if config.llm.provider == "anthropic" %}selected{% endif %}>Anthropic</option>
@@ -80,7 +80,16 @@
                             hidden.value = custom.value;
                         } else {
                             custom.style.display = 'none';
-                            if (sel.value) hidden.value = sel.value;
+                            // Always sync — if options loaded but none matched the
+                            // current value, pick the first real option so the hidden
+                            // field stays consistent with the visible dropdown.
+                            if (sel.value) {
+                                hidden.value = sel.value;
+                            } else if (sel.options.length > 1) {
+                                // First option that isn't __custom__
+                                sel.selectedIndex = 0;
+                                hidden.value = sel.options[0].value;
+                            }
                         }
                     }
                     function onModelSelectChange(sel) {
