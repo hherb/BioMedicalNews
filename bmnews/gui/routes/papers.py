@@ -19,7 +19,7 @@ papers_bp = Blueprint("papers", __name__)
 @papers_bp.route("/papers")
 def paper_list():
     conn = current_app.config["BMNEWS_DB"]
-    sort = request.args.get("sort", "combined")
+    sort = request.args.get("sort", "date")
     source = request.args.get("source", "")
     tier = request.args.get("tier", "")
     design = request.args.get("design", "")
@@ -39,7 +39,7 @@ def paper_list():
 @papers_bp.route("/papers/more")
 def paper_list_more():
     conn = current_app.config["BMNEWS_DB"]
-    sort = request.args.get("sort", "combined")
+    sort = request.args.get("sort", "date")
     source = request.args.get("source", "")
     tier = request.args.get("tier", "")
     design = request.args.get("design", "")

@@ -44,19 +44,16 @@ class RelevanceAgent(BaseAgent):
 
         system_prompt = self.render_template("relevance_system.txt")
 
-        response = self.chat(
-            [self.system_msg(system_prompt), self.user_msg(prompt)],
-            json_mode=True,
-        )
-
         try:
-            result = self.parse_json(response.content)
+            result = self.chat_json(
+                [self.system_msg(system_prompt), self.user_msg(prompt)],
+            )
         except ValueError:
-            logger.warning("Failed to parse scoring response for: %s", title[:80])
+            logger.warning("Failed to score after retries: %s", title[:80])
             result = {
                 "relevance_score": 0.0,
                 "summary": "",
-                "relevance_rationale": "Parse error",
+                "relevance_rationale": "LLM response error",
                 "key_findings": [],
                 "matched_tags": [],
             }

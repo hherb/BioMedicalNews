@@ -3,10 +3,10 @@
         <div class="list-controls">
             <select name="sort" hx-get="/papers" hx-target="#paper-list"
                     hx-swap="innerHTML" hx-include="[name='source'],[name='tier']">
+                <option value="date">Date</option>
                 <option value="combined">Combined Score</option>
                 <option value="relevance">Relevance</option>
                 <option value="quality">Quality</option>
-                <option value="date">Date</option>
             </select>
             <select name="source" hx-get="/papers" hx-target="#paper-list"
                     hx-swap="innerHTML" hx-include="[name='sort'],[name='tier']">
