@@ -19,6 +19,7 @@ from bmnews.config import AppConfig
 from bmnews.db.schema import init_db, open_db
 from bmnews.db.operations import (
     upsert_paper,
+    update_paper_identifiers,
     get_unscored_papers,
     save_score,
     save_paper_tags,
@@ -82,7 +83,7 @@ def run_store(config: AppConfig, papers: list[FetchedPaper]) -> int:
 
     stored = 0
     for paper in papers:
-        upsert_paper(
+        pid = upsert_paper(
             conn,
             doi=paper.doi,
             title=paper.title,
@@ -94,6 +95,14 @@ def run_store(config: AppConfig, papers: list[FetchedPaper]) -> int:
             categories=paper.categories,
             metadata_json=json.dumps(paper.metadata),
         )
+        pmid = paper.metadata.get("pmid")
+        pmcid = paper.metadata.get("pmcid")
+        if pmid or pmcid:
+            update_paper_identifiers(
+                conn, paper_id=pid,
+                pmid=pmid or None,
+                pmcid=pmcid or None,
+            )
         stored += 1
 
     conn.close()
