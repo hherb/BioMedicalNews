@@ -35,6 +35,15 @@ document.addEventListener("DOMContentLoaded", function () {
         }
     });
 
+    // Relay refreshPapers event to #paper-list (HX-Trigger fires on swap target
+    // #status-right; we re-dispatch it directly on #paper-list)
+    document.body.addEventListener("refreshPapers", function (evt) {
+        var paperList = document.getElementById("paper-list");
+        if (paperList && evt.target !== paperList) {
+            htmx.trigger(paperList, "refreshPapers");
+        }
+    });
+
     // Tab switching
     document.body.addEventListener("click", function (evt) {
         var tab = evt.target.closest(".tab");

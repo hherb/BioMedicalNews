@@ -42,9 +42,9 @@ def run():
         prev = _pipeline_status["message"]
         _pipeline_status["message"] = message
         # Flag a list refresh when papers become available or get updated:
-        # - Store→Score transition: papers are now in DB
-        # - Every Nth scored paper: scores are incrementally saved
-        if "Scoring" in message and "Storing" in prev:
+        # - Storing phase completes (next message after "Storing" means store is done)
+        # - Each scored paper: scores are incrementally saved
+        if "Storing" in prev and "Storing" not in message:
             _pipeline_status["refresh_list"] = True
         elif "Scoring paper" in message:
             _pipeline_status["refresh_list"] = True
