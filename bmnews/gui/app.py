@@ -39,7 +39,9 @@ def create_app(config: AppConfig, conn: Any) -> Flask:
 
     @app.route("/")
     def index():
-        from flask import render_template
+        from flask import render_template, request
+        if request.headers.get("HX-Request"):
+            return render_template("fragments/papers_view.html")
         return render_template("base.html")
 
     return app

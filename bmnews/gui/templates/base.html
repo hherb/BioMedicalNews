@@ -19,38 +19,7 @@
     </nav>
 
     <main id="main-content">
-        <div class="split-container">
-            <div class="paper-list-pane" id="paper-list-pane">
-                <div class="list-controls">
-                    <select name="sort" hx-get="/papers" hx-target="#paper-list"
-                            hx-swap="innerHTML" hx-include="[name='source'],[name='tier']">
-                        <option value="combined">Combined Score</option>
-                        <option value="relevance">Relevance</option>
-                        <option value="quality">Quality</option>
-                        <option value="date">Date</option>
-                    </select>
-                    <select name="source" hx-get="/papers" hx-target="#paper-list"
-                            hx-swap="innerHTML" hx-include="[name='sort'],[name='tier']">
-                        <option value="">All Sources</option>
-                        <option value="medrxiv">medRxiv</option>
-                        <option value="biorxiv">bioRxiv</option>
-                        <option value="europepmc">EuropePMC</option>
-                    </select>
-                </div>
-                <div id="paper-list" hx-get="/papers" hx-trigger="load" hx-swap="innerHTML">
-                </div>
-            </div>
-
-            <div class="gutter" id="gutter"></div>
-
-            <div class="reading-pane" id="reading-pane-pane">
-                <div id="reading-pane" class="reading-pane-content">
-                    <div class="empty-state">
-                        <p>Select a paper from the list to read its details.</p>
-                    </div>
-                </div>
-            </div>
-        </div>
+        {% include "fragments/papers_view.html" %}
     </main>
 
     <footer class="status-bar" id="status-bar">
