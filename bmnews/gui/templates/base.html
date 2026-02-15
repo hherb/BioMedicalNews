@@ -24,7 +24,8 @@
 
     <footer class="status-bar" id="status-bar">
         <span id="status-left">Ready</span>
-        <span id="status-right">
+        <span id="status-right"
+              hx-post="/pipeline/resume" hx-trigger="load" hx-target="#status-right" hx-swap="innerHTML">
             <button class="pipeline-btn"
                     hx-post="/pipeline/run" hx-target="#status-right" hx-swap="innerHTML">
                 Fetch &amp; Score

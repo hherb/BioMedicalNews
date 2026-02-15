@@ -7,6 +7,7 @@ import threading
 
 from flask import Blueprint, current_app, render_template
 
+from bmlib.db import fetch_scalar
 from bmnews.config import AppConfig
 
 pipeline_bp = Blueprint("pipeline", __name__)
@@ -73,6 +74,70 @@ def run():
     return render_template("fragments/status_bar.html",
                            message="Starting pipeline...", status="busy",
                            running=True)
+
+
+@pipeline_bp.route("/pipeline/resume", methods=["POST"])
+def resume():
+    """Auto-resume scoring for papers left unscored from a previous session."""
+    from bmnews.pipeline import run_score
+
+    conn = current_app.config["BMNEWS_DB"]
+    count = fetch_scalar(
+        conn,
+        "SELECT COUNT(*) FROM papers p LEFT JOIN scores s ON s.paper_id = p.id "
+        "WHERE s.id IS NULL",
+    ) or 0
+
+    if count == 0 or _pipeline_status["running"]:
+        return render_template("fragments/status_bar.html",
+                               message=_pipeline_status["message"],
+                               status=_pipeline_status["status"],
+                               running=_pipeline_status["running"])
+
+    config: AppConfig = current_app.config["BMNEWS_CONFIG"]
+    app = current_app._get_current_object()
+
+    if not _pipeline_lock.acquire(blocking=False):
+        return render_template("fragments/status_bar.html",
+                               message="Pipeline already running...", status="busy",
+                               running=True)
+
+    _pipeline_status.update(
+        running=True,
+        message=f"Resuming scoring of {count} papers...",
+        status="busy",
+        refresh_list=False,
+    )
+
+    def _on_progress(message: str) -> None:
+        prev = _pipeline_status["message"]
+        _pipeline_status["message"] = message
+        if "Scoring paper" in message:
+            _pipeline_status["refresh_list"] = True
+
+    def _run():
+        try:
+            with app.app_context():
+                scored = run_score(config, on_progress=_on_progress)
+            msg = f"Resumed scoring complete — {scored} papers scored."
+            _pipeline_status.update(
+                running=False, message=msg, status="success",
+                refresh_list=True,
+            )
+        except Exception as e:
+            logger.exception("Resume scoring error")
+            _pipeline_status.update(
+                running=False, message=f"Scoring error: {e}", status="error",
+                refresh_list=False,
+            )
+        finally:
+            _pipeline_lock.release()
+
+    threading.Thread(target=_run, daemon=True).start()
+
+    return render_template("fragments/status_bar.html",
+                           message=f"Resuming scoring of {count} papers...",
+                           status="busy", running=True)
 
 
 @pipeline_bp.route("/pipeline/status")
