@@ -12,6 +12,8 @@ from bmnews.db.operations import (
     get_paper_with_score,
     get_papers_filtered,
     save_score,
+    save_fulltext,
+    update_paper_identifiers,
     save_paper_tags,
     get_paper_tags,
     get_all_tags,
@@ -366,3 +368,40 @@ class TestPaperTags:
         save_paper_tags(conn, paper_id=pid, tags=[])
         tags = get_paper_tags(conn, pid)
         assert tags == []
+
+
+class TestFulltextOperations:
+    def test_save_and_get_fulltext(self):
+        conn = _db()
+        pid = upsert_paper(conn, doi="10.1/ft", title="FT Paper")
+        save_fulltext(conn, paper_id=pid, html="<p>Full text</p>", source="europepmc")
+        save_score(conn, paper_id=pid, combined_score=0.5)
+        paper = get_paper_with_score(conn, pid)
+        assert paper["fulltext_html"] == "<p>Full text</p>"
+        assert paper["fulltext_source"] == "europepmc"
+
+    def test_update_paper_pmid_pmcid(self):
+        conn = _db()
+        pid = upsert_paper(conn, doi="10.1/id", title="ID Paper")
+        update_paper_identifiers(conn, paper_id=pid, pmid="12345", pmcid="PMC678")
+        from bmlib.db import fetch_one
+        row = fetch_one(conn, "SELECT pmid, pmcid FROM papers WHERE id = ?", (pid,))
+        assert row["pmid"] == "12345"
+        assert row["pmcid"] == "PMC678"
+
+    def test_update_paper_pmid_only(self):
+        conn = _db()
+        pid = upsert_paper(conn, doi="10.1/id2", title="PMID Only")
+        update_paper_identifiers(conn, paper_id=pid, pmid="99999")
+        from bmlib.db import fetch_one
+        row = fetch_one(conn, "SELECT pmid, pmcid FROM papers WHERE id = ?", (pid,))
+        assert row["pmid"] == "99999"
+        assert row["pmcid"] is None
+
+    def test_update_no_args_is_noop(self):
+        conn = _db()
+        pid = upsert_paper(conn, doi="10.1/noop", title="Noop")
+        update_paper_identifiers(conn, paper_id=pid)
+        from bmlib.db import fetch_one
+        row = fetch_one(conn, "SELECT pmid, pmcid FROM papers WHERE id = ?", (pid,))
+        assert row["pmid"] is None

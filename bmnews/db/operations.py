@@ -383,6 +383,42 @@ def record_digest(
     return digest_id
 
 
+# --- Full Text ---
+
+
+def save_fulltext(
+    conn: Any, *, paper_id: int, html: str, source: str,
+) -> None:
+    """Store full-text HTML and source for a paper."""
+    ph = _placeholder(conn)
+    with transaction(conn):
+        execute(
+            conn,
+            f"UPDATE papers SET fulltext_html = {ph}, fulltext_source = {ph} WHERE id = {ph}",
+            (html, source, paper_id),
+        )
+
+
+def update_paper_identifiers(
+    conn: Any, *, paper_id: int, pmid: str | None = None, pmcid: str | None = None,
+) -> None:
+    """Update pmid and/or pmcid for a paper."""
+    ph = _placeholder(conn)
+    sets = []
+    params: list = []
+    if pmid is not None:
+        sets.append(f"pmid = {ph}")
+        params.append(pmid)
+    if pmcid is not None:
+        sets.append(f"pmcid = {ph}")
+        params.append(pmcid)
+    if not sets:
+        return
+    params.append(paper_id)
+    with transaction(conn):
+        execute(conn, f"UPDATE papers SET {', '.join(sets)} WHERE id = {ph}", tuple(params))
+
+
 # --- Paper Tags ---
 
 
