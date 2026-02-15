@@ -110,15 +110,20 @@ def _save_model_cache(cache: dict[str, list[str]]) -> None:
 
 @settings_bp.route("/settings/models")
 def list_models():
-    """Return ``<option>`` elements for a provider's available models.
+    """Return ``<option>`` elements for a provider's model ``<select>``.
 
     Query params:
         provider: provider name (default ``"ollama"``)
         refresh: ``"1"`` to bypass cache and re-fetch from API
+        current: currently configured model name (to pre-select)
     """
     provider = request.args.get("provider", "ollama")
     refresh = request.args.get("refresh", "") == "1"
+    current = request.args.get("current", "")
     config: AppConfig = current_app.config["BMNEWS_CONFIG"]
+
+    if not current:
+        current = config.llm.model
 
     cache = _load_model_cache()
 
@@ -144,8 +149,20 @@ def list_models():
             cache[provider] = model_ids
             _save_model_cache(cache)
 
-    options_html = "".join(f'<option value="{mid}">' for mid in model_ids)
-    return options_html
+    # Build <option> elements with current model pre-selected
+    parts: list[str] = []
+    found_current = False
+    for mid in model_ids:
+        selected = ""
+        if mid == current:
+            selected = " selected"
+            found_current = True
+        parts.append(f'<option value="{mid}"{selected}>{mid}</option>')
+    # If current model not in list but is set, add it at top
+    if current and not found_current:
+        parts.insert(0, f'<option value="{current}" selected>{current}</option>')
+    parts.append('<option value="__custom__">Custom...</option>')
+    return "".join(parts)
 
 
 @settings_bp.route("/settings/templates")

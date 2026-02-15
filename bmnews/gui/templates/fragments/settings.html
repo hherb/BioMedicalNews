@@ -36,9 +36,10 @@
                     <label>Provider:
                         <select name="llm.provider" id="llm-provider"
                                 hx-get="/settings/models"
-                                hx-target="#model-options"
+                                hx-target="#llm-model-select"
                                 hx-trigger="change"
-                                hx-vals="js:{provider: document.getElementById('llm-provider').value}">
+                                hx-vals="js:{provider: document.getElementById('llm-provider').value}"
+                                hx-on::after-settle="syncModelSelect()">
                             <option value="ollama" {% if config.llm.provider == "ollama" %}selected{% endif %}>Ollama</option>
                             <option value="anthropic" {% if config.llm.provider == "anthropic" %}selected{% endif %}>Anthropic</option>
                             <option value="openai" {% if config.llm.provider == "openai" %}selected{% endif %}>OpenAI</option>
@@ -49,22 +50,52 @@
                     </label>
                     <label>Model:
                         <span style="display: flex; gap: 0.25rem; align-items: center;">
-                            <input type="text" name="llm.model" id="llm-model"
-                                   value="{{ config.llm.model }}" list="model-options"
-                                   placeholder="Select or type a model name"
-                                   style="flex: 1;">
-                            <datalist id="model-options"
-                                      hx-get="/settings/models?provider={{ config.llm.provider }}"
-                                      hx-trigger="load"
-                                      hx-swap="innerHTML">
-                            </datalist>
+                            <select id="llm-model-select"
+                                    hx-get="/settings/models?provider={{ config.llm.provider }}&current={{ config.llm.model|urlencode }}"
+                                    hx-trigger="load"
+                                    hx-swap="innerHTML"
+                                    hx-on::after-settle="syncModelSelect()"
+                                    onchange="onModelSelectChange(this)"
+                                    style="flex: 1;">
+                                <option value="">Loading models...</option>
+                            </select>
                             <button type="button" class="btn btn-sm"
                                     title="Refresh model list from provider"
-                                    onclick="htmx.ajax('GET', '/settings/models?provider=' + document.getElementById('llm-provider').value + '&refresh=1', {target: '#model-options', swap: 'innerHTML'})">
+                                    onclick="var p=document.getElementById('llm-provider').value; var c=document.getElementById('llm-model').value; htmx.ajax('GET', '/settings/models?provider=' + p + '&refresh=1&current=' + encodeURIComponent(c), {target: '#llm-model-select', swap: 'innerHTML'}).then(function(){ syncModelSelect(); })">
                                 &#x21bb;
                             </button>
                         </span>
+                        <input type="hidden" name="llm.model" id="llm-model" value="{{ config.llm.model }}">
+                        <input type="text" id="llm-model-custom" placeholder="Type a model name"
+                               style="display:none; margin-top:0.25rem;"
+                               oninput="document.getElementById('llm-model').value = this.value">
                     </label>
+                    <script>
+                    function syncModelSelect() {
+                        var sel = document.getElementById('llm-model-select');
+                        var hidden = document.getElementById('llm-model');
+                        var custom = document.getElementById('llm-model-custom');
+                        if (sel.value === '__custom__') {
+                            custom.style.display = '';
+                            hidden.value = custom.value;
+                        } else {
+                            custom.style.display = 'none';
+                            if (sel.value) hidden.value = sel.value;
+                        }
+                    }
+                    function onModelSelectChange(sel) {
+                        var hidden = document.getElementById('llm-model');
+                        var custom = document.getElementById('llm-model-custom');
+                        if (sel.value === '__custom__') {
+                            custom.style.display = '';
+                            custom.focus();
+                            hidden.value = custom.value;
+                        } else {
+                            custom.style.display = 'none';
+                            hidden.value = sel.value;
+                        }
+                    }
+                    </script>
                     <label>API Key:
                         <input type="password" name="llm.api_key"
                                value="{{ config.llm.api_key }}"
