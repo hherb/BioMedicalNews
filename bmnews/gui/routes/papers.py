@@ -96,6 +96,23 @@ def paper_fulltext(paper_id: int):
 
     # Check if already cached in DB
     if paper.get("fulltext_html"):
+        source = paper.get("fulltext_source", "")
+        if source == "unpaywall_pdf":
+            url = paper["fulltext_html"]
+            return (
+                '<div class="fulltext-pdf">'
+                "<p>PDF available from open-access source:</p>"
+                f'<a href="{url}" target="_blank" '
+                'class="btn btn-primary">Open PDF &#x2197;</a></div>'
+            )
+        if source == "publisher_url":
+            url = paper["fulltext_html"]
+            return (
+                '<div class="fulltext-external">'
+                "<p>Full text available at publisher website:</p>"
+                f'<a href="{url}" target="_blank" '
+                'class="btn btn-primary">Open Publisher Page &#x2197;</a></div>'
+            )
         return render_template("fragments/fulltext_content.html", paper=paper)
 
     # Extract identifiers
@@ -131,19 +148,29 @@ def paper_fulltext(paper_id: int):
         return render_template("fragments/fulltext_content.html", paper=paper)
 
     if result.source == "unpaywall" and result.pdf_url:
-        return (
-            '<div class="fulltext-pdf">'
-            "<p>PDF available from open-access source:</p>"
+        link_html = (
             f'<a href="{result.pdf_url}" target="_blank" '
-            'class="btn btn-primary">Open PDF</a></div>'
+            'class="btn btn-primary">Open PDF &#x2197;</a>'
+        )
+        save_fulltext(
+            conn, paper_id=paper_id, html=result.pdf_url, source="unpaywall_pdf",
+        )
+        return (
+            f'<div class="fulltext-pdf">'
+            f"<p>PDF available from open-access source:</p>{link_html}</div>"
         )
 
     if result.web_url:
-        return (
-            '<div class="fulltext-external">'
-            "<p>Full text available at publisher website:</p>"
+        link_html = (
             f'<a href="{result.web_url}" target="_blank" '
-            'class="btn btn-primary">Open Publisher Page</a></div>'
+            'class="btn btn-primary">Open Publisher Page &#x2197;</a>'
+        )
+        save_fulltext(
+            conn, paper_id=paper_id, html=result.web_url, source="publisher_url",
+        )
+        return (
+            f'<div class="fulltext-external">'
+            f"<p>Full text available at publisher website:</p>{link_html}</div>"
         )
 
     return (

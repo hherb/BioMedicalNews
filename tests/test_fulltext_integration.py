@@ -61,3 +61,21 @@ class TestEndToEnd:
             # Second request should use cached version (no service call)
             resp2 = client.get(f"/papers/{pid}")
             assert b"Show Full Text" in resp2.data
+
+    def test_pdf_url_cached_and_button_changes(self, app_with_paper):
+        app, conn, pid = app_with_paper
+        with app.test_client() as client:
+            with patch("bmnews.gui.routes.papers.FullTextService") as MockSvc:
+                instance = MockSvc.return_value
+                instance.fetch_fulltext.return_value = FullTextResult(
+                    source="unpaywall",
+                    pdf_url="https://example.com/paper.pdf",
+                )
+                resp = client.post(f"/papers/{pid}/fulltext")
+                assert resp.status_code == 200
+                assert b"Open PDF" in resp.data
+
+            # Reading pane should now show "Open PDF" link, not "Get Full Text"
+            resp2 = client.get(f"/papers/{pid}")
+            assert b"Open PDF" in resp2.data
+            assert b"Get Full Text" not in resp2.data
