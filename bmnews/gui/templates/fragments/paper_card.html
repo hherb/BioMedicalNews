@@ -8,9 +8,13 @@
         <span class="date">{{ paper.published_date }}</span>
     </div>
     <div class="card-score">
+        {% if paper.combined_score is not none %}
         <span class="score-badge {% if paper.combined_score >= 0.7 %}score-high{% elif paper.combined_score >= 0.5 %}score-mid{% else %}score-low{% endif %}">
             {{ (paper.combined_score * 100)|int }}%
         </span>
+        {% else %}
+        <span class="score-badge score-low">pending</span>
+        {% endif %}
         {% if paper.study_design %}
         <span class="design-badge">{{ paper.study_design }}</span>
         {% endif %}

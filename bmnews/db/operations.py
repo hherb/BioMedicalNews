@@ -265,16 +265,16 @@ def get_papers_filtered(
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
 
     sort_map = {
-        "combined": "s.combined_score DESC",
-        "relevance": "s.relevance_score DESC",
-        "quality": "s.quality_score DESC",
+        "combined": "s.combined_score DESC NULLS LAST",
+        "relevance": "s.relevance_score DESC NULLS LAST",
+        "quality": "s.quality_score DESC NULLS LAST",
         "date": "p.published_date DESC",
     }
-    order_by = sort_map.get(sort, "s.combined_score DESC")
+    order_by = sort_map.get(sort, "s.combined_score DESC NULLS LAST")
 
     base_query = f"""
         FROM papers p
-        JOIN scores s ON s.paper_id = p.id
+        LEFT JOIN scores s ON s.paper_id = p.id
         {where}
     """
 
