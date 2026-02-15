@@ -18,11 +18,7 @@
 {% endif %}
 
 {% if total is not none %}
-<div id="paper-count" hx-swap-oob="innerHTML:#status-bar">
+<div id="paper-count" hx-swap-oob="innerHTML:#status-left">
     Showing {{ papers|length }}{% if total > papers|length %} of {{ total }}{% endif %} papers · Sorted by {{ sort }}
-    <button class="pipeline-btn"
-            hx-post="/pipeline/run" hx-target="#status-bar" hx-swap="innerHTML">
-        Fetch &amp; Score
-    </button>
 </div>
 {% endif %}

@@ -13,7 +13,12 @@ pipeline_bp = Blueprint("pipeline", __name__)
 logger = logging.getLogger(__name__)
 
 _pipeline_lock = threading.Lock()
-_pipeline_status: dict = {"running": False, "message": "Ready", "status": "idle"}
+_pipeline_status: dict = {
+    "running": False,
+    "message": "Ready",
+    "status": "idle",
+    "refresh_list": False,
+}
 
 
 @pipeline_bp.route("/pipeline/run", methods=["POST"])
@@ -28,10 +33,21 @@ def run():
                                message="Pipeline already running...", status="busy",
                                running=True)
 
-    _pipeline_status.update(running=True, message="Starting pipeline...", status="busy")
+    _pipeline_status.update(
+        running=True, message="Starting pipeline...", status="busy",
+        refresh_list=False,
+    )
 
     def _on_progress(message: str) -> None:
+        prev = _pipeline_status["message"]
         _pipeline_status["message"] = message
+        # Flag a list refresh when papers become available or get updated:
+        # - Store→Score transition: papers are now in DB
+        # - Every Nth scored paper: scores are incrementally saved
+        if "Scoring" in message and "Storing" in prev:
+            _pipeline_status["refresh_list"] = True
+        elif "Scoring paper" in message:
+            _pipeline_status["refresh_list"] = True
 
     def _run():
         try:
@@ -41,11 +57,13 @@ def run():
                 running=False,
                 message="Pipeline complete — papers fetched, scored, and digested.",
                 status="success",
+                refresh_list=True,
             )
         except Exception as e:
             logger.exception("Pipeline error")
             _pipeline_status.update(
-                running=False, message=f"Pipeline error: {e}", status="error"
+                running=False, message=f"Pipeline error: {e}", status="error",
+                refresh_list=False,
             )
         finally:
             _pipeline_lock.release()
@@ -54,12 +72,16 @@ def run():
 
     return render_template("fragments/status_bar.html",
                            message="Starting pipeline...", status="busy",
-                           running=True)
+                           running=True, refresh_list=False)
 
 
 @pipeline_bp.route("/pipeline/status")
 def status():
+    refresh = _pipeline_status["refresh_list"]
+    if refresh:
+        _pipeline_status["refresh_list"] = False
     return render_template("fragments/status_bar.html",
                            message=_pipeline_status["message"],
                            status=_pipeline_status["status"],
-                           running=_pipeline_status["running"])
+                           running=_pipeline_status["running"],
+                           refresh_list=refresh)

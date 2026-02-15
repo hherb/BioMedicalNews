@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BioMedical News</title>
+    <title>Bio-Medical News - Version {{ app_version }}</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
     <script src="{{ url_for('static', filename='vendor/htmx.min.js') }}"></script>
     <script src="{{ url_for('static', filename='vendor/split-grid.min.js') }}"></script>
@@ -23,11 +23,13 @@
     </main>
 
     <footer class="status-bar" id="status-bar">
-        <span>Ready</span>
-        <button class="pipeline-btn"
-                hx-post="/pipeline/run" hx-target="#status-bar" hx-swap="innerHTML">
-            Fetch &amp; Score
-        </button>
+        <span id="status-left">Ready</span>
+        <span id="status-right">
+            <button class="pipeline-btn"
+                    hx-post="/pipeline/run" hx-target="#status-right" hx-swap="innerHTML">
+                Fetch &amp; Score
+            </button>
+        </span>
     </footer>
 
     <script src="{{ url_for('static', filename='js/app.js') }}"></script>

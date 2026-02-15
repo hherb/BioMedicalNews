@@ -192,6 +192,25 @@ body {
 }
 .pipeline-btn:hover { background: var(--card-hover); }
 
+#status-left { flex: 1; }
+#status-right { display: flex; align-items: center; gap: 0.5rem; }
+
+.status-progress.active {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    background: var(--active-progress-bg, var(--warning));
+    color: var(--active-progress-fg, #212529);
+    padding: 0.15rem 0.75rem;
+    border-radius: 4px;
+}
+.status-progress.active .spinner {
+    border-color: var(--active-progress-fg, #212529);
+    border-top-color: transparent;
+    margin-left: 0;
+}
+.status-progress.active .status-busy { color: var(--active-progress-fg, #212529); }
+
 .status-success { color: var(--success); }
 .status-error { color: var(--danger); }
 .status-busy { color: var(--warning); }

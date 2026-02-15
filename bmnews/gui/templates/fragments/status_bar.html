@@ -1,10 +1,18 @@
-<span class="status-{{ status }}">{{ message }}</span>
 {% if running %}
-<span class="spinner"></span>
-<span hx-get="/pipeline/status" hx-trigger="every 2s" hx-target="#status-bar" hx-swap="innerHTML"></span>
+<span class="status-progress active">
+    <span class="spinner"></span>
+    <span class="status-{{ status }}">{{ message }}</span>
+    <span hx-get="/pipeline/status" hx-trigger="every 2s" hx-target="#status-right" hx-swap="innerHTML"></span>
+</span>
 {% else %}
+{% if status and status != 'idle' %}
+<span class="status-{{ status }}">{{ message }}</span>
+{% endif %}
 <button class="pipeline-btn"
-        hx-post="/pipeline/run" hx-target="#status-bar" hx-swap="innerHTML">
+        hx-post="/pipeline/run" hx-target="#status-right" hx-swap="innerHTML">
     Fetch &amp; Score
 </button>
+{% endif %}
+{% if refresh_list %}
+<div id="paper-list" hx-get="/papers" hx-trigger="load" hx-swap="innerHTML" hx-swap-oob="true"></div>
 {% endif %}

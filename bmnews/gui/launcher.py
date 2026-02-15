@@ -7,6 +7,7 @@ import socket
 import threading
 from typing import Any
 
+from bmnews import __version__
 from bmnews.config import AppConfig
 from bmnews.db.schema import init_db, open_db
 
@@ -59,7 +60,7 @@ def launch(config: AppConfig, port: int | None = None) -> None:
 
     # Open the native window
     window = webview.create_window(
-        "BioMedical News",
+        f"Bio-Medical News - Version {__version__}",
         f"http://127.0.0.1:{port}",
         width=1200,
         height=800,
