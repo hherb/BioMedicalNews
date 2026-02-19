@@ -11,6 +11,7 @@ from datetime import date, timedelta
 
 import httpx
 
+from bmlib.fulltext.models import FullTextSourceEntry
 from bmnews.fetchers.base import FetchedPaper
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,21 @@ def fetch_europepmc(
                 if not identifier:
                     continue
 
+                fulltext_sources = _extract_fulltext_sources(item)
+                metadata: dict = {
+                    "pmid": pmid,
+                    "pmcid": item.get("pmcid", ""),
+                    "source": item.get("source", ""),
+                    "pub_type": item.get("pubTypeList", {}).get("pubType", []),
+                    "journal": item.get("journalTitle", ""),
+                    "cited_by": item.get("citedByCount", 0),
+                    "is_open_access": item.get("isOpenAccess", "N"),
+                }
+                if fulltext_sources:
+                    metadata["fulltext_sources"] = [
+                        s.to_dict() for s in fulltext_sources
+                    ]
+
                 paper = FetchedPaper(
                     doi=doi or f"pmid:{pmid}",
                     title=item.get("title", ""),
@@ -82,15 +98,7 @@ def fetch_europepmc(
                     source="europepmc",
                     published_date=item.get("firstPublicationDate", ""),
                     categories=_format_categories(item),
-                    metadata={
-                        "pmid": pmid,
-                        "pmcid": item.get("pmcid", ""),
-                        "source": item.get("source", ""),
-                        "pub_type": item.get("pubTypeList", {}).get("pubType", []),
-                        "journal": item.get("journalTitle", ""),
-                        "cited_by": item.get("citedByCount", 0),
-                        "is_open_access": item.get("isOpenAccess", "N"),
-                    },
+                    metadata=metadata,
                 )
                 papers.append(paper)
 
@@ -118,6 +126,32 @@ def _build_url(doi: str, pmid: str) -> str:
     if pmid:
         return f"https://europepmc.org/article/med/{pmid}"
     return ""
+
+
+def _extract_fulltext_sources(item: dict) -> list[FullTextSourceEntry]:
+    """Extract free full-text source URLs from Europe PMC fullTextUrlList."""
+    sources: list[FullTextSourceEntry] = []
+    url_list = item.get("fullTextUrlList")
+    if not isinstance(url_list, dict):
+        return sources
+    for entry in url_list.get("fullTextUrl", []):
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("availability") != "Free":
+            continue
+        url = entry.get("url", "")
+        style = entry.get("documentStyle", "")
+        if not url or not style:
+            continue
+        fmt = {"pdf": "pdf", "html": "html", "doi": "html"}.get(style)
+        if fmt:
+            sources.append(FullTextSourceEntry(
+                url=url,
+                format=fmt,
+                source="europepmc",
+                open_access=True,
+            ))
+    return sources
 
 
 def _format_categories(item: dict) -> str:
