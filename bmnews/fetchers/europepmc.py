@@ -1,149 +1,195 @@
-"""Fetcher for Europe PMC.
+"""Europe PMC source fetcher.
 
-Uses the Europe PMC REST API:
-https://europepmc.org/RestfulWebService
+Europe PMC is not one of bmlib's built-in sources, so bmnews supplies it and
+registers it into bmlib's publication registry (see
+:mod:`bmnews.fetchers`).  It therefore follows exactly the same calling
+convention as every bmlib fetcher::
+
+    fetcher(client, target_date, *, on_record, on_progress=None, **config)
+
+and emits :class:`~bmlib.publications.models.FetchedRecord` objects, so the
+pipeline needs no special case for it.
+
+API reference: https://europepmc.org/RestfulWebService
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
+from collections.abc import Callable
+from datetime import date
+from typing import Any
 
-import httpx
 from bmlib.fulltext.models import FullTextSourceEntry
+from bmlib.publications.models import FetchedRecord, FetchResult, SyncProgress
 
-from bmnews.constants import (
-    EUROPEPMC_PAGE_SIZE,
-    HTTP_TIMEOUT_SECONDS,
-    MAX_FETCH_PAGES,
-)
-from bmnews.fetchers.base import FetchedPaper
+from bmnews.constants import EUROPEPMC_PAGE_SIZE, MAX_FETCH_PAGES
 
 logger = logging.getLogger(__name__)
 
+SOURCE_NAME = "europepmc"
 SEARCH_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
-PAGE_SIZE = EUROPEPMC_PAGE_SIZE
+
+#: Query used when the user has not configured one — every preprint indexed
+#: by Europe PMC for the target date.
+DEFAULT_QUERY = "SRC:PPR"
 
 
 def fetch_europepmc(
+    client: Any,
+    target_date: date,
+    *,
+    on_record: Callable[[FetchedRecord], None],
+    on_progress: Callable[[SyncProgress], None] | None = None,
     query: str = "",
-    lookback_days: int = 7,
-    timeout: float = HTTP_TIMEOUT_SECONDS,
-) -> list[FetchedPaper]:
-    """Fetch recent publications from Europe PMC.
+) -> FetchResult:
+    """Fetch Europe PMC records first published on *target_date*.
 
     Args:
-        query: Europe PMC query string. If empty, recent preprints
-            (``SRC:PPR``) are fetched instead.
-        lookback_days: How many days back from today to search.
-        timeout: Per-request HTTP timeout in seconds.
+        client: An httpx-compatible client supporting ``get(url, params=...)``.
+        target_date: The publication date to query for.
+        on_record: Callback invoked with each normalised record.
+        on_progress: Optional callback invoked after each page.
+        query: Europe PMC query string. Defaults to :data:`DEFAULT_QUERY`
+            (all preprints) when empty.
 
     Returns:
-        Normalized papers. Returns whatever was collected so far if the API
-        errors partway through pagination.
+        A :class:`FetchResult` summarising the day. Records already handed to
+        *on_record* are kept even when a later page fails.
     """
-    end = date.today()
-    start = end - timedelta(days=lookback_days)
+    date_str = target_date.isoformat()
+    base_query = query or DEFAULT_QUERY
+    date_query = f"({base_query}) AND (FIRST_PDATE:[{date_str} TO {date_str}])"
 
-    if query:
-        date_query = (
-            f"({query}) AND (FIRST_PDATE:[{start.isoformat()} TO {end.isoformat()}])"
-        )
-    else:
-        date_query = (
-            f"SRC:PPR AND (FIRST_PDATE:[{start.isoformat()} TO {end.isoformat()}])"
-        )
-
-    papers: list[FetchedPaper] = []
     cursor_mark = "*"
+    total_fetched = 0
+    records_total: int | None = None
 
-    with httpx.Client(timeout=timeout) as client:
+    try:
         for _page in range(MAX_FETCH_PAGES):
             params = {
                 "query": date_query,
                 "format": "json",
-                "pageSize": PAGE_SIZE,
+                "pageSize": EUROPEPMC_PAGE_SIZE,
                 "resultType": "core",
                 "cursorMark": cursor_mark,
             }
             logger.debug("Fetching EuropePMC: %s", date_query)
 
-            try:
-                resp = client.get(SEARCH_URL, params=params)
-                resp.raise_for_status()
-            except httpx.HTTPError as e:
-                logger.error("HTTP error fetching EuropePMC: %s", e)
-                break
+            response = client.get(SEARCH_URL, params=params)
+            response.raise_for_status()
+            data = response.json()
 
-            try:
-                data = resp.json()
-            except ValueError:
-                logger.error("Malformed JSON from EuropePMC — stopping pagination")
-                break
+            if records_total is None:
+                records_total = int(data.get("hitCount", 0) or 0)
 
             results = data.get("resultList", {}).get("result", [])
             if not results:
                 break
 
             for item in results:
-                doi = item.get("doi", "")
-                pmid = item.get("pmid", "")
-                identifier = doi or pmid
-                if not identifier:
+                record = _normalize(item)
+                if record is None:
                     continue
+                on_record(record)
+                total_fetched += 1
 
-                fulltext_sources = _extract_fulltext_sources(item)
-                metadata: dict = {
-                    "pmid": pmid,
-                    "pmcid": item.get("pmcid", ""),
-                    "source": item.get("source", ""),
-                    "pub_type": item.get("pubTypeList", {}).get("pubType", []),
-                    "journal": item.get("journalTitle", ""),
-                    "cited_by": item.get("citedByCount", 0),
-                    "is_open_access": item.get("isOpenAccess", "N"),
-                }
-                if fulltext_sources:
-                    metadata["fulltext_sources"] = [
-                        s.to_dict() for s in fulltext_sources
-                    ]
-
-                paper = FetchedPaper(
-                    doi=doi or f"pmid:{pmid}",
-                    title=item.get("title", ""),
-                    authors=_format_authors(item.get("authorString", "")),
-                    abstract=item.get("abstractText", ""),
-                    url=_build_url(doi, pmid),
-                    source="europepmc",
-                    published_date=item.get("firstPublicationDate", ""),
-                    categories=_format_categories(item),
-                    metadata=metadata,
+            if on_progress is not None:
+                on_progress(
+                    SyncProgress(
+                        source=SOURCE_NAME,
+                        date=date_str,
+                        records_processed=total_fetched,
+                        records_total=records_total or total_fetched,
+                        status="in_progress",
+                    )
                 )
-                papers.append(paper)
 
-            # Pagination
             next_cursor = data.get("nextCursorMark", "")
             if not next_cursor or next_cursor == cursor_mark:
                 break
             cursor_mark = next_cursor
         else:
             logger.warning(
-                "Stopped after %d EuropePMC pages — results may be truncated",
-                MAX_FETCH_PAGES,
+                "Stopped after %d EuropePMC pages for %s — results may be truncated",
+                MAX_FETCH_PAGES, date_str,
             )
+    except Exception as exc:
+        logger.error("Error fetching EuropePMC for %s: %s", date_str, exc)
+        return FetchResult(
+            source=SOURCE_NAME,
+            date=date_str,
+            record_count=total_fetched,
+            status="failed",
+            error=str(exc),
+        )
 
-    logger.info("Fetched %d papers from EuropePMC", len(papers))
-    return papers
+    logger.debug("Fetched %d EuropePMC records for %s", total_fetched, date_str)
+    return FetchResult(
+        source=SOURCE_NAME,
+        date=date_str,
+        record_count=total_fetched,
+        status="completed",
+    )
 
 
-def _format_authors(authors_str: str) -> str:
-    """Clean up the authors string."""
+def _normalize(item: dict) -> FetchedRecord | None:
+    """Convert one Europe PMC search hit to a :class:`FetchedRecord`.
+
+    Args:
+        item: A single entry from the API's ``resultList.result`` array.
+
+    Returns:
+        The normalised record, or None when the hit carries neither a DOI nor
+        a PMID and so cannot be stored under a stable key.
+    """
+    doi = item.get("doi", "")
+    pmid = item.get("pmid", "")
+    if not doi and not pmid:
+        return None
+
+    return FetchedRecord(
+        title=item.get("title", ""),
+        source=SOURCE_NAME,
+        # Empty optional fields are sent as None (not ""), matching bmlib's
+        # own fetchers, so a later merge from another source can fill them in.
+        doi=doi or None,
+        pmid=pmid or None,
+        pmc_id=item.get("pmcid") or None,
+        abstract=item.get("abstractText") or None,
+        authors=_split_authors(item.get("authorString", "")),
+        journal=item.get("journalTitle") or None,
+        publication_date=item.get("firstPublicationDate") or None,
+        keywords=_keywords(item),
+        publication_types=list(item.get("pubTypeList", {}).get("pubType", [])),
+        is_open_access=item.get("isOpenAccess", "N") == "Y",
+        license=item.get("license") or None,
+        fulltext_sources=_fulltext_sources(item),
+        extras={
+            "europepmc_source": item.get("source", ""),
+            "cited_by": item.get("citedByCount", 0),
+            "url": _build_url(doi, pmid),
+        },
+    )
+
+
+def _split_authors(authors_str: str) -> list[str]:
+    """Split Europe PMC's comma-separated ``authorString`` into names."""
     if not authors_str:
-        return ""
-    return authors_str.rstrip(".")
+        return []
+    return [a.strip() for a in authors_str.rstrip(".").split(",") if a.strip()]
+
+
+def _keywords(item: dict) -> list[str]:
+    """Collect subject keywords for a hit, ignoring malformed entries."""
+    raw = item.get("keywordList", {})
+    if not isinstance(raw, dict):
+        return []
+    return [k.strip() for k in raw.get("keyword", []) if isinstance(k, str) and k.strip()]
 
 
 def _build_url(doi: str, pmid: str) -> str:
-    """Build the best available URL for the paper."""
+    """Build the best available canonical URL for a hit."""
     if doi:
         return f"https://doi.org/{doi}"
     if pmid:
@@ -151,8 +197,8 @@ def _build_url(doi: str, pmid: str) -> str:
     return ""
 
 
-def _extract_fulltext_sources(item: dict) -> list[FullTextSourceEntry]:
-    """Extract free full-text source URLs from Europe PMC fullTextUrlList."""
+def _fulltext_sources(item: dict) -> list[FullTextSourceEntry]:
+    """Extract free full-text source URLs from Europe PMC's fullTextUrlList."""
     sources: list[FullTextSourceEntry] = []
     url_list = item.get("fullTextUrlList")
     if not isinstance(url_list, dict):
@@ -171,18 +217,7 @@ def _extract_fulltext_sources(item: dict) -> list[FullTextSourceEntry]:
             sources.append(FullTextSourceEntry(
                 url=url,
                 format=fmt,
-                source="europepmc",
+                source=SOURCE_NAME,
                 open_access=True,
             ))
     return sources
-
-
-def _format_categories(item: dict) -> str:
-    """Extract category/subject info."""
-    parts = []
-    if item.get("journalTitle"):
-        parts.append(item["journalTitle"])
-    pub_types = item.get("pubTypeList", {}).get("pubType", [])
-    if pub_types:
-        parts.extend(pub_types)
-    return "; ".join(parts)

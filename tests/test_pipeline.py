@@ -1,7 +1,8 @@
-"""Tests for bmnews.pipeline show_cached and days parameter."""
+"""Tests for bmnews.pipeline: fetching, storing, and cached digests."""
 
 from __future__ import annotations
 
+import json
 from datetime import date, timedelta
 from unittest.mock import patch
 
@@ -200,3 +201,119 @@ class TestRunStoreIdentifiers:
             FetchedPaper(doi="10.1234/has-doi", title="Has DOI", source="medrxiv"),
         ])
         assert stored == 1
+
+
+class TestRecordToFetchedPaper:
+    """Nothing bmlib normalises may be dropped on the way into the database."""
+
+    def _record(self, **overrides):
+        from bmlib.fulltext.models import FullTextSourceEntry
+        from bmlib.publications.models import FetchedRecord
+
+        defaults = dict(
+            title="A Trial",
+            source="pubmed",
+            doi="10.1234/abc",
+            pmid="111",
+            pmc_id="PMC222",
+            abstract="Findings.",
+            authors=["Smith J", "Jones A"],
+            journal="The Journal",
+            publication_date="2026-02-10",
+            keywords=["Oncology"],
+            publication_types=["Randomized Controlled Trial"],
+            is_open_access=True,
+            license="cc-by",
+            fulltext_sources=[
+                FullTextSourceEntry(url="http://x/p.pdf", format="pdf", source="pubmed"),
+            ],
+            extras={"category": "Medicine"},
+        )
+        defaults.update(overrides)
+        return FetchedRecord(**defaults)
+
+    def _convert(self, **overrides):
+        from bmnews.pipeline import _record_to_fetched_paper
+        return _record_to_fetched_paper(self._record(**overrides))
+
+    def test_publication_types_reach_the_quality_classifier(self):
+        """pub_type is the only input to bmlib's free Tier-1 classification."""
+        from bmnews.scoring.scorer import _extract_pub_types
+
+        paper = self._convert()
+        assert paper.metadata["pub_type"] == ["Randomized Controlled Trial"]
+
+        stored = {"metadata_json": json.dumps(paper.metadata), "categories": ""}
+        assert "Randomized Controlled Trial" in _extract_pub_types(stored)
+
+    def test_carries_journal_license_and_access(self):
+        paper = self._convert()
+        assert paper.metadata["journal"] == "The Journal"
+        assert paper.metadata["license"] == "cc-by"
+        assert paper.metadata["is_open_access"] is True
+
+    def test_carries_identifiers_and_fulltext_sources(self):
+        paper = self._convert()
+        assert paper.metadata["pmid"] == "111"
+        assert paper.metadata["pmcid"] == "PMC222"
+        assert paper.metadata["fulltext_sources"][0]["url"] == "http://x/p.pdf"
+
+    def test_core_fields(self):
+        paper = self._convert()
+        assert paper.doi == "10.1234/abc"
+        assert paper.authors == "Smith J; Jones A"
+        assert paper.url == "https://doi.org/10.1234/abc"
+        assert paper.published_date == "2026-02-10"
+
+    def test_categories_prefer_keywords(self):
+        assert self._convert().categories == "Oncology"
+
+    def test_categories_fall_back_to_the_rxiv_subject(self):
+        """bioRxiv/medRxiv report their subject as an extra, not a keyword."""
+        assert self._convert(keywords=[]).categories == "Medicine"
+
+    def test_url_falls_back_to_a_source_supplied_one(self):
+        paper = self._convert(
+            doi=None, extras={"url": "https://europepmc.org/article/med/111"},
+        )
+        assert paper.url == "https://europepmc.org/article/med/111"
+
+    def test_normalised_fields_win_over_same_named_extras(self):
+        paper = self._convert(extras={"journal": "Stale", "pmid": "999"})
+        assert paper.metadata["journal"] == "The Journal"
+        assert paper.metadata["pmid"] == "111"
+
+
+class TestRunFetchSourceDispatch:
+    """Every enabled source resolves through bmlib's registry."""
+
+    def test_unknown_source_is_skipped(self):
+        from bmnews.pipeline import run_fetch
+
+        config = _test_config()
+        config.sources.enabled = ["not-a-real-source"]
+        assert run_fetch(config) == []
+
+    @patch("bmnews.pipeline._fetch_via_registry", return_value=[])
+    def test_europepmc_goes_through_the_registry(self, mock_fetch):
+        from bmnews.pipeline import run_fetch
+
+        config = _test_config()
+        config.sources.enabled = ["europepmc"]
+        config.sources.europepmc_query = "cancer"
+        run_fetch(config)
+
+        source_name, _lookback, src_config, _progress = mock_fetch.call_args[0]
+        assert source_name == "europepmc"
+        assert src_config == {"query": "cancer"}
+
+    @patch("bmnews.pipeline._fetch_via_registry", return_value=[])
+    def test_openalex_gets_the_user_email(self, mock_fetch):
+        from bmnews.pipeline import run_fetch
+
+        config = _test_config()
+        config.sources.enabled = ["openalex"]
+        config.user.email = "me@example.com"
+        run_fetch(config)
+
+        assert mock_fetch.call_args[0][2] == {"email": "me@example.com"}

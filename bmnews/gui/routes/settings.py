@@ -8,12 +8,15 @@ from pathlib import Path
 from typing import Any
 
 from bmlib.llm import LLMClient
-from bmlib.publications.fetchers import list_sources as bmlib_list_sources
+from bmlib.publications import list_sources
 from flask import Blueprint, abort, current_app, render_template, request
 from markupsafe import escape
 
 from bmnews.config import DEFAULT_CONFIG_DIR, AppConfig
-from bmnews.pipeline import LOCAL_SOURCES, TEMPLATES_DIR
+
+# Importing the pipeline pulls in bmnews.fetchers, which registers the
+# bmnews-supplied sources so they appear in the registry listing below.
+from bmnews.pipeline import TEMPLATES_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -21,13 +24,11 @@ settings_bp = Blueprint("settings", __name__)
 
 
 def _available_sources() -> list[dict[str, str]]:
-    """Build a list of all available sources (bmlib registry + local)."""
-    sources = []
-    for desc in bmlib_list_sources():
-        sources.append({"name": desc.name, "display_name": desc.display_name})
-    for name, display_name in LOCAL_SOURCES.items():
-        sources.append({"name": name, "display_name": display_name})
-    return sources
+    """List every source registered with bmlib, bmnews-supplied ones included."""
+    return [
+        {"name": desc.name, "display_name": desc.display_name}
+        for desc in sorted(list_sources(), key=lambda d: d.display_name.lower())
+    ]
 
 
 @settings_bp.route("/settings")

@@ -7,6 +7,7 @@ Backend-aware: detects sqlite3 vs psycopg2 by connection module name.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from typing import Any
 
 from bmlib.db import execute, fetch_all, fetch_one, fetch_scalar, transaction
@@ -16,18 +17,10 @@ from bmnews.constants import (
     DEFAULT_QUERY_LIMIT,
     UNSCORED_BATCH_SIZE,
 )
+from bmnews.db.backend import is_sqlite as _is_sqlite
+from bmnews.db.backend import placeholder as _placeholder
 
 logger = logging.getLogger(__name__)
-
-
-def _is_sqlite(conn: Any) -> bool:
-    """Return True if *conn* is a sqlite3 connection."""
-    return "sqlite3" in type(conn).__module__
-
-
-def _placeholder(conn: Any) -> str:
-    """Return the correct parameter placeholder for this connection."""
-    return "?" if _is_sqlite(conn) else "%s"
 
 
 # --- Papers ---
@@ -170,6 +163,15 @@ def get_unscored_papers(
     return [_row_to_dict(r) for r in rows]
 
 
+def count_unscored_papers(conn: Any) -> int:
+    """Return how many stored papers have no row in ``scores`` yet."""
+    return fetch_scalar(
+        conn,
+        "SELECT COUNT(*) FROM papers p "
+        "LEFT JOIN scores s ON s.paper_id = p.id WHERE s.id IS NULL",
+    ) or 0
+
+
 # --- Scores ---
 
 
@@ -254,9 +256,30 @@ def get_papers_for_digest(
     conn: Any,
     min_combined: float = 0.4,
     max_papers: int = DEFAULT_PAGE_SIZE,
+    min_relevance: float = 0.0,
+    exclude_tiers: Sequence[str] = (),
 ) -> list[dict]:
-    """Get top-scoring papers that haven't been included in a digest yet."""
+    """Get top-scoring papers that haven't been included in a digest yet.
+
+    Args:
+        conn: DB-API connection.
+        min_combined: Minimum combined score a paper must reach.
+        max_papers: Maximum number of papers to return.
+        min_relevance: Minimum relevance score a paper must reach.
+        exclude_tiers: Quality tier names to leave out entirely.
+
+    Returns:
+        Paper dicts with their scoring data, best combined score first.
+    """
     ph = _placeholder(conn)
+    params: list = [min_combined, min_relevance]
+    tier_filter = ""
+    if exclude_tiers:
+        placeholders = ", ".join(ph for _ in exclude_tiers)
+        tier_filter = f"AND s.quality_tier NOT IN ({placeholders})"
+        params.extend(exclude_tiers)
+    params.append(max_papers)
+
     rows = fetch_all(
         conn,
         f"""
@@ -266,11 +289,13 @@ def get_papers_for_digest(
         JOIN scores s ON s.paper_id = p.id
         LEFT JOIN digest_papers dp ON dp.paper_id = p.id
         WHERE s.combined_score >= {ph}
+          AND s.relevance_score >= {ph}
           AND dp.paper_id IS NULL
+          {tier_filter}
         ORDER BY s.combined_score DESC
         LIMIT {ph}
         """,
-        (min_combined, max_papers),
+        tuple(params),
     )
     return [_row_to_dict(r) for r in rows]
 

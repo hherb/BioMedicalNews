@@ -12,12 +12,13 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from bmlib.llm import LLMClient
-from bmlib.quality.data_models import QualityAssessment, QualityFilter
-from bmlib.quality.manager import QualityManager
+from bmlib.quality import QualityAssessment, QualityFilter, QualityManager, QualityTier
 from bmlib.templates import TemplateEngine
 
 from bmnews.constants import (
+    DEFAULT_MAX_TOKENS,
     DEFAULT_QUALITY_SCORE,
+    DEFAULT_TEMPERATURE,
     QUALITY_SCORE_SCALE,
     QUALITY_TIER_LLM_CLASSIFIER,
     QUALITY_TIER_METADATA_ONLY,
@@ -25,6 +26,7 @@ from bmnews.constants import (
     QUALITY_WEIGHT,
     RELEVANCE_WEIGHT,
 )
+from bmnews.metadata import parse_metadata
 from bmnews.scoring.relevance_agent import RelevanceAgent
 
 logger = logging.getLogger(__name__)
@@ -37,7 +39,10 @@ def score_papers(
     template_engine: TemplateEngine,
     interests: str,
     concurrency: int = 1,
+    quality_enabled: bool = True,
     quality_tier: int = QUALITY_TIER_LLM_CLASSIFIER,
+    temperature: float = DEFAULT_TEMPERATURE,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
     progress_callback: Callable[[int, int, dict], None] | None = None,
 ) -> list[dict]:
     """Score a list of papers for relevance and quality.
@@ -49,7 +54,11 @@ def score_papers(
         template_engine: Template engine for prompt rendering.
         interests: Free-text description of user research interests.
         concurrency: Number of concurrent scoring tasks.
+        quality_enabled: When False, quality assessment is skipped entirely
+            and the combined score is the relevance score alone.
         quality_tier: Max quality assessment tier (1=metadata, 2=classifier, 3=deep).
+        temperature: Sampling temperature for the relevance agent.
+        max_tokens: Output token ceiling for the relevance agent.
         progress_callback: Optional ``callback(current, total, result)`` invoked
             after each paper. It is always called on the calling thread — even
             when *concurrency* > 1 — so callbacks may safely touch a database
@@ -60,14 +69,23 @@ def score_papers(
             paper_id, relevance_score, quality_score, combined_score,
             summary, study_design, quality_tier, matched_tags, assessment_json
     """
-    agent = RelevanceAgent(llm=llm, model=model, template_engine=template_engine)
-    quality_mgr = QualityManager(
+    agent = RelevanceAgent(
         llm=llm,
-        classifier_model=model,
-        assessor_model=model,
+        model=model,
         template_engine=template_engine,
+        temperature=temperature,
+        max_tokens=max_tokens,
     )
-    quality_filter = _build_quality_filter(quality_tier)
+    quality_mgr: QualityManager | None = None
+    quality_filter: QualityFilter | None = None
+    if quality_enabled:
+        quality_mgr = QualityManager(
+            llm=llm,
+            classifier_model=model,
+            assessor_model=model,
+            template_engine=template_engine,
+        )
+        quality_filter = _build_quality_filter(quality_tier)
     results = []
     total = len(papers)
 
@@ -103,6 +121,36 @@ def score_papers(
     return results
 
 
+def tiers_below(min_tier: str) -> list[str]:
+    """Names of the quality tiers ranked below *min_tier*.
+
+    The evidence hierarchy is bmlib's :class:`~bmlib.quality.QualityTier`, so
+    the ordering is never restated here.  ``UNCLASSIFIED`` is deliberately
+    excluded from the result: a paper the pipeline could not classify is
+    unjudged, not judged-and-rejected, and dropping it would silently hide
+    every paper whose design the classifier did not recognise.
+
+    Args:
+        min_tier: Tier name from config, e.g. ``"TIER_3_CONTROLLED"``.
+
+    Returns:
+        Tier names to filter out, or ``[]`` when *min_tier* is blank, the
+        weakest tier, or not a tier bmlib knows.
+    """
+    if not min_tier or not min_tier.strip():
+        return []
+    try:
+        floor = QualityTier[min_tier.strip().upper()]
+    except KeyError:
+        logger.warning("Unknown min_quality_tier %r — not filtering by tier", min_tier)
+        return []
+    return [
+        tier.name
+        for tier in QualityTier
+        if tier < floor and tier is not QualityTier.UNCLASSIFIED
+    ]
+
+
 def _build_quality_filter(max_tier: int) -> QualityFilter:
     """Map a max-tier integer to the matching :class:`QualityFilter`.
 
@@ -135,11 +183,15 @@ def _build_quality_filter(max_tier: int) -> QualityFilter:
 def _score_single(
     paper: dict,
     agent: RelevanceAgent,
-    quality_mgr: QualityManager,
-    quality_filter: QualityFilter,
+    quality_mgr: QualityManager | None,
+    quality_filter: QualityFilter | None,
     interests: str,
 ) -> dict:
-    """Score a single paper: relevance (LLM) + quality (metadata/LLM)."""
+    """Score a single paper: relevance (LLM) + quality (metadata/LLM).
+
+    When *quality_mgr* is None, quality assessment is disabled and the
+    combined score is the relevance score alone.
+    """
     paper_id = paper.get("id", 0)
     title = paper.get("title", "")
     abstract = paper.get("abstract", "")
@@ -154,6 +206,19 @@ def _score_single(
     )
     relevance_score = relevance_result.get("relevance_score", 0.0)
     summary = relevance_result.get("summary", "")
+
+    if quality_mgr is None:
+        return {
+            "paper_id": paper_id,
+            "relevance_score": relevance_score,
+            "quality_score": 0.0,
+            "combined_score": relevance_score,
+            "summary": summary,
+            "study_design": "",
+            "quality_tier": "",
+            "matched_tags": relevance_result.get("matched_tags", []),
+            "assessment_json": json.dumps({"relevance": relevance_result}),
+        }
 
     # --- Quality assessment (bmlib.quality tiered pipeline) ---
     pub_types = _extract_pub_types(paper)
@@ -207,15 +272,7 @@ def _extract_pub_types(paper: dict) -> list[str]:
     Returns:
         A new list combining metadata publication types and categories.
     """
-    metadata_str = paper.get("metadata_json", "{}")
-    try:
-        metadata = json.loads(metadata_str) if isinstance(metadata_str, str) else metadata_str
-    except (json.JSONDecodeError, TypeError):
-        metadata = {}
-    if not isinstance(metadata, dict):
-        metadata = {}
-
-    raw_types = metadata.get("pub_type", [])
+    raw_types = parse_metadata(paper.get("metadata_json")).get("pub_type", [])
     if isinstance(raw_types, str):
         pub_types = [raw_types]
     elif isinstance(raw_types, list):

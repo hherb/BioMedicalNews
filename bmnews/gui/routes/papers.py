@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 import logging
-from typing import Any
 
 from bmlib.fulltext import FullTextError, FullTextService
 from bmlib.fulltext.models import FullTextSourceEntry
@@ -17,6 +15,7 @@ from bmnews.db.operations import (
     get_papers_filtered,
     save_fulltext,
 )
+from bmnews.metadata import parse_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -205,7 +204,7 @@ def paper_fulltext(paper_id: int) -> str:
 
     # Parse metadata for identifiers and source-provided fulltext URLs.
     # Bad JSON in the DB must not turn into a 500.
-    meta = _parse_metadata(paper.get("metadata_json"))
+    meta = parse_metadata(paper.get("metadata_json"))
     pmc_id = paper.get("pmcid") or meta.get("pmcid", "")
     doi = paper.get("doi") or ""
     pmid = paper.get("pmid") or meta.get("pmid", "")
@@ -256,30 +255,10 @@ def paper_fulltext(paper_id: int) -> str:
     return _UNAVAILABLE_HTML
 
 
-def _parse_metadata(raw: Any) -> dict:
-    """Decode a paper's ``metadata_json`` column into a dict.
-
-    Args:
-        raw: The stored value — a JSON string, an already-decoded dict, or None.
-
-    Returns:
-        The decoded mapping, or an empty dict if it is missing or malformed.
-    """
-    if isinstance(raw, dict):
-        return raw
-    if not raw:
-        return {}
-    try:
-        meta = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return {}
-    return meta if isinstance(meta, dict) else {}
-
-
 def _enrich_paper_metadata(paper: dict) -> None:
     """Lift the journal name out of ``metadata_json`` into a top-level key.
 
     Args:
         paper: Paper dict, modified in place to gain a ``journal`` key.
     """
-    paper["journal"] = _parse_metadata(paper.get("metadata_json")).get("journal", "")
+    paper["journal"] = parse_metadata(paper.get("metadata_json")).get("journal", "")
