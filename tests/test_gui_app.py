@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-import pytest
 from unittest.mock import patch
+
+import pytest
 from bmlib.db import connect_sqlite
 from bmlib.fulltext import FullTextResult
+
 from bmnews.config import AppConfig
+from bmnews.db.operations import get_paper_by_doi, save_score, upsert_paper
 from bmnews.db.schema import init_db
-from bmnews.db.operations import upsert_paper, save_score, get_paper_by_doi
 
 
 @pytest.fixture
@@ -180,8 +182,8 @@ class TestFullTextRoute:
     def test_fulltext_endpoint_exists(self, seeded_client):
         conn = seeded_client.application.config["BMNEWS_DB"]
         paper = get_paper_by_doi(conn, "10.1101/g1")
-        with patch("bmnews.gui.routes.papers.FullTextService") as MockSvc:
-            instance = MockSvc.return_value
+        with patch("bmnews.gui.routes.papers.FullTextService") as mock_svc:
+            instance = mock_svc.return_value
             instance.fetch_fulltext.return_value = FullTextResult(
                 source="europepmc", html="<p>Full text content</p>",
             )
@@ -191,8 +193,8 @@ class TestFullTextRoute:
     def test_fulltext_returns_html_fragment(self, seeded_client):
         conn = seeded_client.application.config["BMNEWS_DB"]
         paper = get_paper_by_doi(conn, "10.1101/g1")
-        with patch("bmnews.gui.routes.papers.FullTextService") as MockSvc:
-            instance = MockSvc.return_value
+        with patch("bmnews.gui.routes.papers.FullTextService") as mock_svc:
+            instance = mock_svc.return_value
             instance.fetch_fulltext.return_value = FullTextResult(
                 source="europepmc", html="<p>Full text content</p>",
             )
@@ -224,8 +226,117 @@ class TestLauncher:
 class TestGuiCLI:
     def test_gui_command_exists(self):
         from click.testing import CliRunner
+
         from bmnews.cli import main
         runner = CliRunner()
         result = runner.invoke(main, ["gui", "--help"])
         assert result.exit_code == 0
         assert "Launch" in result.output or "GUI" in result.output
+
+
+class TestPagination:
+    """Regression tests for the infinite-scroll 'Load more' button."""
+
+    @pytest.fixture
+    def many_papers_client(self, app):
+        conn = app.config["BMNEWS_DB"]
+        for i in range(45):
+            pid = upsert_paper(
+                conn, doi=f"10.1101/page{i}", title=f"Paged Paper {i}",
+                abstract="Kadabra unique term", source="medrxiv",
+                published_date="2026-02-10",
+            )
+            save_score(conn, paper_id=pid, combined_score=0.5)
+        return app.test_client()
+
+    def test_first_page_offers_load_more(self, many_papers_client):
+        resp = many_papers_client.get("/papers")
+        assert resp.status_code == 200
+        assert b"load-more" in resp.data
+
+    def test_appended_page_still_offers_load_more(self, many_papers_client):
+        """The button used to vanish after one click, capping the list at 40."""
+        resp = many_papers_client.get("/papers/more?offset=20&limit=20")
+        assert resp.status_code == 200
+        assert b"load-more" in resp.data
+        assert b"offset=40" in resp.data
+
+    def test_last_page_has_no_load_more(self, many_papers_client):
+        resp = many_papers_client.get("/papers/more?offset=40&limit=20")
+        assert resp.status_code == 200
+        assert b"load-more" not in resp.data
+
+    def test_load_more_carries_search_term(self, many_papers_client):
+        """Otherwise page 2 of a search silently returns unfiltered results."""
+        resp = many_papers_client.get("/search?q=Kadabra")
+        assert resp.status_code == 200
+        assert b"q=Kadabra" in resp.data
+
+    def test_more_applies_search_filter(self, many_papers_client):
+        conn = many_papers_client.application.config["BMNEWS_DB"]
+        pid = upsert_paper(conn, doi="10.1101/other", title="Unrelated",
+                           abstract="nothing to see", source="medrxiv")
+        save_score(conn, paper_id=pid, combined_score=0.9)
+
+        resp = many_papers_client.get("/papers/more?offset=0&limit=50&q=Kadabra")
+        assert resp.status_code == 200
+        assert b"Unrelated" not in resp.data
+        assert b"Paged Paper" in resp.data
+
+    def test_negative_offset_is_clamped(self, many_papers_client):
+        resp = many_papers_client.get("/papers/more?offset=-5&limit=20")
+        assert resp.status_code == 200
+
+
+class TestSettingsSave:
+    def test_invalid_number_reports_error(self, client):
+        resp = client.post("/settings/save", data={"sources.lookback_days": "abc"})
+        assert resp.status_code == 200
+        assert b"Not saved" in resp.data
+
+    def test_valid_values_are_applied(self, client):
+        resp = client.post("/settings/save", data={
+            "sources.lookback_days": "12",
+            "scoring.min_combined": "0.75",
+            "llm.provider": "anthropic",
+        })
+        assert resp.status_code == 200
+        assert b"Settings saved" in resp.data
+        config = client.application.config["BMNEWS_CONFIG"]
+        assert config.sources.lookback_days == 12
+        assert config.scoring.min_combined == 0.75
+        assert config.llm.provider == "anthropic"
+
+    def test_absent_sources_field_does_not_clear_enabled(self, client):
+        """A partial form post must not silently disable every source."""
+        config = client.application.config["BMNEWS_CONFIG"]
+        config.sources.enabled = ["medrxiv", "europepmc"]
+        client.post("/settings/save", data={"sources.lookback_days": "5"})
+        assert config.sources.enabled == ["medrxiv", "europepmc"]
+
+    def test_explicit_empty_sources_clears_enabled(self, client):
+        """The hidden marker makes an empty selection an intentional clear."""
+        config = client.application.config["BMNEWS_CONFIG"]
+        config.sources.enabled = ["medrxiv"]
+        client.post("/settings/save", data={"sources.enabled_submitted": "1"})
+        assert config.sources.enabled == []
+
+    def test_checked_sources_are_applied(self, client):
+        config = client.application.config["BMNEWS_CONFIG"]
+        client.post("/settings/save", data={
+            "sources.enabled_submitted": "1",
+            "sources.enabled": ["medrxiv", "pubmed"],
+        })
+        assert config.sources.enabled == ["medrxiv", "pubmed"]
+
+
+class TestTemplateEditor:
+    def test_unknown_template_is_404(self, client):
+        assert client.get("/settings/template/does-not-exist.txt").status_code == 404
+
+    def test_traversal_name_is_rejected(self, client):
+        assert client.post("/settings/template/..", data={"content": "x"}).status_code == 404
+
+    def test_known_template_loads(self, client):
+        resp = client.get("/settings/template/relevance_system.txt")
+        assert resp.status_code == 200

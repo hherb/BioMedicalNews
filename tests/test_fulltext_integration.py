@@ -3,13 +3,13 @@
 from unittest.mock import patch
 
 import pytest
-
 from bmlib.db import connect_sqlite
 from bmlib.fulltext import FullTextResult
-from bmnews.db.schema import init_db
-from bmnews.db.operations import upsert_paper, save_score
-from bmnews.gui.app import create_app
+
 from bmnews.config import AppConfig
+from bmnews.db.operations import save_score, upsert_paper
+from bmnews.db.schema import init_db
+from bmnews.gui.app import create_app
 
 
 @pytest.fixture
@@ -48,8 +48,8 @@ class TestEndToEnd:
     def test_fulltext_fetches_and_caches(self, app_with_paper):
         app, conn, pid = app_with_paper
         with app.test_client() as client:
-            with patch("bmnews.gui.routes.papers.FullTextService") as MockSvc:
-                instance = MockSvc.return_value
+            with patch("bmnews.gui.routes.papers.FullTextService") as mock_svc:
+                instance = mock_svc.return_value
                 instance.fetch_fulltext.return_value = FullTextResult(
                     source="europepmc",
                     html="<h2>Introduction</h2><p>Full text body.</p>",
@@ -65,8 +65,8 @@ class TestEndToEnd:
     def test_pdf_url_cached_and_button_changes(self, app_with_paper):
         app, conn, pid = app_with_paper
         with app.test_client() as client:
-            with patch("bmnews.gui.routes.papers.FullTextService") as MockSvc:
-                instance = MockSvc.return_value
+            with patch("bmnews.gui.routes.papers.FullTextService") as mock_svc:
+                instance = mock_svc.return_value
                 instance.fetch_fulltext.return_value = FullTextResult(
                     source="unpaywall",
                     pdf_url="https://example.com/paper.pdf",

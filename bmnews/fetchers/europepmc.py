@@ -10,24 +10,37 @@ import logging
 from datetime import date, timedelta
 
 import httpx
-
 from bmlib.fulltext.models import FullTextSourceEntry
+
+from bmnews.constants import (
+    EUROPEPMC_PAGE_SIZE,
+    HTTP_TIMEOUT_SECONDS,
+    MAX_FETCH_PAGES,
+)
 from bmnews.fetchers.base import FetchedPaper
 
 logger = logging.getLogger(__name__)
 
 SEARCH_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
-PAGE_SIZE = 100
+PAGE_SIZE = EUROPEPMC_PAGE_SIZE
 
 
 def fetch_europepmc(
     query: str = "",
     lookback_days: int = 7,
-    timeout: float = 30.0,
+    timeout: float = HTTP_TIMEOUT_SECONDS,
 ) -> list[FetchedPaper]:
     """Fetch recent publications from Europe PMC.
 
-    If *query* is empty, fetches recent preprints (PPR source).
+    Args:
+        query: Europe PMC query string. If empty, recent preprints
+            (``SRC:PPR``) are fetched instead.
+        lookback_days: How many days back from today to search.
+        timeout: Per-request HTTP timeout in seconds.
+
+    Returns:
+        Normalized papers. Returns whatever was collected so far if the API
+        errors partway through pagination.
     """
     end = date.today()
     start = end - timedelta(days=lookback_days)
@@ -45,7 +58,7 @@ def fetch_europepmc(
     cursor_mark = "*"
 
     with httpx.Client(timeout=timeout) as client:
-        while True:
+        for _page in range(MAX_FETCH_PAGES):
             params = {
                 "query": date_query,
                 "format": "json",
@@ -62,7 +75,12 @@ def fetch_europepmc(
                 logger.error("HTTP error fetching EuropePMC: %s", e)
                 break
 
-            data = resp.json()
+            try:
+                data = resp.json()
+            except ValueError:
+                logger.error("Malformed JSON from EuropePMC — stopping pagination")
+                break
+
             results = data.get("resultList", {}).get("result", [])
             if not results:
                 break
@@ -107,6 +125,11 @@ def fetch_europepmc(
             if not next_cursor or next_cursor == cursor_mark:
                 break
             cursor_mark = next_cursor
+        else:
+            logger.warning(
+                "Stopped after %d EuropePMC pages — results may be truncated",
+                MAX_FETCH_PAGES,
+            )
 
     logger.info("Fetched %d papers from EuropePMC", len(papers))
     return papers

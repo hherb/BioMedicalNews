@@ -37,6 +37,7 @@ def _normalise_abstract(text: str) -> str:
     """
 
     def _heading_to_label(m: re.Match) -> str:
+        """Turn a recognised heading tag into a plain ``Label:`` line."""
         label = m.group(2).strip()
         # Only convert if the heading text is a known section label
         if re.match(rf"^({_SECTION_LABELS})$", label, re.IGNORECASE):

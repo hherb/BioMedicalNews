@@ -18,8 +18,41 @@ DEFAULT_CONFIG_DIR = Path("~/.bmnews").expanduser()
 DEFAULT_CONFIG_PATH = DEFAULT_CONFIG_DIR / "config.toml"
 
 
+def _source_toggle(source_name: str) -> property:
+    """Build a bool property that adds/removes *source_name* in ``enabled``.
+
+    Old TOML files configured sources as per-source booleans
+    (``medrxiv = true``) rather than the current ``enabled`` list. These
+    generated properties keep those files loading, and let the GUI address a
+    single source by name.
+
+    Args:
+        source_name: The source's registry name.
+
+    Returns:
+        A property whose getter reports membership of ``enabled`` and whose
+        setter adds or removes the source, preserving order and uniqueness.
+    """
+
+    def getter(self: SourcesConfig) -> bool:
+        """Report whether this source is currently enabled."""
+        return source_name in self.enabled
+
+    def setter(self: SourcesConfig, value: bool) -> None:
+        """Add or remove this source from ``enabled``."""
+        if value and source_name not in self.enabled:
+            self.enabled.append(source_name)
+        elif not value and source_name in self.enabled:
+            self.enabled.remove(source_name)
+
+    getter.__name__ = source_name
+    return property(getter, setter, doc=f"Whether {source_name} is in `enabled`.")
+
+
 @dataclass
 class DatabaseConfig:
+    """Database connection settings (SQLite by default, PostgreSQL optional)."""
+
     backend: str = "sqlite"
     sqlite_path: str = "~/.bmnews/bmnews.db"
     pg_dsn: str = ""
@@ -32,78 +65,34 @@ class DatabaseConfig:
 
 @dataclass
 class SourcesConfig:
+    """Which publication sources to fetch from, and how far back."""
+
     enabled: list[str] = field(default_factory=lambda: ["medrxiv", "europepmc"])
     lookback_days: int = 7
     source_options: dict[str, dict[str, str]] = field(default_factory=dict)
 
     # -- Backward-compat properties for old TOML configs with per-source booleans --
-
-    @property
-    def medrxiv(self) -> bool:
-        return "medrxiv" in self.enabled
-
-    @medrxiv.setter
-    def medrxiv(self, value: bool) -> None:
-        if value and "medrxiv" not in self.enabled:
-            self.enabled.append("medrxiv")
-        elif not value and "medrxiv" in self.enabled:
-            self.enabled.remove("medrxiv")
-
-    @property
-    def biorxiv(self) -> bool:
-        return "biorxiv" in self.enabled
-
-    @biorxiv.setter
-    def biorxiv(self, value: bool) -> None:
-        if value and "biorxiv" not in self.enabled:
-            self.enabled.append("biorxiv")
-        elif not value and "biorxiv" in self.enabled:
-            self.enabled.remove("biorxiv")
-
-    @property
-    def europepmc(self) -> bool:
-        return "europepmc" in self.enabled
-
-    @europepmc.setter
-    def europepmc(self, value: bool) -> None:
-        if value and "europepmc" not in self.enabled:
-            self.enabled.append("europepmc")
-        elif not value and "europepmc" in self.enabled:
-            self.enabled.remove("europepmc")
-
-    @property
-    def pubmed(self) -> bool:
-        return "pubmed" in self.enabled
-
-    @pubmed.setter
-    def pubmed(self, value: bool) -> None:
-        if value and "pubmed" not in self.enabled:
-            self.enabled.append("pubmed")
-        elif not value and "pubmed" in self.enabled:
-            self.enabled.remove("pubmed")
-
-    @property
-    def openalex(self) -> bool:
-        return "openalex" in self.enabled
-
-    @openalex.setter
-    def openalex(self, value: bool) -> None:
-        if value and "openalex" not in self.enabled:
-            self.enabled.append("openalex")
-        elif not value and "openalex" in self.enabled:
-            self.enabled.remove("openalex")
+    medrxiv = _source_toggle("medrxiv")
+    biorxiv = _source_toggle("biorxiv")
+    europepmc = _source_toggle("europepmc")
+    pubmed = _source_toggle("pubmed")
+    openalex = _source_toggle("openalex")
 
     @property
     def europepmc_query(self) -> str:
+        """The custom Europe PMC query string, or ``""`` if unset."""
         return self.source_options.get("europepmc", {}).get("query", "")
 
     @europepmc_query.setter
     def europepmc_query(self, value: str) -> None:
+        """Store the custom Europe PMC query in ``source_options``."""
         self.source_options.setdefault("europepmc", {})["query"] = value
 
 
 @dataclass
 class LLMConfig:
+    """LLM provider, model selection and generation parameters."""
+
     provider: str = "ollama"
     model: str = ""
     temperature: float = 0.3
@@ -117,12 +106,16 @@ class LLMConfig:
 
 @dataclass
 class ScoringConfig:
+    """Score thresholds controlling which papers reach the digest."""
+
     min_relevance: float = 0.5
     min_combined: float = 0.4
 
 
 @dataclass
 class QualityConfig:
+    """Controls bmlib's tiered study-quality assessment."""
+
     enabled: bool = True
     default_tier: int = 2
     max_tier: int = 3
@@ -131,12 +124,16 @@ class QualityConfig:
 
 @dataclass
 class TransparencyConfig:
+    """Settings for exposing scoring rationale to the user."""
+
     enabled: bool = False
     min_score_threshold: float = 0.6
 
 
 @dataclass
 class UserConfig:
+    """Identity and free-text research interests used for relevance scoring."""
+
     name: str = ""
     email: str = ""
     research_interests: str = ""
@@ -144,6 +141,8 @@ class UserConfig:
 
 @dataclass
 class EmailConfig:
+    """SMTP delivery settings for the email digest."""
+
     enabled: bool = False
     smtp_host: str = ""
     smtp_port: int = 587
@@ -158,6 +157,8 @@ class EmailConfig:
 
 @dataclass
 class AppConfig:
+    """Top-level application configuration, one attribute per TOML section."""
+
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     sources: SourcesConfig = field(default_factory=SourcesConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
@@ -238,35 +239,102 @@ def write_default_config(path: str | Path | None = None) -> Path:
     return path
 
 
+_TOML_ESCAPES = {
+    "\\": "\\\\",
+    '"': '\\"',
+    "\b": "\\b",
+    "\f": "\\f",
+    "\n": "\\n",
+    "\r": "\\r",
+    "\t": "\\t",
+}
+
+
+def _toml_str(value: str) -> str:
+    """Render *value* as a quoted, escaped TOML basic string.
+
+    Free-text fields such as ``research_interests`` routinely contain quotes
+    and newlines; emitting them raw produces a file that ``tomllib`` cannot
+    parse back, which would silently destroy the user's configuration.
+    """
+    out = []
+    for ch in value:
+        if ch in _TOML_ESCAPES:
+            out.append(_TOML_ESCAPES[ch])
+        elif ch < " " or ch == "\x7f":
+            out.append(f"\\u{ord(ch):04X}")
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
+
+
+def _toml_value(value: Any) -> str | None:
+    """Render a scalar or list config value as TOML, or None if unsupported."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        return _toml_str(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml_str(str(v)) for v in value) + "]"
+    return None
+
+
 def save_config(config: AppConfig, path: str | Path | None = None) -> Path:
-    """Write current config values back to TOML file."""
+    """Write current config values back to a TOML file.
+
+    Args:
+        config: The configuration to serialize.
+        path: Destination file. Defaults to ``~/.bmnews/config.toml``.
+
+    Returns:
+        The path that was written.
+    """
     if path is None:
         path = DEFAULT_CONFIG_PATH
     path = Path(path).expanduser()
 
-    lines = []
+    lines: list[str] = []
     lines.append("[general]")
-    lines.append(f'log_level = "{config.log_level}"')
+    lines.append(f"log_level = {_toml_str(config.log_level)}")
     if config.template_dir:
-        lines.append(f'template_dir = "{config.template_dir}"')
+        lines.append(f"template_dir = {_toml_str(config.template_dir)}")
     lines.append("")
 
-    def _write_section(name: str, dc) -> None:
+    def _write_section(name: str, dc: Any) -> None:
+        """Append one ``[name]`` table, plus any nested sub-tables it holds."""
+        # Nested tables must be emitted after every scalar key of their parent
+        # table, otherwise the remaining keys are parsed into the sub-table.
+        sub_tables: list[tuple[str, dict]] = []
         lines.append(f"[{name}]")
         for field_name in dc.__dataclass_fields__:
             value = getattr(dc, field_name)
-            if isinstance(value, bool):
-                lines.append(f"{field_name} = {'true' if value else 'false'}")
-            elif isinstance(value, (int, float)):
-                lines.append(f"{field_name} = {value}")
-            elif isinstance(value, list):
-                items = ", ".join(f'"{v}"' for v in value)
-                lines.append(f"{field_name} = [{items}]")
-            elif isinstance(value, dict):
-                pass  # dicts are written as sub-tables below
-            elif isinstance(value, str):
-                lines.append(f'{field_name} = "{value}"')
+            if isinstance(value, dict):
+                sub_tables.append((field_name, value))
+                continue
+            rendered = _toml_value(value)
+            if rendered is not None:
+                lines.append(f"{field_name} = {rendered}")
         lines.append("")
+
+        for field_name, table in sub_tables:
+            scalars = {k: v for k, v in table.items() if not isinstance(v, dict)}
+            nested = {k: v for k, v in table.items() if isinstance(v, dict)}
+            if scalars:
+                lines.append(f"[{name}.{field_name}]")
+                for key, sub_value in scalars.items():
+                    rendered = _toml_value(sub_value)
+                    if rendered is not None:
+                        lines.append(f"{key} = {rendered}")
+                lines.append("")
+            for key, sub_table in nested.items():
+                lines.append(f"[{name}.{field_name}.{key}]")
+                for sub_key, leaf in sub_table.items():
+                    rendered = _toml_value(leaf)
+                    if rendered is not None:
+                        lines.append(f"{sub_key} = {rendered}")
+                lines.append("")
 
     _write_section("database", config.database)
     _write_section("sources", config.sources)

@@ -61,6 +61,7 @@ bmnews/
 ├── __init__.py          # Package version (0.2.1)
 ├── cli.py               # Click CLI commands (run, fetch, score, digest, init, gui, search)
 ├── config.py            # TOML config loading (AppConfig + nested section dataclasses)
+├── constants.py         # Fixed application constants (scoring weights, page sizes, timeouts)
 ├── pipeline.py          # Orchestration: fetch → store → score → digest (progress callbacks)
 ├── db/
 │   ├── schema.py        # Database connection factory (open_db, init_db)
@@ -183,7 +184,7 @@ Two-tier scoring system:
 1. **Relevance (LLM-based)** — `RelevanceAgent` sends paper title + abstract + user interests to LLM via Jinja2 template prompts. Returns JSON with `relevance_score` (0.0–1.0), `summary`, `key_findings`, `matched_tags`.
 2. **Quality (bmlib.quality)** — Tiered assessment (metadata classification → LLM classifier → deep analysis). Maps `QualityTier` to a 0.0–1.0 score.
 
-Combined score = `0.6 * relevance + 0.4 * quality`. Concurrency configurable via `ThreadPoolExecutor` (`concurrency=1` for local Ollama, `>1` for API providers).
+Combined score = `RELEVANCE_WEIGHT * relevance + QUALITY_WEIGHT * quality` (0.6 / 0.4, defined in `bmnews/constants.py`). Concurrency configurable via `ThreadPoolExecutor` (`concurrency=1` for local Ollama, `>1` for API providers).
 
 **LLM providers** (6 supported via bmlib): Ollama, Anthropic, OpenAI, Deepseek, Mistral, Gemini. Model format: `"provider:model"` (e.g., `"anthropic:claude-3-haiku"`). The pipeline disambiguates bare model names with tags (e.g., `"llama3.1:latest"`) from provider-prefixed strings.
 
@@ -228,6 +229,9 @@ Desktop app: pywebview (native window) + Flask (HTTP backend) + HTMX (frontend i
 - **Template-driven prompts** — LLM prompts are Jinja2 templates in `templates/`, not Python strings.
 - **Dataclass models** with `to_dict()` / `from_dict()` for serialization.
 - **Module-level loggers** — `logger = logging.getLogger(__name__)`.
+- **No magic numbers** — fixed behavioural values live in `bmnews/constants.py`; anything a user should tune belongs in `bmnews/config.py`.
+- **Close connections with `contextlib.closing`** — `with closing(open_db(config)) as conn:`, so a raised exception can't leak the handle.
+- **Never rely on `cursor.lastrowid` after an upsert** — SQLite leaves it pointing at the last row actually *inserted* when `ON CONFLICT` takes the UPDATE path. Look the row up by its natural key instead (see `upsert_paper`).
 - **AGPL-3.0 license**.
 - **Commit messages** — conventional style: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`.
 

@@ -6,18 +6,28 @@ Backend-aware: detects sqlite3 vs psycopg2 by connection module name.
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 
-from bmlib.db import execute, fetch_one, fetch_all, fetch_scalar, transaction
+from bmlib.db import execute, fetch_all, fetch_one, fetch_scalar, transaction
+
+from bmnews.constants import (
+    DEFAULT_PAGE_SIZE,
+    DEFAULT_QUERY_LIMIT,
+    UNSCORED_BATCH_SIZE,
+)
 
 logger = logging.getLogger(__name__)
 
 
+def _is_sqlite(conn: Any) -> bool:
+    """Return True if *conn* is a sqlite3 connection."""
+    return "sqlite3" in type(conn).__module__
+
+
 def _placeholder(conn: Any) -> str:
     """Return the correct parameter placeholder for this connection."""
-    return "?" if "sqlite3" in type(conn).__module__ else "%s"
+    return "?" if _is_sqlite(conn) else "%s"
 
 
 # --- Papers ---
@@ -43,11 +53,31 @@ def upsert_paper(
     categories: str = "",
     metadata_json: str = "{}",
 ) -> int:
-    """Insert or update a paper. Returns the paper id."""
+    """Insert a paper, or update it in place if its DOI is already stored.
+
+    Args:
+        conn: DB-API connection.
+        doi: Paper DOI (the natural key — must be non-empty and unique).
+        title: Paper title.
+        authors: Semicolon-separated author list.
+        abstract: Abstract text.
+        url: Canonical URL for the paper.
+        source: Source identifier the paper was fetched from.
+        published_date: ISO publication date string.
+        categories: Semicolon-separated category/subject list.
+        metadata_json: Source-specific metadata encoded as a JSON object.
+
+    Returns:
+        The id of the inserted or updated ``papers`` row.
+    """
     ph = _placeholder(conn)
-    is_sqlite = "sqlite3" in type(conn).__module__
+    is_sqlite = _is_sqlite(conn)
 
     if is_sqlite:
+        # RETURNING requires SQLite >= 3.35; fall back to a DOI lookup so the
+        # correct id is returned on the conflict path too.  ``cur.lastrowid``
+        # is NOT usable here: when ON CONFLICT takes the UPDATE branch SQLite
+        # leaves it pointing at the last row actually inserted.
         sql = f"""
             INSERT INTO papers (doi, title, authors, abstract, url, source,
                                published_date, categories, metadata_json)
@@ -80,10 +110,12 @@ def upsert_paper(
 
     with transaction(conn):
         cur = execute(conn, sql, params)
-        if is_sqlite:
-            return cur.lastrowid
-        row = cur.fetchone()
-        return row[0] if row else 0
+        if not is_sqlite:
+            row = cur.fetchone()
+            return row[0] if row else 0
+
+    paper_id = fetch_scalar(conn, f"SELECT id FROM papers WHERE doi = {ph}", (doi,))
+    return int(paper_id) if paper_id is not None else 0
 
 
 def get_paper_by_doi(conn: Any, doi: str) -> dict | None:
@@ -110,8 +142,19 @@ def get_paper_with_score(conn: Any, paper_id: int) -> dict | None:
     return _row_to_dict(row) if row else None
 
 
-def get_unscored_papers(conn: Any, limit: int = 100) -> list[dict]:
-    """Get papers that haven't been scored yet."""
+def get_unscored_papers(
+    conn: Any, limit: int = UNSCORED_BATCH_SIZE,
+) -> list[dict]:
+    """Get papers that have no row in ``scores`` yet, newest fetch first.
+
+    Args:
+        conn: DB-API connection.
+        limit: Maximum number of papers to return. Callers that need to know
+            whether more remain should compare the result length to *limit*.
+
+    Returns:
+        List of paper dicts, at most *limit* long.
+    """
     ph = _placeholder(conn)
     rows = fetch_all(
         conn,
@@ -144,7 +187,7 @@ def save_score(
 ) -> None:
     """Insert or update a score for a paper."""
     ph = _placeholder(conn)
-    is_sqlite = "sqlite3" in type(conn).__module__
+    is_sqlite = _is_sqlite(conn)
 
     if is_sqlite:
         sql = f"""
@@ -187,7 +230,7 @@ def save_score(
 
 
 def get_scored_papers(
-    conn: Any, min_combined: float = 0.0, limit: int = 100,
+    conn: Any, min_combined: float = 0.0, limit: int = DEFAULT_QUERY_LIMIT,
 ) -> list[dict]:
     """Get papers with scores above threshold, ordered by score."""
     ph = _placeholder(conn)
@@ -210,7 +253,7 @@ def get_scored_papers(
 def get_papers_for_digest(
     conn: Any,
     min_combined: float = 0.4,
-    max_papers: int = 20,
+    max_papers: int = DEFAULT_PAGE_SIZE,
 ) -> list[dict]:
     """Get top-scoring papers that haven't been included in a digest yet."""
     ph = _placeholder(conn)
@@ -240,11 +283,27 @@ def get_papers_filtered(
     quality_tier: str = "",
     study_design: str = "",
     search: str = "",
-    limit: int = 20,
+    limit: int = DEFAULT_PAGE_SIZE,
     offset: int = 0,
     with_total: bool = False,
 ) -> list[dict] | tuple[list[dict], int]:
-    """Flexible paper query with sorting, filtering, search, and pagination."""
+    """Query papers with sorting, filtering, keyword search and pagination.
+
+    Args:
+        conn: DB-API connection.
+        sort: One of ``combined``, ``relevance``, ``quality`` or ``date``.
+            Unknown values fall back to ``combined``.
+        source: Restrict to a single source name, or ``""`` for all.
+        quality_tier: Restrict to a single quality tier name, or ``""``.
+        study_design: Restrict to a single study design, or ``""``.
+        search: Case-insensitive substring matched against title and abstract.
+        limit: Maximum number of rows to return.
+        offset: Number of rows to skip, for pagination.
+        with_total: If True, also return the unpaginated match count.
+
+    Returns:
+        A list of paper dicts, or ``(papers, total)`` when *with_total* is set.
+    """
     ph = _placeholder(conn)
     params: list = []
     conditions: list[str] = []
@@ -317,7 +376,7 @@ def get_cached_digest_papers(conn: Any, days: int | None = None) -> list[dict]:
         get_papers_for_digest.
     """
     ph = _placeholder(conn)
-    is_sqlite = "sqlite3" in type(conn).__module__
+    is_sqlite = _is_sqlite(conn)
 
     if days is not None:
         if is_sqlite:
@@ -355,23 +414,37 @@ def record_digest(
     paper_ids: list[int],
     delivery_method: str = "stdout",
 ) -> int:
-    """Record that a digest was sent. Returns digest id."""
+    """Record that a digest was sent and link it to its papers.
+
+    Args:
+        conn: DB-API connection.
+        paper_ids: Ids of the papers included in the digest.
+        delivery_method: How the digest was delivered (``file``, ``email``,
+            ``email_failed`` or ``stdout``).
+
+    Returns:
+        The id of the newly created ``digests`` row.
+    """
     ph = _placeholder(conn)
-    is_sqlite = "sqlite3" in type(conn).__module__
+    is_sqlite = _is_sqlite(conn)
+
+    # A plain INSERT never takes a conflict path, so lastrowid is reliable
+    # here; PostgreSQL uses RETURNING rather than currval() so the result
+    # does not depend on the sequence being named ``digests_id_seq``.
+    insert_sql = f"""
+        INSERT INTO digests (paper_count, delivery_method)
+        VALUES ({ph}, {ph})
+    """
+    if not is_sqlite:
+        insert_sql += " RETURNING id"
 
     with transaction(conn):
-        cur = execute(
-            conn,
-            f"""
-            INSERT INTO digests (paper_count, delivery_method)
-            VALUES ({ph}, {ph})
-            """,
-            (len(paper_ids), delivery_method),
-        )
+        cur = execute(conn, insert_sql, (len(paper_ids), delivery_method))
         if is_sqlite:
             digest_id = cur.lastrowid
         else:
-            digest_id = fetch_scalar(conn, "SELECT currval('digests_id_seq')")
+            row = cur.fetchone()
+            digest_id = row[0] if row else 0
 
         for pid in paper_ids:
             execute(

@@ -2,34 +2,45 @@
 
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 from bmlib.db import connect_sqlite
 
-from bmnews.db.schema import init_db
 from bmnews.db.operations import (
-    upsert_paper,
-    get_paper_by_doi,
-    get_unscored_papers,
-    get_paper_with_score,
-    get_papers_filtered,
-    save_score,
-    save_fulltext,
-    update_paper_identifiers,
-    save_paper_tags,
-    get_paper_tags,
     get_all_tags,
-    get_papers_by_tag,
-    get_scored_papers,
-    get_papers_for_digest,
     get_cached_digest_papers,
-    record_digest,
+    get_paper_by_doi,
+    get_paper_tags,
+    get_paper_with_score,
+    get_papers_by_tag,
+    get_papers_filtered,
+    get_papers_for_digest,
+    get_scored_papers,
+    get_unscored_papers,
     paper_exists,
+    record_digest,
+    save_fulltext,
+    save_paper_tags,
+    save_score,
+    update_paper_identifiers,
+    upsert_paper,
 )
+from bmnews.db.schema import init_db
 
 
 def _db():
     conn = connect_sqlite(":memory:")
     init_db(conn)
     return conn
+
+
+def _days_ago(days: int) -> str:
+    """Return an ISO date *days* before today.
+
+    Tests must not hard-code calendar dates: a fixed "recent" date stops being
+    recent and silently turns a passing suite red months later.
+    """
+    return (date.today() - timedelta(days=days)).isoformat()
 
 
 class TestSchema:
@@ -268,7 +279,7 @@ class TestCachedDigestPapers:
         pid_old = upsert_paper(conn, doi="10.1101/old", title="Old Paper",
                                abstract="A", published_date="2020-01-01")
         pid_new = upsert_paper(conn, doi="10.1101/new", title="New Paper",
-                               abstract="B", published_date="2026-02-12")
+                               abstract="B", published_date=_days_ago(2))
         save_score(conn, paper_id=pid_old, combined_score=0.8)
         save_score(conn, paper_id=pid_new, combined_score=0.9)
         record_digest(conn, [pid_old, pid_new], delivery_method="stdout")
@@ -282,7 +293,7 @@ class TestCachedDigestPapers:
         pid_old = upsert_paper(conn, doi="10.1101/old2", title="Old",
                                abstract="A", published_date="2020-01-01")
         pid_new = upsert_paper(conn, doi="10.1101/new2", title="New",
-                               abstract="B", published_date="2026-02-12")
+                               abstract="B", published_date=_days_ago(2))
         save_score(conn, paper_id=pid_old, combined_score=0.8)
         save_score(conn, paper_id=pid_new, combined_score=0.9)
         record_digest(conn, [pid_old, pid_new], delivery_method="stdout")
@@ -408,3 +419,59 @@ class TestFulltextOperations:
         from bmlib.db import fetch_one
         row = fetch_one(conn, "SELECT pmid, pmcid FROM papers WHERE id = ?", (pid,))
         assert row["pmid"] is None
+
+
+class TestUpsertReturnsCorrectId:
+    """Regression tests for upsert_paper returning a stale row id.
+
+    On the ON CONFLICT DO UPDATE path SQLite leaves ``cursor.lastrowid``
+    pointing at the last row actually *inserted*, so re-fetching an existing
+    paper used to return another paper's id — and run_store then wrote that
+    paper's PMID/PMCID onto the wrong row.
+    """
+
+    def test_reupsert_returns_original_id(self):
+        conn = _db()
+        first = upsert_paper(conn, doi="10.1101/a", title="A")
+        upsert_paper(conn, doi="10.1101/b", title="B")
+        upsert_paper(conn, doi="10.1101/c", title="C")
+
+        again = upsert_paper(conn, doi="10.1101/a", title="A revised")
+        assert again == first
+
+        paper = get_paper_by_doi(conn, "10.1101/a")
+        assert paper["id"] == first
+        assert paper["title"] == "A revised"
+
+    def test_reupsert_does_not_create_duplicate(self):
+        conn = _db()
+        pid = upsert_paper(conn, doi="10.1101/dup", title="Dup")
+        assert upsert_paper(conn, doi="10.1101/dup", title="Dup again") == pid
+
+        rows = get_papers_filtered(conn, search="Dup", limit=10)
+        assert len(rows) == 1
+
+    def test_identifiers_land_on_the_right_paper(self):
+        conn = _db()
+        pid_a = upsert_paper(conn, doi="10.1101/ident-a", title="A")
+        pid_b = upsert_paper(conn, doi="10.1101/ident-b", title="B")
+
+        # Re-upsert A, then attach identifiers using the returned id.
+        returned = upsert_paper(conn, doi="10.1101/ident-a", title="A")
+        update_paper_identifiers(conn, paper_id=returned, pmid="111", pmcid="PMC111")
+
+        assert get_paper_by_doi(conn, "10.1101/ident-a")["pmid"] == "111"
+        assert get_paper_by_doi(conn, "10.1101/ident-b")["pmid"] is None
+        assert returned == pid_a != pid_b
+
+
+class TestRecordDigestId:
+    def test_returns_increasing_ids(self):
+        conn = _db()
+        pid = upsert_paper(conn, doi="10.1101/d1", title="D1")
+        save_score(conn, paper_id=pid, combined_score=0.9)
+
+        first = record_digest(conn, [pid], delivery_method="stdout")
+        second = record_digest(conn, [], delivery_method="stdout")
+        assert first > 0
+        assert second > first
