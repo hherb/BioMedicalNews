@@ -5,7 +5,6 @@ Runs the full fetch → store → score → digest → deliver cycle.
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Callable
 from contextlib import closing
@@ -13,35 +12,30 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-import httpx
 from bmlib.llm import LLMClient
 from bmlib.llm.providers import list_providers
-from bmlib.publications import get_fetcher, source_names
-from bmlib.publications.models import FetchedRecord, FetchResult
+from bmlib.publications import source_names, sync
+from bmlib.publications.models import FetchedRecord, SyncProgress, SyncReport
 from bmlib.templates import TemplateEngine
 
+# Importing the package registers the bmnews-supplied sources (Europe PMC)
+# into bmlib's registry, so every enabled source resolves through it.
+import bmnews.fetchers  # noqa: F401
 from bmnews.config import AppConfig
-from bmnews.constants import (
-    HTTP_TIMEOUT_SECONDS,
-    UNSCORED_BATCH_SIZE,
-)
+from bmnews.constants import UNSCORED_BATCH_SIZE
 from bmnews.db.operations import (
     get_cached_digest_papers,
     get_papers_for_digest,
     get_unscored_papers,
+    publication_id,
     record_digest,
+    save_paper_metadata,
     save_paper_tags,
     save_score,
-    update_paper_identifiers,
-    upsert_paper,
 )
 from bmnews.db.schema import init_db, open_db
 from bmnews.digest.renderer import render_digest
 from bmnews.digest.sender import send_email
-
-# Importing the package registers the bmnews-supplied sources (Europe PMC)
-# into bmlib's registry, so every enabled source resolves through it.
-from bmnews.fetchers import FetchedPaper
 from bmnews.scoring.scorer import score_papers, tiers_below
 
 logger = logging.getLogger(__name__)
@@ -66,214 +60,144 @@ def build_llm_client(config: AppConfig) -> LLMClient:
     )
 
 
-def _record_to_fetched_paper(record: FetchedRecord) -> FetchedPaper:
-    """Convert a bmlib :class:`FetchedRecord` to a bmnews :class:`FetchedPaper`.
-
-    Every field bmlib normalises is carried across. ``publication_types`` in
-    particular must survive as ``metadata["pub_type"]``: it is the only input
-    to bmlib's free Tier-1 metadata classification, and dropping it silently
-    downgraded every registry-sourced paper to an LLM classification.
-    """
-    doi = record.doi or ""
-    authors = "; ".join(record.authors) if record.authors else ""
-
-    metadata: dict[str, Any] = {}
-    if record.extras:
-        # Extras first: the normalised fields below are canonical and must win
-        # over any same-named source-specific leftover.
-        metadata.update(record.extras)
-    if record.pmid:
-        metadata["pmid"] = record.pmid
-    if record.pmc_id:
-        metadata["pmcid"] = record.pmc_id
-    if record.publication_types:
-        metadata["pub_type"] = list(record.publication_types)
-    if record.journal:
-        metadata["journal"] = record.journal
-    if record.license:
-        metadata["license"] = record.license
-    metadata["is_open_access"] = record.is_open_access
-    if record.fulltext_sources:
-        metadata["fulltext_sources"] = [s.to_dict() for s in record.fulltext_sources]
-
-    return FetchedPaper(
-        doi=doi,
-        title=record.title,
-        authors=authors,
-        abstract=record.abstract or "",
-        url=_record_url(record, metadata),
-        source=record.source,
-        published_date=record.publication_date or "",
-        categories=_record_categories(record),
-        metadata=metadata,
-    )
-
-
-def _record_url(record: FetchedRecord, metadata: dict[str, Any]) -> str:
-    """Pick the best canonical URL for a record.
-
-    A DOI link is preferred; a source that supplied its own ``url`` extra
-    (Europe PMC does, for DOI-less PubMed records) is used otherwise.
-    """
-    if record.doi:
-        return f"https://doi.org/{record.doi}"
-    extra_url = metadata.get("url")
-    return extra_url if isinstance(extra_url, str) else ""
-
-
-def _record_categories(record: FetchedRecord) -> str:
-    """Build the semicolon-separated category string shown in the UI.
-
-    Prefers bmlib's normalised ``keywords``; falls back to the subject
-    ``category`` extra that the bioRxiv/medRxiv fetcher reports there.
-    """
-    if record.keywords:
-        return "; ".join(record.keywords)
-    category = record.extras.get("category") if record.extras else None
-    return category.strip() if isinstance(category, str) else ""
-
-
-def _fetch_via_registry(
-    source_name: str,
-    lookback_days: int,
-    source_config: dict[str, str],
-    on_progress: Callable[[str], None] | None = None,
-) -> list[FetchedPaper]:
-    """Fetch papers from a bmlib-registered source, one day at a time.
-
-    Args:
-        source_name: Registry name of the source (e.g. ``"medrxiv"``).
-        lookback_days: How many days back from today to fetch.
-        source_config: Extra keyword arguments passed to the bmlib fetcher.
-        on_progress: Optional callback receiving a status message per day.
-
-    Returns:
-        Normalized :class:`FetchedPaper` objects for every record returned.
-        A failure on one day is logged and skipped rather than aborting the
-        whole range.
-    """
-    fetcher = get_fetcher(source_name)
-    end = date.today()
-    start = end - timedelta(days=lookback_days)
-
-    papers: list[FetchedPaper] = []
-
-    with httpx.Client(timeout=HTTP_TIMEOUT_SECONDS) as client:
-        current = start
-        day = 0
-        while current <= end:
-            day += 1
-            if on_progress:
-                on_progress(
-                    f"Fetching from {source_name}: {current.isoformat()} "
-                    f"(day {day}/{lookback_days + 1})..."
-                )
-            collected: list[FetchedRecord] = []
-            try:
-                result = fetcher(
-                    client, current,
-                    on_record=collected.append,
-                    **source_config,
-                )
-            except Exception:
-                # One bad day (rate limit, transient 5xx) must not discard the
-                # records already collected for the rest of the range.
-                logger.exception(
-                    "Error fetching %s for %s — skipping that day",
-                    source_name, current.isoformat(),
-                )
-            else:
-                # bmlib fetchers report a failed day by returning a FetchResult
-                # rather than raising; ignoring it hid the failure entirely.
-                if isinstance(result, FetchResult) and result.status != "completed":
-                    logger.warning(
-                        "Fetching %s for %s ended as %s (%d records): %s",
-                        source_name, current.isoformat(), result.status,
-                        result.record_count, result.error or "no detail",
-                    )
-            for record in collected:
-                papers.append(_record_to_fetched_paper(record))
-            current += timedelta(days=1)
-
-    return papers
-
-
-def run_fetch(
-    config: AppConfig,
-    on_progress: Callable[[str], None] | None = None,
-) -> list[FetchedPaper]:
-    """Fetch papers from all configured sources via bmlib's source registry."""
-    papers: list[FetchedPaper] = []
-    lookback = config.sources.lookback_days
-    registry_names = set(source_names())
-
+def _source_configs(config: AppConfig) -> dict[str, dict[str, Any]]:
+    """Build the per-source keyword arguments bmlib's fetchers receive."""
+    configs: dict[str, dict[str, Any]] = {}
     for source_name in config.sources.enabled:
-        if source_name not in registry_names:
+        src_config = dict(config.sources.source_options.get(source_name, {}))
+        # OpenAlex asks for a contact address for polite API access.
+        if source_name == "openalex" and "email" not in src_config and config.user.email:
+            src_config["email"] = config.user.email
+        configs[source_name] = src_config
+    return configs
+
+
+def _known_sources(config: AppConfig) -> list[str]:
+    """Return the enabled sources bmlib's registry actually knows about."""
+    registry_names = set(source_names())
+    known = []
+    for source_name in config.sources.enabled:
+        if source_name in registry_names:
+            known.append(source_name)
+        else:
             logger.warning(
                 "Unknown source %r — skipping. Known sources: %s",
                 source_name, ", ".join(sorted(registry_names)),
             )
-            continue
-        if on_progress:
-            on_progress(f"Fetching from {source_name}...")
-        logger.info("Fetching from %s...", source_name)
-        src_config = dict(config.sources.source_options.get(source_name, {}))
-        # Provide email for openalex if available
-        if source_name == "openalex" and "email" not in src_config and config.user.email:
-            src_config["email"] = config.user.email
-        papers.extend(_fetch_via_registry(
-            source_name, lookback, src_config, on_progress,
-        ))
-
-    logger.info("Total papers fetched: %d", len(papers))
-    return papers
+    return known
 
 
-def run_store(config: AppConfig, papers: list[FetchedPaper]) -> int:
-    """Insert or update fetched papers in the database.
+def _progress_reporter(
+    on_progress: Callable[[str], None] | None,
+) -> Callable[[SyncProgress], None] | None:
+    """Adapt bmlib's :class:`SyncProgress` to bmnews's string callback.
+
+    The GUI status bar and the CLI both take a plain message, so the
+    structured progress record is rendered down to one.
+    """
+    if on_progress is None:
+        return None
+
+    def report(progress: SyncProgress) -> None:
+        counts = ""
+        if progress.records_total:
+            counts = f" ({progress.records_processed}/{progress.records_total})"
+        detail = f" — {progress.message}" if progress.message else ""
+        on_progress(f"Fetching from {progress.source}: {progress.date}{counts}{detail}")
+
+    return report
+
+
+def _record_extras(record: FetchedRecord) -> dict[str, Any]:
+    """Pull out the source-specific fields bmlib's schema has no column for.
+
+    Everything else a fetcher reports — identifiers, journal, publication
+    types, license, open access, full-text source URLs — now has a real column
+    or table of its own, so only the genuine leftovers are kept here.
+    """
+    extras = dict(record.extras) if record.extras else {}
+    # Europe PMC supplies a ready-made ``url``; bmnews derives its links from
+    # the identifiers instead (see ``operations.paper_url``), so it would only
+    # go stale in storage.
+    extras.pop("url", None)
+    return extras
+
+
+def run_sync(
+    config: AppConfig,
+    on_progress: Callable[[str], None] | None = None,
+) -> SyncReport:
+    """Fetch from every configured source and store what comes back.
+
+    Delegates the whole fetch-and-store cycle to :func:`bmlib.publications.sync`,
+    which brings three things bmnews's own loop did not have: days that failed
+    are recorded and retried on the next run rather than silently lost, records
+    are deduplicated across sources by DOI *and* PMID (so a paper with no DOI is
+    stored instead of dropped), and each day is written in a single transaction
+    whose write lock is not held across network I/O.
 
     Args:
         config: Application config.
-        papers: Papers to persist. Each is upserted on its DOI, so re-storing
-            a previously seen paper refreshes it rather than duplicating it.
+        on_progress: Optional callback receiving a status message string.
 
     Returns:
-        The number of papers written (inserted *or* updated).
+        bmlib's :class:`SyncReport` for the run.
     """
-    stored = 0
+    sources = _known_sources(config)
+    if not sources:
+        logger.warning("No known sources enabled — nothing to fetch")
+        return SyncReport(
+            sources_synced=[], days_processed=0, records_added=0,
+            records_merged=0, records_failed=0,
+        )
+
+    end = date.today()
+    start = end - timedelta(days=config.sources.lookback_days)
+
+    # bmlib hands each record to on_record *before* storing it, so the extras
+    # are buffered here and written once the publication ids exist.
+    pending_extras: dict[tuple[str | None, str | None], dict[str, Any]] = {}
+
+    def collect_extras(record: FetchedRecord) -> None:
+        extras = _record_extras(record)
+        if extras:
+            pending_extras[(record.doi, record.pmid)] = extras
+
     with closing(open_db(config)) as conn:
         init_db(conn)
+        report = sync(
+            conn,
+            sources=sources,
+            date_from=start,
+            date_to=end,
+            source_configs=_source_configs(config),
+            on_record=collect_extras,
+            on_progress=_progress_reporter(on_progress),
+        )
+        _store_extras(conn, pending_extras)
 
-        for paper in papers:
-            if not paper.doi:
-                # doi is the natural key; a blank one would collide with every
-                # other DOI-less paper via the UNIQUE constraint.
-                logger.warning("Skipping paper without DOI: %s", paper.title[:80])
-                continue
-            pid = upsert_paper(
-                conn,
-                doi=paper.doi,
-                title=paper.title,
-                authors=paper.authors,
-                abstract=paper.abstract,
-                url=paper.url,
-                source=paper.source,
-                published_date=paper.published_date,
-                categories=paper.categories,
-                metadata_json=json.dumps(paper.metadata),
-            )
-            pmid = paper.metadata.get("pmid")
-            pmcid = paper.metadata.get("pmcid")
-            if pmid or pmcid:
-                update_paper_identifiers(
-                    conn, paper_id=pid,
-                    pmid=pmid or None,
-                    pmcid=pmcid or None,
-                )
-            stored += 1
+    logger.info(
+        "Sync complete: %d added, %d merged, %d failed across %d day(s)",
+        report.records_added, report.records_merged,
+        report.records_failed, report.days_processed,
+    )
+    for error in report.errors:
+        logger.warning("Sync error: %s", error)
 
-    logger.info("Stored %d papers", stored)
-    return stored
+    return report
+
+
+def _store_extras(
+    conn: Any,
+    pending: dict[tuple[str | None, str | None], dict[str, Any]],
+) -> None:
+    """Persist buffered source extras against the publications they belong to."""
+    for (doi, pmid), extras in pending.items():
+        paper_id = publication_id(conn, doi=doi, pmid=pmid)
+        if paper_id is None:
+            # The record failed to store, or carried no usable identifier.
+            continue
+        save_paper_metadata(conn, paper_id=paper_id, metadata=extras)
 
 
 def run_score(
@@ -507,11 +431,7 @@ def run_pipeline(
 
     logger.info("Starting pipeline run")
 
-    papers = run_fetch(config, on_progress=on_progress)
-    if papers:
-        if on_progress:
-            on_progress(f"Storing {len(papers)} papers...")
-        run_store(config, papers)
+    run_sync(config, on_progress=on_progress)
 
     scored = run_score(config, on_progress=on_progress, on_scored=on_scored)
     if scored > 0:

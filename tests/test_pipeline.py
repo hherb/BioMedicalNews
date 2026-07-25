@@ -1,20 +1,34 @@
-"""Tests for bmnews.pipeline: fetching, storing, and cached digests."""
+"""Tests for bmnews.pipeline: syncing, storing, and cached digests."""
 
 from __future__ import annotations
 
-import json
 from datetime import date, timedelta
 from unittest.mock import patch
 
-from bmlib.db import connect_sqlite, fetch_one
+from bmlib.db import connect_sqlite
+from bmlib.publications import register_source
+from bmlib.publications.models import (
+    FetchedRecord,
+    FetchResult,
+    SourceDescriptor,
+    SyncProgress,
+)
 from click.testing import CliRunner
 
 from bmnews.cli import main
 from bmnews.config import load_config
-from bmnews.db.operations import record_digest, save_score, upsert_paper
+from bmnews.db.operations import (
+    get_paper_by_doi,
+    get_paper_with_score,
+    publication_id,
+    record_digest,
+    save_score,
+    store_paper,
+)
 from bmnews.db.schema import init_db
-from bmnews.fetchers.base import FetchedPaper
-from bmnews.pipeline import run_store, show_cached_digests
+from bmnews.pipeline import run_sync, show_cached_digests
+
+STUB_SOURCE = "teststub"
 
 
 def _test_config():
@@ -38,13 +52,48 @@ def _seeded_db():
     """Return a conn with papers, scores, and a digest recorded."""
     conn = connect_sqlite(":memory:")
     init_db(conn)
-    pid = upsert_paper(conn, doi="10.1101/cached1", title="Cached Paper",
-                       abstract="Abs", published_date=_days_ago(2),
-                       source="medrxiv")
+    pid = store_paper(conn, doi="10.1101/cached1", title="Cached Paper",
+                      abstract="Abs", published_date=_days_ago(2),
+                      source="medrxiv")
     save_score(conn, paper_id=pid, combined_score=0.8, relevance_score=0.9,
                quality_score=0.7, summary="Great paper.")
     record_digest(conn, [pid], delivery_method="stdout")
     return conn
+
+
+def _register_stub_source(records: list[FetchedRecord], status: str = "completed") -> None:
+    """Register a fetcher that emits *records* for whatever day it is asked for.
+
+    Going through the real registry (rather than sync's ``_fetcher_override``
+    test hook) keeps the source-resolution path under test.
+    """
+
+    def fetcher(client, target_date, *, on_record, on_progress=None, **config):
+        if on_progress is not None:
+            on_progress(
+                SyncProgress(
+                    source=STUB_SOURCE,
+                    date=target_date.isoformat(),
+                    records_processed=len(records),
+                    records_total=len(records),
+                    status=status,
+                )
+            )
+        for record in records:
+            on_record(record)
+        return FetchResult(
+            source=STUB_SOURCE,
+            date=target_date.isoformat(),
+            record_count=len(records),
+            status=status,
+        )
+
+    register_source(
+        SourceDescriptor(
+            name=STUB_SOURCE, display_name="Test stub", description="test fixture",
+        ),
+        fetcher,
+    )
 
 
 class TestShowCachedDigests:
@@ -94,226 +143,221 @@ class TestRunCLI:
         assert kwargs.get("show_cached") is False
 
 
-class TestRunStore:
-    @patch("bmnews.pipeline.open_db")
-    def test_stores_pmid_pmcid_from_metadata(self, mock_open_db, tmp_path):
-        db_path = str(tmp_path / "test.db")
-        conn = connect_sqlite(db_path)
-        init_db(conn)
-        conn.close()
-        mock_open_db.return_value = connect_sqlite(db_path)
-        config = _test_config()
+class TestRunSync:
+    """run_sync delegates fetch *and* store to bmlib.publications.sync."""
 
-        papers = [
-            FetchedPaper(
-                doi="10.1234/test",
-                title="Test Paper",
-                source="europepmc",
-                metadata={"pmid": "12345", "pmcid": "PMC678"},
-            ),
-        ]
-        run_store(config, papers)
-
-        conn2 = connect_sqlite(db_path)
-        row = fetch_one(conn2, "SELECT pmid, pmcid FROM papers WHERE doi = ?",
-                        ("10.1234/test",))
-        assert row["pmid"] == "12345"
-        assert row["pmcid"] == "PMC678"
-        conn2.close()
-
-    @patch("bmnews.pipeline.open_db")
-    def test_stores_paper_without_identifiers(self, mock_open_db, tmp_path):
-        db_path = str(tmp_path / "test.db")
-        conn = connect_sqlite(db_path)
-        init_db(conn)
-        conn.close()
-        mock_open_db.return_value = connect_sqlite(db_path)
-        config = _test_config()
-
-        papers = [
-            FetchedPaper(
-                doi="10.1234/noid",
-                title="No IDs Paper",
-                source="medrxiv",
-            ),
-        ]
-        run_store(config, papers)
-
-        conn2 = connect_sqlite(db_path)
-        row = fetch_one(conn2, "SELECT pmid, pmcid FROM papers WHERE doi = ?",
-                        ("10.1234/noid",))
-        assert row["pmid"] is None
-        assert row["pmcid"] is None
-        conn2.close()
-
-
-class TestRunStoreIdentifiers:
-    """Regression tests for identifiers landing on the wrong paper row.
-
-    A batch that mixes new inserts with re-fetched papers used to scramble
-    PMIDs: SQLite leaves ``lastrowid`` pointing at the last row actually
-    inserted, so the id returned for a conflicting upsert belonged to a
-    different paper.
-    """
-
-    @patch("bmnews.pipeline.open_db")
-    def test_mixed_insert_and_conflict_batch(self, mock_open_db, tmp_path):
-        db_path = str(tmp_path / "mixed.db")
+    def _run(self, records, tmp_path, config=None, **run_kwargs):
+        """Sync *records* into a fresh file-backed database and return a conn."""
+        db_path = str(tmp_path / "sync.db")
         conn = connect_sqlite(db_path)
         init_db(conn)
         conn.close()
 
-        def _paper(i, pmid=None):
-            return FetchedPaper(
-                doi=f"10.1234/p{i}", title=f"Paper {i}", source="europepmc",
-                metadata={"pmid": pmid} if pmid else {},
-            )
+        _register_stub_source(records)
+        config = config or _test_config()
+        config.sources.enabled = [STUB_SOURCE]
+        config.sources.lookback_days = 0
 
-        config = _test_config()
+        with patch("bmnews.pipeline.open_db", return_value=connect_sqlite(db_path)):
+            report = self.report = run_sync(config, **run_kwargs)
 
-        # Day 1: paper 0 arrives without identifiers.
-        mock_open_db.return_value = connect_sqlite(db_path)
-        run_store(config, [_paper(0)])
+        assert not report.errors
+        return connect_sqlite(db_path)
 
-        # Day 2: one brand-new paper (INSERT) followed by the already-stored
-        # paper 0, now carrying a PMID (ON CONFLICT → UPDATE).
-        mock_open_db.return_value = connect_sqlite(db_path)
-        run_store(config, [_paper(9, "9999"), _paper(0, "1000")])
-
-        conn = connect_sqlite(db_path)
-        p0 = fetch_one(conn, "SELECT pmid FROM papers WHERE doi = ?", ("10.1234/p0",))
-        p9 = fetch_one(conn, "SELECT pmid FROM papers WHERE doi = ?", ("10.1234/p9",))
-        conn.close()
-
-        assert p0["pmid"] == "1000"
-        assert p9["pmid"] == "9999"
-
-    @patch("bmnews.pipeline.open_db")
-    def test_paper_without_doi_is_skipped(self, mock_open_db, tmp_path):
-        db_path = str(tmp_path / "nodoi.db")
-        conn = connect_sqlite(db_path)
-        init_db(conn)
-        conn.close()
-        mock_open_db.return_value = connect_sqlite(db_path)
-
-        stored = run_store(_test_config(), [
-            FetchedPaper(doi="", title="No DOI", source="medrxiv"),
-            FetchedPaper(doi="10.1234/has-doi", title="Has DOI", source="medrxiv"),
-        ])
-        assert stored == 1
-
-
-class TestRecordToFetchedPaper:
-    """Nothing bmlib normalises may be dropped on the way into the database."""
-
-    def _record(self, **overrides):
-        from bmlib.fulltext.models import FullTextSourceEntry
-        from bmlib.publications.models import FetchedRecord
-
-        defaults = dict(
-            title="A Trial",
-            source="pubmed",
-            doi="10.1234/abc",
-            pmid="111",
-            pmc_id="PMC222",
-            abstract="Findings.",
-            authors=["Smith J", "Jones A"],
-            journal="The Journal",
-            publication_date="2026-02-10",
-            keywords=["Oncology"],
-            publication_types=["Randomized Controlled Trial"],
-            is_open_access=True,
-            license="cc-by",
-            fulltext_sources=[
-                FullTextSourceEntry(url="http://x/p.pdf", format="pdf", source="pubmed"),
+    def test_stores_a_fetched_record(self, tmp_path):
+        conn = self._run(
+            [
+                FetchedRecord(
+                    title="Test Paper",
+                    source=STUB_SOURCE,
+                    doi="10.1234/test",
+                    pmid="12345",
+                    pmc_id="PMC678",
+                    authors=["Smith J"],
+                    publication_date="2026-02-10",
+                )
             ],
-            extras={"category": "Medicine"},
+            tmp_path,
         )
-        defaults.update(overrides)
-        return FetchedRecord(**defaults)
 
-    def _convert(self, **overrides):
-        from bmnews.pipeline import _record_to_fetched_paper
-        return _record_to_fetched_paper(self._record(**overrides))
+        paper = get_paper_by_doi(conn, "10.1234/test")
+        assert paper["title"] == "Test Paper"
+        assert paper["pmid"] == "12345"
+        assert paper["pmcid"] == "PMC678"
+        assert paper["authors"] == ["Smith J"]
+        assert self.report.records_added == 1
 
-    def test_publication_types_reach_the_quality_classifier(self):
-        """pub_type is the only input to bmlib's free Tier-1 classification."""
+    def test_a_record_without_a_doi_is_stored_not_dropped(self, tmp_path):
+        """The old papers.doi was NOT NULL, so run_store discarded these."""
+        conn = self._run(
+            [FetchedRecord(title="PMID only", source=STUB_SOURCE, pmid="999")],
+            tmp_path,
+        )
+
+        paper_id = publication_id(conn, pmid="999")
+        assert paper_id is not None
+        assert get_paper_with_score(conn, paper_id)["title"] == "PMID only"
+
+    def test_publication_types_reach_the_quality_classifier(self, tmp_path):
+        """pub_types are the only input to bmlib's free Tier-1 classification."""
         from bmnews.scoring.scorer import _extract_pub_types
 
-        paper = self._convert()
-        assert paper.metadata["pub_type"] == ["Randomized Controlled Trial"]
-
-        stored = {"metadata_json": json.dumps(paper.metadata), "categories": ""}
-        assert "Randomized Controlled Trial" in _extract_pub_types(stored)
-
-    def test_carries_journal_license_and_access(self):
-        paper = self._convert()
-        assert paper.metadata["journal"] == "The Journal"
-        assert paper.metadata["license"] == "cc-by"
-        assert paper.metadata["is_open_access"] is True
-
-    def test_carries_identifiers_and_fulltext_sources(self):
-        paper = self._convert()
-        assert paper.metadata["pmid"] == "111"
-        assert paper.metadata["pmcid"] == "PMC222"
-        assert paper.metadata["fulltext_sources"][0]["url"] == "http://x/p.pdf"
-
-    def test_core_fields(self):
-        paper = self._convert()
-        assert paper.doi == "10.1234/abc"
-        assert paper.authors == "Smith J; Jones A"
-        assert paper.url == "https://doi.org/10.1234/abc"
-        assert paper.published_date == "2026-02-10"
-
-    def test_categories_prefer_keywords(self):
-        assert self._convert().categories == "Oncology"
-
-    def test_categories_fall_back_to_the_rxiv_subject(self):
-        """bioRxiv/medRxiv report their subject as an extra, not a keyword."""
-        assert self._convert(keywords=[]).categories == "Medicine"
-
-    def test_url_falls_back_to_a_source_supplied_one(self):
-        paper = self._convert(
-            doi=None, extras={"url": "https://europepmc.org/article/med/111"},
+        conn = self._run(
+            [
+                FetchedRecord(
+                    title="A Trial",
+                    source=STUB_SOURCE,
+                    doi="10.1234/trial",
+                    publication_types=["Randomized Controlled Trial"],
+                    keywords=["Oncology"],
+                )
+            ],
+            tmp_path,
         )
-        assert paper.url == "https://europepmc.org/article/med/111"
 
-    def test_normalised_fields_win_over_same_named_extras(self):
-        paper = self._convert(extras={"journal": "Stale", "pmid": "999"})
-        assert paper.metadata["journal"] == "The Journal"
-        assert paper.metadata["pmid"] == "111"
+        paper = get_paper_by_doi(conn, "10.1234/trial")
+        assert paper["publication_types"] == ["Randomized Controlled Trial"]
+        assert "Randomized Controlled Trial" in _extract_pub_types(paper)
+        assert "Oncology" in _extract_pub_types(paper)
+
+    def test_journal_license_and_access_are_stored(self, tmp_path):
+        conn = self._run(
+            [
+                FetchedRecord(
+                    title="OA Paper",
+                    source=STUB_SOURCE,
+                    doi="10.1234/oa",
+                    journal="The Journal",
+                    license="cc-by",
+                    is_open_access=True,
+                )
+            ],
+            tmp_path,
+        )
+
+        paper = get_paper_by_doi(conn, "10.1234/oa")
+        assert paper["journal"] == "The Journal"
+        assert paper["license"] == "cc-by"
+        assert paper["is_open_access"] is True
+
+    def test_fulltext_sources_land_in_bmlibs_table(self, tmp_path):
+        from bmlib.fulltext.models import FullTextSourceEntry
+
+        from bmnews.db.operations import get_fulltext_sources
+
+        conn = self._run(
+            [
+                FetchedRecord(
+                    title="With fulltext",
+                    source=STUB_SOURCE,
+                    doi="10.1234/ft",
+                    fulltext_sources=[
+                        FullTextSourceEntry(
+                            url="http://x/p.pdf", format="pdf", source=STUB_SOURCE,
+                        )
+                    ],
+                )
+            ],
+            tmp_path,
+        )
+
+        paper_id = get_paper_by_doi(conn, "10.1234/ft")["id"]
+        assert [s.url for s in get_fulltext_sources(conn, paper_id)] == ["http://x/p.pdf"]
+
+    def test_source_extras_without_a_column_are_kept(self, tmp_path):
+        conn = self._run(
+            [
+                FetchedRecord(
+                    title="Cited",
+                    source=STUB_SOURCE,
+                    doi="10.1234/cited",
+                    extras={"cited_by": 7, "url": "https://stale.example/x"},
+                )
+            ],
+            tmp_path,
+        )
+
+        metadata = get_paper_by_doi(conn, "10.1234/cited")["metadata"]
+        assert metadata["cited_by"] == 7
+        # The URL is derived from the identifiers, so a stored copy would only
+        # go stale.
+        assert "url" not in metadata
+        assert get_paper_by_doi(conn, "10.1234/cited")["url"] == "https://doi.org/10.1234/cited"
+
+    def test_the_same_work_twice_is_stored_once(self, tmp_path):
+        record = FetchedRecord(title="Dup", source=STUB_SOURCE, doi="10.1234/dup")
+        conn = self._run([record, record], tmp_path)
+
+        from bmlib.db import fetch_scalar
+        assert fetch_scalar(conn, "SELECT COUNT(*) FROM publications") == 1
+
+    def test_progress_is_reported_as_strings(self, tmp_path):
+        messages: list[str] = []
+        self._run(
+            [FetchedRecord(title="P", source=STUB_SOURCE, doi="10.1234/p")],
+            tmp_path,
+            on_progress=messages.append,
+        )
+
+        assert messages
+        assert all(isinstance(m, str) for m in messages)
+        assert any(STUB_SOURCE in m for m in messages)
 
 
-class TestRunFetchSourceDispatch:
+class TestRunSyncSourceDispatch:
     """Every enabled source resolves through bmlib's registry."""
 
     def test_unknown_source_is_skipped(self):
-        from bmnews.pipeline import run_fetch
-
         config = _test_config()
         config.sources.enabled = ["not-a-real-source"]
-        assert run_fetch(config) == []
 
-    @patch("bmnews.pipeline._fetch_via_registry", return_value=[])
-    def test_europepmc_goes_through_the_registry(self, mock_fetch):
-        from bmnews.pipeline import run_fetch
+        report = run_sync(config)
 
+        assert report.sources_synced == []
+        assert report.records_added == 0
+
+    @patch("bmnews.pipeline.open_db")
+    @patch("bmnews.pipeline.sync")
+    def test_source_options_reach_the_fetcher(self, mock_sync, mock_open_db):
+        conn = connect_sqlite(":memory:")
+        init_db(conn)
+        mock_open_db.return_value = conn
         config = _test_config()
         config.sources.enabled = ["europepmc"]
         config.sources.europepmc_query = "cancer"
-        run_fetch(config)
 
-        source_name, _lookback, src_config, _progress = mock_fetch.call_args[0]
-        assert source_name == "europepmc"
-        assert src_config == {"query": "cancer"}
+        run_sync(config)
 
-    @patch("bmnews.pipeline._fetch_via_registry", return_value=[])
-    def test_openalex_gets_the_user_email(self, mock_fetch):
-        from bmnews.pipeline import run_fetch
+        assert mock_sync.call_args.kwargs["source_configs"]["europepmc"] == {"query": "cancer"}
 
+    @patch("bmnews.pipeline.open_db")
+    @patch("bmnews.pipeline.sync")
+    def test_openalex_gets_the_user_email(self, mock_sync, mock_open_db):
+        conn = connect_sqlite(":memory:")
+        init_db(conn)
+        mock_open_db.return_value = conn
         config = _test_config()
         config.sources.enabled = ["openalex"]
         config.user.email = "me@example.com"
-        run_fetch(config)
 
-        assert mock_fetch.call_args[0][2] == {"email": "me@example.com"}
+        run_sync(config)
+
+        assert mock_sync.call_args.kwargs["source_configs"]["openalex"] == {
+            "email": "me@example.com",
+        }
+
+    @patch("bmnews.pipeline.open_db")
+    @patch("bmnews.pipeline.sync")
+    def test_lookback_days_sets_the_date_range(self, mock_sync, mock_open_db):
+        conn = connect_sqlite(":memory:")
+        init_db(conn)
+        mock_open_db.return_value = conn
+        config = _test_config()
+        config.sources.enabled = ["medrxiv"]
+        config.sources.lookback_days = 3
+
+        run_sync(config)
+
+        kwargs = mock_sync.call_args.kwargs
+        assert kwargs["date_to"] == date.today()
+        assert kwargs["date_from"] == date.today() - timedelta(days=3)

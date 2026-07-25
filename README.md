@@ -60,14 +60,13 @@ Key sections:
 bmnews/
   config.py          # TOML config loading
   cli.py             # Click CLI commands
-  pipeline.py        # Orchestrates fetch → store → score → digest → deliver
+  pipeline.py        # Orchestrates sync (bmlib) → score → digest → deliver
   db/
-    schema.py        # DDL for SQLite and PostgreSQL (all SQL lives here)
-    operations.py    # Pure-function CRUD via bmlib.db
-    backend.py       # SQLite vs PostgreSQL detection
-  metadata.py        # Helpers for the papers.metadata_json blob
+    schema.py        # Connection factory and migration entry point
+    migrations.py    # Versioned migrations for SQLite and PostgreSQL
+    operations.py    # Pure-function CRUD via bmlib.db (all SQL lives here)
+  metadata.py        # Helpers for the paper_extras.metadata_json blob
   fetchers/
-    base.py          # FetchedPaper dataclass
     europepmc.py     # Europe PMC fetcher, registered with bmlib's source registry
                      # (medRxiv, bioRxiv, PubMed and OpenAlex come from bmlib)
   scoring/

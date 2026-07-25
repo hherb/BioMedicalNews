@@ -26,7 +26,6 @@ from bmnews.constants import (
     QUALITY_WEIGHT,
     RELEVANCE_WEIGHT,
 )
-from bmnews.metadata import parse_metadata
 from bmnews.scoring.relevance_agent import RelevanceAgent
 
 logger = logging.getLogger(__name__)
@@ -195,7 +194,9 @@ def _score_single(
     paper_id = paper.get("id", 0)
     title = paper.get("title", "")
     abstract = paper.get("abstract", "")
-    categories = paper.get("categories", "")
+    # The prompt template renders keywords as one line, so the list is joined
+    # here rather than teaching the template to format it.
+    categories = "; ".join(paper.get("keywords") or [])
 
     # --- Relevance scoring (LLM) ---
     relevance_result = agent.score(
@@ -265,27 +266,19 @@ def _score_single(
 def _extract_pub_types(paper: dict) -> list[str]:
     """Collect publication-type hints for a paper.
 
+    These feed bmlib's free Tier-1 metadata classification, so dropping them
+    silently forces every paper onto the LLM classifier instead.
+
     Args:
-        paper: Paper dict, optionally carrying a ``metadata_json`` blob with a
-            ``pub_type`` entry and a semicolon-separated ``categories`` string.
+        paper: Paper dict carrying ``publication_types`` and ``keywords``
+            lists, as decoded by ``db.operations._row_to_paper``.
 
     Returns:
-        A new list combining metadata publication types and categories.
+        A new list combining publication types and subject keywords.
     """
-    raw_types = parse_metadata(paper.get("metadata_json")).get("pub_type", [])
-    if isinstance(raw_types, str):
-        pub_types = [raw_types]
-    elif isinstance(raw_types, list):
-        # Copy: extending in place would mutate the caller's metadata dict.
-        pub_types = list(raw_types)
-    else:
-        pub_types = []
-
-    # Also check categories
-    categories = paper.get("categories", "")
-    if categories:
-        pub_types.extend(c.strip() for c in categories.split(";") if c.strip())
-
+    # Copy: extending in place would mutate the caller's paper dict.
+    pub_types = list(paper.get("publication_types") or [])
+    pub_types.extend(paper.get("keywords") or [])
     return pub_types
 
 

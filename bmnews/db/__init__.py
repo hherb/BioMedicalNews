@@ -1,11 +1,13 @@
 """Database schema and operations for bmnews.
 
 All SQL lives here — no direct SQL outside this package.
-Uses bmlib.db for connection management and query execution.
+Uses bmlib.db for connection management and query execution, and
+bmlib.publications for the paper records themselves.
 """
 
 from bmnews.db.operations import (
     get_all_tags,
+    get_paper,
     get_paper_by_doi,
     get_paper_tags,
     get_papers_by_tag,
@@ -13,16 +15,19 @@ from bmnews.db.operations import (
     get_scored_papers,
     get_unscored_papers,
     paper_exists,
+    publication_id,
     record_digest,
     save_paper_tags,
     save_score,
-    upsert_paper,
+    store_paper,
 )
 from bmnews.db.schema import init_db
 
 __all__ = [
     "init_db",
-    "upsert_paper",
+    "store_paper",
+    "publication_id",
+    "get_paper",
     "get_paper_by_doi",
     "get_unscored_papers",
     "save_score",

@@ -24,9 +24,9 @@ h1 { color: #1a5276; border-bottom: 2px solid #1a5276; padding-bottom: 10px; }
 <div class="paper">
     <h3><a href="{{ paper.url }}">{{ paper.title }}</a></h3>
     <div class="meta">
-        {% if paper.authors %}{{ paper.authors }}{% endif %}
-        {% if paper.published_date %} &middot; {{ paper.published_date }}{% endif %}
-        {% if paper.source %} &middot; {{ paper.source }}{% endif %}
+        {% if paper.authors %}{{ paper.authors|join('; ') }}{% endif %}
+        {% if paper.publication_date %} &middot; {{ paper.publication_date }}{% endif %}
+        {% if paper.sources %} &middot; {{ paper.sources|join(', ') }}{% endif %}
     </div>
     {% if paper.summary %}
     <div class="summary">{{ paper.summary }}</div>

@@ -116,10 +116,12 @@ The HTML template for email digests and file output.
 | Field | Type | Description |
 |-------|------|-------------|
 | `title` | string | Paper title |
-| `url` | string | DOI link or direct URL |
-| `authors` | string | Author list |
-| `published_date` | string | Publication date |
-| `source` | string | Source server name |
+| `url` | string | Link derived from the DOI, PMID or PMC id |
+| `authors` | list[string] | Author names — render with `{{ paper.authors\|join('; ') }}` |
+| `publication_date` | string | Publication date |
+| `sources` | list[string] | Every source the paper was seen on |
+| `journal` | string | Journal name |
+| `keywords` | list[string] | Subject terms reported by the source |
 | `summary` | string | LLM-generated summary |
 | `relevance_score` | float | 0.0–1.0 relevance score |
 | `quality_tier` | string | Quality tier name |

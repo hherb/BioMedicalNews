@@ -6,9 +6,9 @@
 {% for paper in papers %}
 {{ loop.index }}. {{ paper.title }}
    {{ paper.url }}
-   {% if paper.authors %}Authors: {{ paper.authors }}{% endif %}
-   {% if paper.published_date %}Date: {{ paper.published_date }}{% endif %}
-   {% if paper.source %}Source: {{ paper.source }}{% endif %}
+   {% if paper.authors %}Authors: {{ paper.authors|join('; ') }}{% endif %}
+   {% if paper.publication_date %}Date: {{ paper.publication_date }}{% endif %}
+   {% if paper.sources %}Source: {{ paper.sources|join(', ') }}{% endif %}
    Relevance: {{ "%.0f"|format(paper.relevance_score * 100) }}%{% if paper.quality_tier %} | Quality: {{ paper.quality_tier }}{% endif %}{% if paper.study_design %} | Design: {{ paper.study_design }}{% endif %}
 
    {% if paper.summary %}{{ paper.summary }}{% endif %}

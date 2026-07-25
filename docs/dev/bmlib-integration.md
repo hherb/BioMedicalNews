@@ -75,10 +75,14 @@ from bmlib.db import (
 
 ```python
 # Example from operations.py
-def paper_exists(conn, doi):
+def get_paper(conn, paper_id):
     ph = _placeholder(conn)
-    val = fetch_scalar(conn, f"SELECT 1 FROM papers WHERE doi = {ph}", (doi,))
-    return val is not None
+    row = fetch_one(
+        conn,
+        f"SELECT {_PAPER_COLUMNS} {_PAPER_FROM} WHERE p.id = {ph}",
+        (paper_id,),
+    )
+    return _row_to_paper(row) if row else None
 ```
 
 ### `bmlib.templates` — Jinja2 template engine

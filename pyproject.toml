@@ -23,6 +23,9 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Medical Science Apps.",
 ]
 dependencies = [
+    # Needs bmlib with backend-aware bmlib.publications (hherb/bmlib#28): the
+    # publications schema, Publication.pmcid, and transaction() nesting on
+    # PostgreSQL. Tracks main, so that PR must land first.
     "bmlib @ git+https://github.com/hherb/bmlib.git",
     "httpx>=0.25",
     "click>=8.0",

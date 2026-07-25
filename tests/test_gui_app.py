@@ -9,7 +9,7 @@ from bmlib.db import connect_sqlite
 from bmlib.fulltext import FullTextResult
 
 from bmnews.config import AppConfig
-from bmnews.db.operations import get_paper_by_doi, save_score, upsert_paper
+from bmnews.db.operations import get_paper_by_doi, save_score, store_paper
 from bmnews.db.schema import init_db
 
 
@@ -32,16 +32,16 @@ def client(app):
 @pytest.fixture
 def seeded_client(app):
     conn = app.config["BMNEWS_DB"]
-    p1 = upsert_paper(conn, doi="10.1101/g1", title="Alpha Paper",
-                       authors="Smith J", abstract="Cancer immunotherapy.",
-                       source="medrxiv", published_date="2026-02-10")
+    p1 = store_paper(conn, doi="10.1101/g1", title="Alpha Paper",
+                     authors=["Smith J"], abstract="Cancer immunotherapy.",
+                     source="medrxiv", published_date="2026-02-10")
     save_score(conn, paper_id=p1, relevance_score=0.9, quality_score=0.8,
                combined_score=0.86, summary="A strong trial.",
                study_design="rct", quality_tier="TIER_4_EXPERIMENTAL")
 
-    p2 = upsert_paper(conn, doi="10.1101/g2", title="Beta Paper",
-                       authors="Jones K", abstract="Genomics study.",
-                       source="biorxiv", published_date="2026-02-12")
+    p2 = store_paper(conn, doi="10.1101/g2", title="Beta Paper",
+                     authors=["Jones K"], abstract="Genomics study.",
+                     source="biorxiv", published_date="2026-02-12")
     save_score(conn, paper_id=p2, relevance_score=0.6, quality_score=0.5,
                combined_score=0.56, summary="Interesting cohort.",
                study_design="cohort", quality_tier="TIER_3_CONTROLLED")
@@ -241,7 +241,7 @@ class TestPagination:
     def many_papers_client(self, app):
         conn = app.config["BMNEWS_DB"]
         for i in range(45):
-            pid = upsert_paper(
+            pid = store_paper(
                 conn, doi=f"10.1101/page{i}", title=f"Paged Paper {i}",
                 abstract="Kadabra unique term", source="medrxiv",
                 published_date="2026-02-10",
@@ -274,8 +274,8 @@ class TestPagination:
 
     def test_more_applies_search_filter(self, many_papers_client):
         conn = many_papers_client.application.config["BMNEWS_DB"]
-        pid = upsert_paper(conn, doi="10.1101/other", title="Unrelated",
-                           abstract="nothing to see", source="medrxiv")
+        pid = store_paper(conn, doi="10.1101/other", title="Unrelated",
+                          abstract="nothing to see", source="medrxiv")
         save_score(conn, paper_id=pid, combined_score=0.9)
 
         resp = many_papers_client.get("/papers/more?offset=0&limit=50&q=Kadabra")

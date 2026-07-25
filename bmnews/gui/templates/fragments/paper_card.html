@@ -5,8 +5,10 @@
      hx-swap="innerHTML">
     <div class="card-title">{{ paper.title|truncate(80) }}</div>
     <div class="card-meta">
-        <span class="source-badge source-{{ paper.source }}">{{ paper.source }}</span>
-        <span class="date">{{ paper.published_date }}</span>
+        {% for source in paper.sources %}
+        <span class="source-badge source-{{ source }}">{{ source }}</span>
+        {% endfor %}
+        <span class="date">{{ paper.publication_date }}</span>
     </div>
     <div class="card-score">
         {% if paper.combined_score is not none %}
