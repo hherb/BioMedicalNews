@@ -16,9 +16,6 @@ HTTP_TIMEOUT_SECONDS: float = 30.0
 #: Page size for the Europe PMC REST search endpoint (API maximum is 1000).
 EUROPEPMC_PAGE_SIZE: int = 100
 
-#: Page size for the medRxiv/bioRxiv details endpoint (fixed by the API).
-RXIV_PAGE_SIZE: int = 100
-
 #: Safety valve: maximum number of result pages to walk before giving up.
 #: Guards against an API that keeps handing back a fresh cursor forever.
 MAX_FETCH_PAGES: int = 200
@@ -37,26 +34,43 @@ QUALITY_SCORE_SCALE: float = 10.0
 #: Fallback score used when a paper's quality tier is unknown.
 DEFAULT_QUALITY_SCORE: float = 0.3
 
-#: Approximate 0.0–1.0 score for each :class:`bmlib.quality.QualityTier`.
-QUALITY_TIER_SCORES: dict[str, float] = {
-    "UNCLASSIFIED": 0.3,
-    "TIER_1_ANECDOTAL": 0.3,
-    "TIER_2_OBSERVATIONAL": 0.5,
-    "TIER_3_CONTROLLED": 0.7,
-    "TIER_4_EXPERIMENTAL": 0.85,
-    "TIER_5_SYNTHESIS": 0.95,
-}
+
+def _tier_scores() -> dict[str, float]:
+    """Derive a 0.0–1.0 score per :class:`bmlib.quality.QualityTier`.
+
+    bmlib already defines the evidence hierarchy (``DESIGN_TO_TIER``) and the
+    0–10 score of every study design (``DESIGN_TO_SCORE``); restating it here
+    as a second table would drift the moment bmlib re-weights a design.  Each
+    tier takes the strongest design that maps to it, rescaled to 0.0–1.0.
+
+    Returns:
+        Tier name → score, for tiers with at least one scored design.
+    """
+    from bmlib.quality import DESIGN_TO_SCORE, DESIGN_TO_TIER
+
+    scores: dict[str, float] = {}
+    for design, tier in DESIGN_TO_TIER.items():
+        score = DESIGN_TO_SCORE.get(design, 0.0) / QUALITY_SCORE_SCALE
+        if score > scores.get(tier.name, 0.0):
+            scores[tier.name] = score
+    return scores
+
+
+#: Approximate 0.0–1.0 score for each :class:`bmlib.quality.QualityTier`, used
+#: only when an assessment carries a tier but no explicit numeric score.
+QUALITY_TIER_SCORES: dict[str, float] = _tier_scores()
 
 #: Quality assessment tiers understood by :func:`bmnews.scoring.scorer._build_quality_filter`.
 QUALITY_TIER_METADATA_ONLY: int = 1
 QUALITY_TIER_LLM_CLASSIFIER: int = 2
 QUALITY_TIER_DEEP_ASSESSMENT: int = 3
 
-#: LLM provider names recognised by bmlib, used to tell a ``provider:model``
-#: string apart from a bare Ollama ``model:tag`` string.
-KNOWN_LLM_PROVIDERS: frozenset[str] = frozenset(
-    {"anthropic", "ollama", "openai", "deepseek", "mistral", "gemini"}
-)
+# --- LLM --------------------------------------------------------------------
+
+#: Defaults matching :class:`bmlib.agents.BaseAgent`, so bmnews and bmlib
+#: agree on generation settings when the user has configured none.
+DEFAULT_TEMPERATURE: float = 0.3
+DEFAULT_MAX_TOKENS: int = 4096
 
 # --- Database ---------------------------------------------------------------
 

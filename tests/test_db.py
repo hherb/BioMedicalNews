@@ -475,3 +475,74 @@ class TestRecordDigestId:
         second = record_digest(conn, [], delivery_method="stdout")
         assert first > 0
         assert second > first
+
+
+class TestDigestSelectionFilters:
+    """min_relevance and min_quality_tier must actually reach the SQL."""
+
+    def _seed(self, conn, doi, *, relevance, combined, tier):
+        pid = upsert_paper(conn, doi=doi, title=f"Paper {doi}")
+        save_score(
+            conn, paper_id=pid, relevance_score=relevance,
+            combined_score=combined, quality_tier=tier,
+        )
+        return pid
+
+    def _conn(self):
+        conn = _db()
+        self._seed(conn, "10.1/weak", relevance=0.2, combined=0.7,
+                   tier="TIER_1_ANECDOTAL")
+        self._seed(conn, "10.1/strong", relevance=0.9, combined=0.9,
+                   tier="TIER_4_EXPERIMENTAL")
+        self._seed(conn, "10.1/unknown", relevance=0.8, combined=0.8,
+                   tier="UNCLASSIFIED")
+        return conn
+
+    def _dois(self, papers):
+        return {p["doi"] for p in papers}
+
+    def test_no_filters_returns_everything_above_threshold(self):
+        papers = get_papers_for_digest(self._conn(), min_combined=0.5)
+        assert len(papers) == 3
+
+    def test_min_relevance_excludes_low_relevance_papers(self):
+        papers = get_papers_for_digest(
+            self._conn(), min_combined=0.5, min_relevance=0.5,
+        )
+        assert "10.1/weak" not in self._dois(papers)
+        assert "10.1/strong" in self._dois(papers)
+
+    def test_excluded_tiers_are_dropped(self):
+        papers = get_papers_for_digest(
+            self._conn(), min_combined=0.5,
+            exclude_tiers=["TIER_1_ANECDOTAL", "TIER_2_OBSERVATIONAL"],
+        )
+        assert "10.1/weak" not in self._dois(papers)
+
+    def test_unclassified_papers_survive_a_tier_floor(self):
+        papers = get_papers_for_digest(
+            self._conn(), min_combined=0.5, exclude_tiers=["TIER_1_ANECDOTAL"],
+        )
+        assert "10.1/unknown" in self._dois(papers)
+
+    def test_max_papers_still_applies_with_filters(self):
+        papers = get_papers_for_digest(
+            self._conn(), min_combined=0.5, min_relevance=0.1,
+            exclude_tiers=["TIER_1_ANECDOTAL"], max_papers=1,
+        )
+        assert len(papers) == 1
+
+
+class TestCountUnscoredPapers:
+    def test_counts_only_unscored(self):
+        from bmnews.db.operations import count_unscored_papers
+
+        conn = _db()
+        assert count_unscored_papers(conn) == 0
+
+        scored = upsert_paper(conn, doi="10.1/scored", title="Scored")
+        upsert_paper(conn, doi="10.1/pending", title="Pending")
+        assert count_unscored_papers(conn) == 2
+
+        save_score(conn, paper_id=scored, combined_score=0.5)
+        assert count_unscored_papers(conn) == 1

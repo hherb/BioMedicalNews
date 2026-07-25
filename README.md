@@ -64,10 +64,12 @@ bmnews/
   db/
     schema.py        # DDL for SQLite and PostgreSQL (all SQL lives here)
     operations.py    # Pure-function CRUD via bmlib.db
+    backend.py       # SQLite vs PostgreSQL detection
+  metadata.py        # Helpers for the papers.metadata_json blob
   fetchers/
     base.py          # FetchedPaper dataclass
-    medrxiv.py       # medRxiv / bioRxiv API client
-    europepmc.py     # Europe PMC REST API client
+    europepmc.py     # Europe PMC fetcher, registered with bmlib's source registry
+                     # (medRxiv, bioRxiv, PubMed and OpenAlex come from bmlib)
   scoring/
     relevance_agent.py  # LLM-based relevance scoring (BaseAgent subclass)
     scorer.py           # Orchestrates relevance + quality scoring

@@ -62,15 +62,17 @@ bmnews/
 ├── cli.py               # Click CLI commands (run, fetch, score, digest, init, gui, search)
 ├── config.py            # TOML config loading (AppConfig + nested section dataclasses)
 ├── constants.py         # Fixed application constants (scoring weights, page sizes, timeouts)
+├── metadata.py          # Defensive decoding of the papers.metadata_json blob
 ├── pipeline.py          # Orchestration: fetch → store → score → digest (progress callbacks)
 ├── db/
 │   ├── schema.py        # Database connection factory (open_db, init_db)
-│   ├── operations.py    # Pure-function CRUD (all SQL lives here, ~490 lines)
+│   ├── backend.py       # SQLite vs PostgreSQL detection (is_sqlite, placeholder)
+│   ├── operations.py    # Pure-function CRUD (all SQL lives here, ~590 lines)
 │   └── migrations.py    # 3 versioned migrations (papers → paper_tags → fulltext columns)
 ├── fetchers/
+│   ├── __init__.py      # Registers bmnews-supplied sources with bmlib's registry
 │   ├── base.py          # FetchedPaper dataclass (normalized paper representation)
-│   ├── medrxiv.py       # medRxiv/bioRxiv API fetcher (legacy, now via bmlib registry)
-│   └── europepmc.py     # Europe PMC REST API fetcher (local implementation)
+│   └── europepmc.py     # Europe PMC fetcher (bmlib registry calling convention)
 ├── scoring/
 │   ├── scorer.py        # Orchestrates relevance (LLM) + quality (bmlib.quality) scoring
 │   └── relevance_agent.py  # LLM-based relevance scoring agent (extends BaseAgent)
@@ -110,8 +112,8 @@ bmlib_patch/                   # bmlib source archive and patch files
 cli.py → pipeline.py → config.py (AppConfig dataclass)
                       → db/schema.py (open_db, init_db, migrations)
                       → db/operations.py (pure-function CRUD)
-                      → bmlib.publications.fetchers (registry: medrxiv, biorxiv, pubmed, openalex)
-                      → fetchers/europepmc.py (local implementation → FetchedPaper)
+                      → bmlib.publications (registry: medrxiv, biorxiv, pubmed, openalex
+                                            + europepmc, registered by bmnews.fetchers)
                       → scoring/scorer.py → scoring/relevance_agent.py → bmlib.agents.BaseAgent
                                           → bmlib.quality.metadata_filter
                       → digest/renderer.py → bmlib.templates.TemplateEngine
@@ -131,20 +133,27 @@ bmlib is a companion library providing shared infrastructure. Key modules used:
 |---|---|
 | `bmlib.db` | `connect_sqlite`, `connect_postgresql`, `execute`, `fetch_one`, `fetch_all`, `fetch_scalar`, `transaction`, `Migration`, `create_tables` |
 | `bmlib.llm` | `LLMClient` with `"provider:model"` format (e.g., `"ollama:llama3.1"`, `"anthropic:claude-sonnet-4-5-20250929"`) |
-| `bmlib.agents` | `BaseAgent` — provides `render_template()`, `chat()`, `parse_json()` |
+| `bmlib.llm.providers` | `list_providers()` — the authority on which `provider:` prefixes exist; never hardcode a provider list |
+| `bmlib.agents` | `BaseAgent` — provides `render_template()`, `chat()`, `chat_json()`, `parse_json()` |
 | `bmlib.templates` | `TemplateEngine` with user-dir override (`~/.bmnews/templates/`) → package `templates/` fallback |
-| `bmlib.quality` | `classify_from_metadata()`, `QualityAssessment`, `StudyDesign`, `QualityTier` |
+| `bmlib.quality` | `QualityManager`, `QualityFilter`, `QualityAssessment`, `StudyDesign`, `QualityTier`, `DESIGN_TO_TIER`, `DESIGN_TO_SCORE` — the evidence hierarchy and its scores live here, not in `bmnews.constants` |
 | `bmlib.fulltext` | `FullTextService` (3-tier: Europe PMC → Unpaywall → DOI), JATS XML parser, `FullTextError` |
-| `bmlib.publications` | `list_sources()`, `get_fetcher()`, `source_names()`, `FetchedRecord` — registry-driven fetcher system for medRxiv, bioRxiv, PubMed, OpenAlex |
+| `bmlib.publications` | `register_source()`, `list_sources()`, `get_fetcher()`, `source_names()`, `FetchedRecord`, `FetchResult`, `SourceDescriptor` — the registry every source goes through |
+
+**Not currently used** (see `docs/plans/` before adopting): `bmlib.publications.sync` / `storage` / `schema` (bmnews keeps its own `papers` table, so adopting these needs a data migration) and `bmlib.transparency` (the `[transparency]` config section and extra are declared but unwired).
 
 ### Source Fetching
 
-Sources are managed via a **dual system**:
+**Every** source resolves through bmlib's registry — there is no second dispatch path.
 
-1. **bmlib registry** — medRxiv, bioRxiv, PubMed, OpenAlex are fetched via `bmlib.publications.fetchers.get_fetcher()`. Returns `FetchedRecord` objects that are converted to `FetchedPaper` in `pipeline._record_to_fetched_paper()`.
-2. **Local implementation** — Europe PMC is implemented locally in `bmnews/fetchers/europepmc.py` with cursor-mark pagination and custom query support.
+- medRxiv, bioRxiv, PubMed and OpenAlex ship with bmlib.
+- Europe PMC is implemented in `bmnews/fetchers/europepmc.py` and registered into the same registry by `bmnews/fetchers/__init__.py` via `bmlib.publications.register_source()`. It follows the registry calling convention exactly: `fetcher(client, target_date, *, on_record, on_progress=None, **config)`, emitting `FetchedRecord` and returning a `FetchResult`.
 
-Sources are configured via `config.sources.enabled` list (e.g., `["medrxiv", "europepmc", "biorxiv", "pubmed", "openalex"]`). Per-source options can be set in `config.sources.source_options`.
+`pipeline._fetch_via_registry()` walks the lookback window one day at a time for any source, converts each `FetchedRecord` to a `FetchedPaper` in `_record_to_fetched_paper()`, and logs any `FetchResult` that did not complete.
+
+Sources are configured via `config.sources.enabled` (e.g. `["medrxiv", "europepmc", "biorxiv", "pubmed", "openalex"]`); per-source options in `config.sources.source_options` are unpacked as keyword arguments to the fetcher (e.g. `query` for Europe PMC, `api_key` for PubMed).
+
+When adding fields to `FetchedRecord` handling, remember `metadata["pub_type"]` feeds bmlib's free Tier-1 quality classification — dropping it silently forces every paper onto the LLM classifier.
 
 ### Database
 
@@ -184,9 +193,11 @@ Two-tier scoring system:
 1. **Relevance (LLM-based)** — `RelevanceAgent` sends paper title + abstract + user interests to LLM via Jinja2 template prompts. Returns JSON with `relevance_score` (0.0–1.0), `summary`, `key_findings`, `matched_tags`.
 2. **Quality (bmlib.quality)** — Tiered assessment (metadata classification → LLM classifier → deep analysis). Maps `QualityTier` to a 0.0–1.0 score.
 
-Combined score = `RELEVANCE_WEIGHT * relevance + QUALITY_WEIGHT * quality` (0.6 / 0.4, defined in `bmnews/constants.py`). Concurrency configurable via `ThreadPoolExecutor` (`concurrency=1` for local Ollama, `>1` for API providers).
+Combined score = `RELEVANCE_WEIGHT * relevance + QUALITY_WEIGHT * quality` (0.6 / 0.4, defined in `bmnews/constants.py`). When `config.quality.enabled` is false, the quality stage is skipped entirely and the combined score is the relevance score alone. Concurrency configurable via `ThreadPoolExecutor` (`concurrency=1` for local Ollama, `>1` for API providers).
 
-**LLM providers** (6 supported via bmlib): Ollama, Anthropic, OpenAI, Deepseek, Mistral, Gemini. Model format: `"provider:model"` (e.g., `"anthropic:claude-3-haiku"`). The pipeline disambiguates bare model names with tags (e.g., `"llama3.1:latest"`) from provider-prefixed strings.
+Config wiring: `llm.temperature` / `llm.max_tokens` are passed to `RelevanceAgent`; `quality.default_tier` is clamped by `quality.max_tier`; `quality.min_quality_tier` and `scoring.min_relevance` filter the digest in `get_papers_for_digest()`. `UNCLASSIFIED` papers are never excluded by a tier floor — unjudged is not judged-and-rejected.
+
+**LLM providers** (via bmlib, see `list_providers()`): Ollama, Anthropic, OpenAI, Deepseek, Mistral, Gemini. Model format: `"provider:model"` (e.g., `"anthropic:claude-3-haiku"`). The pipeline disambiguates bare model names with tags (e.g., `"llama3.1:latest"`) from provider-prefixed strings.
 
 ### GUI
 
@@ -248,29 +259,30 @@ Test files:
 | File | Coverage |
 |---|---|
 | `test_config.py` | Config loading, TOML parsing, backward-compat defaults |
-| `test_db.py` | All database operations, migrations, upsert, filtering, tagging, digests, fulltext |
+| `test_db.py` | All database operations, migrations, upsert, filtering, tagging, digests, fulltext, digest selection filters |
 | `test_digest.py` | HTML/text digest rendering |
-| `test_fetchers.py` | Fetcher mocking |
+| `test_fetchers.py` | Europe PMC fetcher + its registration in bmlib's source registry |
 | `test_fulltext_integration.py` | Fulltext service integration (Europe PMC/Unpaywall/DOI) |
 | `test_gui_app.py` | Flask blueprints, HTMX responses, paper queries, pipeline status |
 | `test_gui_helpers.py` | Abstract HTML formatting |
-| `test_pipeline.py` | Show-cached flag, CLI integration, paper storage with PMID/PMCID |
-| `test_scoring.py` | Quality tier mapping, publication type extraction |
+| `test_pipeline.py` | Show-cached flag, CLI integration, paper storage with PMID/PMCID, `FetchedRecord` → `FetchedPaper` conversion, source dispatch |
+| `test_scoring.py` | Quality tier mapping, publication type extraction, tier floors, quality toggle, generation settings |
 
 ## Adding New Functionality
 
 ### New fetcher source (via bmlib registry)
 The preferred path is to add the fetcher to bmlib's registry. Once registered there, bmnews automatically picks it up — just add the source name to `config.sources.enabled`.
 
-### New fetcher source (local)
-1. Create `bmnews/fetchers/newsource.py` returning `list[FetchedPaper]`
-2. Add the source name to `_LOCAL_SOURCES` in `pipeline.py`
-3. Add a branch in `run_fetch()` to call the local fetcher
-4. Add config toggle in `config.py` `SourcesConfig`
-5. Add tests with mocked HTTP in `tests/test_fetchers.py`
+### New fetcher source (local to bmnews)
+Follow the Europe PMC pattern — do **not** add a second dispatch path in `pipeline.run_fetch()`:
+1. Create `bmnews/fetchers/newsource.py` with a function matching the registry convention: `fetcher(client, target_date, *, on_record, on_progress=None, **config)`, emitting `FetchedRecord` and returning a `FetchResult`
+2. Add a `SourceDescriptor` and a `register_source(...)` call to `register_local_sources()` in `bmnews/fetchers/__init__.py`
+3. Add tests with a fake HTTP client in `tests/test_fetchers.py`
+
+The source is then selectable by name in `config.sources.enabled`, appears in the GUI settings list, and accepts per-source options through `config.sources.source_options` — all with no further changes.
 
 ### New LLM provider
-Handled entirely in bmlib — no bmnews changes needed. Just update config to use `"newprovider:model-name"`. Add the provider name to the `known_providers` set in `pipeline.run_score()` for proper disambiguation.
+Handled entirely in bmlib — no bmnews changes needed. Just update config to use `"newprovider:model-name"`; `_resolve_model_string()` asks `bmlib.llm.providers.list_providers()` which prefixes are real.
 
 ### New database migration
 Add to `db/migrations.py` following the existing versioned pattern:

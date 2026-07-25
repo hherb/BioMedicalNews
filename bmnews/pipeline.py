@@ -15,14 +15,14 @@ from typing import Any
 
 import httpx
 from bmlib.llm import LLMClient
-from bmlib.publications.fetchers import get_fetcher, source_names
-from bmlib.publications.models import FetchedRecord
+from bmlib.llm.providers import list_providers
+from bmlib.publications import get_fetcher, source_names
+from bmlib.publications.models import FetchedRecord, FetchResult
 from bmlib.templates import TemplateEngine
 
 from bmnews.config import AppConfig
 from bmnews.constants import (
     HTTP_TIMEOUT_SECONDS,
-    KNOWN_LLM_PROVIDERS,
     UNSCORED_BATCH_SIZE,
 )
 from bmnews.db.operations import (
@@ -38,8 +38,11 @@ from bmnews.db.operations import (
 from bmnews.db.schema import init_db, open_db
 from bmnews.digest.renderer import render_digest
 from bmnews.digest.sender import send_email
-from bmnews.fetchers import FetchedPaper, fetch_europepmc
-from bmnews.scoring.scorer import score_papers
+
+# Importing the package registers the bmnews-supplied sources (Europe PMC)
+# into bmlib's registry, so every enabled source resolves through it.
+from bmnews.fetchers import FetchedPaper
+from bmnews.scoring.scorer import score_papers, tiers_below
 
 logger = logging.getLogger(__name__)
 
@@ -64,31 +67,70 @@ def build_llm_client(config: AppConfig) -> LLMClient:
 
 
 def _record_to_fetched_paper(record: FetchedRecord) -> FetchedPaper:
-    """Convert a bmlib :class:`FetchedRecord` to a bmnews :class:`FetchedPaper`."""
+    """Convert a bmlib :class:`FetchedRecord` to a bmnews :class:`FetchedPaper`.
+
+    Every field bmlib normalises is carried across. ``publication_types`` in
+    particular must survive as ``metadata["pub_type"]``: it is the only input
+    to bmlib's free Tier-1 metadata classification, and dropping it silently
+    downgraded every registry-sourced paper to an LLM classification.
+    """
     doi = record.doi or ""
-    url = f"https://doi.org/{doi}" if doi else ""
     authors = "; ".join(record.authors) if record.authors else ""
-    categories = "; ".join(record.keywords) if record.keywords else ""
+
     metadata: dict[str, Any] = {}
+    if record.extras:
+        # Extras first: the normalised fields below are canonical and must win
+        # over any same-named source-specific leftover.
+        metadata.update(record.extras)
     if record.pmid:
         metadata["pmid"] = record.pmid
     if record.pmc_id:
         metadata["pmcid"] = record.pmc_id
+    if record.publication_types:
+        metadata["pub_type"] = list(record.publication_types)
+    if record.journal:
+        metadata["journal"] = record.journal
+    if record.license:
+        metadata["license"] = record.license
+    metadata["is_open_access"] = record.is_open_access
     if record.fulltext_sources:
         metadata["fulltext_sources"] = [s.to_dict() for s in record.fulltext_sources]
-    if record.extras:
-        metadata.update(record.extras)
+
     return FetchedPaper(
         doi=doi,
         title=record.title,
         authors=authors,
         abstract=record.abstract or "",
-        url=url,
+        url=_record_url(record, metadata),
         source=record.source,
         published_date=record.publication_date or "",
-        categories=categories,
+        categories=_record_categories(record),
         metadata=metadata,
     )
+
+
+def _record_url(record: FetchedRecord, metadata: dict[str, Any]) -> str:
+    """Pick the best canonical URL for a record.
+
+    A DOI link is preferred; a source that supplied its own ``url`` extra
+    (Europe PMC does, for DOI-less PubMed records) is used otherwise.
+    """
+    if record.doi:
+        return f"https://doi.org/{record.doi}"
+    extra_url = metadata.get("url")
+    return extra_url if isinstance(extra_url, str) else ""
+
+
+def _record_categories(record: FetchedRecord) -> str:
+    """Build the semicolon-separated category string shown in the UI.
+
+    Prefers bmlib's normalised ``keywords``; falls back to the subject
+    ``category`` extra that the bioRxiv/medRxiv fetcher reports there.
+    """
+    if record.keywords:
+        return "; ".join(record.keywords)
+    category = record.extras.get("category") if record.extras else None
+    return category.strip() if isinstance(category, str) else ""
 
 
 def _fetch_via_registry(
@@ -128,7 +170,7 @@ def _fetch_via_registry(
                 )
             collected: list[FetchedRecord] = []
             try:
-                fetcher(
+                result = fetcher(
                     client, current,
                     on_record=collected.append,
                     **source_config,
@@ -140,6 +182,15 @@ def _fetch_via_registry(
                     "Error fetching %s for %s — skipping that day",
                     source_name, current.isoformat(),
                 )
+            else:
+                # bmlib fetchers report a failed day by returning a FetchResult
+                # rather than raising; ignoring it hid the failure entirely.
+                if isinstance(result, FetchResult) and result.status != "completed":
+                    logger.warning(
+                        "Fetching %s for %s ended as %s (%d records): %s",
+                        source_name, current.isoformat(), result.status,
+                        result.record_count, result.error or "no detail",
+                    )
             for record in collected:
                 papers.append(_record_to_fetched_paper(record))
             current += timedelta(days=1)
@@ -147,43 +198,32 @@ def _fetch_via_registry(
     return papers
 
 
-# Sources handled locally (not in bmlib registry)
-LOCAL_SOURCES: dict[str, str] = {
-    "europepmc": "Europe PMC",
-}
-
-
 def run_fetch(
     config: AppConfig,
     on_progress: Callable[[str], None] | None = None,
 ) -> list[FetchedPaper]:
-    """Fetch papers from all configured sources."""
+    """Fetch papers from all configured sources via bmlib's source registry."""
     papers: list[FetchedPaper] = []
     lookback = config.sources.lookback_days
     registry_names = set(source_names())
 
     for source_name in config.sources.enabled:
-        if source_name in registry_names:
-            if on_progress:
-                on_progress(f"Fetching from {source_name}...")
-            logger.info("Fetching from %s (registry)...", source_name)
-            src_config = dict(config.sources.source_options.get(source_name, {}))
-            # Provide email for openalex if available
-            if source_name == "openalex" and "email" not in src_config and config.user.email:
-                src_config["email"] = config.user.email
-            papers.extend(_fetch_via_registry(
-                source_name, lookback, src_config, on_progress,
-            ))
-        elif source_name == "europepmc":
-            if on_progress:
-                on_progress("Fetching from Europe PMC...")
-            logger.info("Fetching from EuropePMC...")
-            papers.extend(fetch_europepmc(
-                query=config.sources.europepmc_query,
-                lookback_days=lookback,
-            ))
-        else:
-            logger.warning("Unknown source %r — skipping", source_name)
+        if source_name not in registry_names:
+            logger.warning(
+                "Unknown source %r — skipping. Known sources: %s",
+                source_name, ", ".join(sorted(registry_names)),
+            )
+            continue
+        if on_progress:
+            on_progress(f"Fetching from {source_name}...")
+        logger.info("Fetching from %s...", source_name)
+        src_config = dict(config.sources.source_options.get(source_name, {}))
+        # Provide email for openalex if available
+        if source_name == "openalex" and "email" not in src_config and config.user.email:
+            src_config["email"] = config.user.email
+        papers.extend(_fetch_via_registry(
+            source_name, lookback, src_config, on_progress,
+        ))
 
     logger.info("Total papers fetched: %d", len(papers))
     return papers
@@ -305,7 +345,10 @@ def run_score(
             template_engine=templates,
             interests=config.user.research_interests,
             concurrency=config.llm.concurrency,
-            quality_tier=config.quality.default_tier,
+            quality_enabled=config.quality.enabled,
+            quality_tier=min(config.quality.default_tier, config.quality.max_tier),
+            temperature=config.llm.temperature,
+            max_tokens=config.llm.max_tokens,
             progress_callback=_score_progress,
         )
 
@@ -318,8 +361,8 @@ def _resolve_model_string(config: AppConfig) -> str:
 
     ``config.llm.model`` may hold either an already-qualified
     ``"anthropic:claude-sonnet-4-5"`` or a bare Ollama name with a tag such as
-    ``"llama3.1:latest"``. These are told apart by checking whether the part
-    before the first colon is a known provider.
+    ``"llama3.1:latest"``. These are told apart by asking bmlib which provider
+    names it actually knows, so a provider added to bmlib needs no change here.
 
     Args:
         config: Application config.
@@ -331,7 +374,7 @@ def _resolve_model_string(config: AppConfig) -> str:
     if not raw_model:
         return f"{config.llm.provider}:"
     prefix = raw_model.split(":", 1)[0].lower()
-    if ":" in raw_model and prefix in KNOWN_LLM_PROVIDERS:
+    if ":" in raw_model and prefix in {p.lower() for p in list_providers()}:
         return raw_model
     return f"{config.llm.provider}:{raw_model}"
 
@@ -353,6 +396,11 @@ def run_digest(config: AppConfig, output: str | None = None) -> str:
             conn,
             min_combined=config.scoring.min_combined,
             max_papers=config.email.max_papers,
+            min_relevance=config.scoring.min_relevance,
+            exclude_tiers=(
+                tiers_below(config.quality.min_quality_tier)
+                if config.quality.enabled else ()
+            ),
         )
 
         if not papers:

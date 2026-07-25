@@ -157,3 +157,140 @@ class TestRelevanceScoreClamping:
         }).score("T", "A", "I")
         assert result["relevance_score"] == 0.8
         assert result["matched_tags"] == ["oncology"]
+
+
+class TestTiersBelow:
+    """The evidence hierarchy comes from bmlib's QualityTier, not a local copy."""
+
+    def test_default_floor_excludes_nothing(self):
+        from bmnews.scoring.scorer import tiers_below
+        assert tiers_below("TIER_1_ANECDOTAL") == []
+
+    def test_excludes_weaker_tiers(self):
+        from bmnews.scoring.scorer import tiers_below
+        excluded = tiers_below("TIER_4_EXPERIMENTAL")
+        assert "TIER_1_ANECDOTAL" in excluded
+        assert "TIER_3_CONTROLLED" in excluded
+        assert "TIER_4_EXPERIMENTAL" not in excluded
+        assert "TIER_5_SYNTHESIS" not in excluded
+
+    def test_unclassified_is_never_excluded(self):
+        """Unjudged is not the same as judged-and-rejected."""
+        from bmnews.scoring.scorer import tiers_below
+        assert "UNCLASSIFIED" not in tiers_below("TIER_5_SYNTHESIS")
+
+    def test_blank_and_unknown_names_filter_nothing(self):
+        from bmnews.scoring.scorer import tiers_below
+        assert tiers_below("") == []
+        assert tiers_below("   ") == []
+        assert tiers_below("TIER_9_IMAGINARY") == []
+
+    def test_name_is_case_insensitive(self):
+        from bmnews.scoring.scorer import tiers_below
+        assert tiers_below("tier_4_experimental") == tiers_below("TIER_4_EXPERIMENTAL")
+
+
+class TestTierScoreTable:
+    """QUALITY_TIER_SCORES is derived from bmlib, not hand-maintained."""
+
+    def test_covers_every_classified_tier(self):
+        from bmlib.quality import QualityTier
+
+        from bmnews.constants import QUALITY_TIER_SCORES
+
+        for tier in QualityTier:
+            if tier is not QualityTier.UNCLASSIFIED:
+                assert tier.name in QUALITY_TIER_SCORES
+
+    def test_scores_increase_with_evidence_strength(self):
+        from bmlib.quality import QualityTier
+
+        from bmnews.constants import QUALITY_TIER_SCORES
+
+        ranked = [
+            QUALITY_TIER_SCORES[t.name]
+            for t in sorted(QualityTier, key=lambda t: t.value)
+            if t.name in QUALITY_TIER_SCORES and t is not QualityTier.UNCLASSIFIED
+        ]
+        assert ranked == sorted(ranked)
+        assert all(0.0 <= s <= 1.0 for s in ranked)
+
+
+class _StubAgent:
+    """Records the relevance result it was asked to return."""
+
+    def __init__(self, score=0.75):
+        self.score_value = score
+        self.calls = 0
+
+    def score(self, title, abstract, interests, categories=""):
+        self.calls += 1
+        return {
+            "relevance_score": self.score_value,
+            "summary": "A summary.",
+            "matched_tags": ["oncology"],
+        }
+
+
+class TestScorePapersQualityToggle:
+    def _run(self, **kwargs):
+        from unittest.mock import patch
+
+        from bmnews.scoring.scorer import score_papers
+
+        agent = _StubAgent()
+        assessment = QualityAssessment.from_metadata(StudyDesign.RCT)
+        with patch("bmnews.scoring.scorer.RelevanceAgent", return_value=agent), \
+                patch("bmnews.scoring.scorer.QualityManager") as mgr:
+            mgr.return_value.assess.return_value = assessment
+            results = score_papers(
+                papers=[{"id": 1, "title": "T", "abstract": "A"}],
+                llm=None, model="ollama:x", template_engine=None,
+                interests="oncology", **kwargs,
+            )
+        return results, mgr
+
+    def test_disabled_quality_skips_the_manager(self):
+        results, mgr = self._run(quality_enabled=False)
+
+        mgr.assert_not_called()
+        assert results[0]["quality_score"] == 0.0
+        assert results[0]["combined_score"] == 0.75
+        assert results[0]["quality_tier"] == ""
+        assert results[0]["matched_tags"] == ["oncology"]
+
+    def test_enabled_quality_builds_the_manager(self):
+        _results, mgr = self._run(quality_enabled=True)
+        mgr.assert_called_once()
+
+
+class TestScorePapersGenerationSettings:
+    """config.llm.temperature / max_tokens must reach the bmlib agent."""
+
+    def test_settings_are_passed_to_the_relevance_agent(self):
+        from unittest.mock import patch
+
+        from bmnews.scoring.scorer import score_papers
+
+        with patch("bmnews.scoring.scorer.RelevanceAgent") as agent_cls, \
+                patch("bmnews.scoring.scorer.QualityManager"):
+            agent_cls.return_value = _StubAgent()
+            score_papers(
+                papers=[], llm=None, model="ollama:x", template_engine=None,
+                interests="", temperature=0.9, max_tokens=1234,
+            )
+
+        kwargs = agent_cls.call_args.kwargs
+        assert kwargs["temperature"] == 0.9
+        assert kwargs["max_tokens"] == 1234
+
+    def test_defaults_match_bmlib_base_agent(self):
+        import inspect
+
+        from bmlib.agents import BaseAgent
+
+        from bmnews.constants import DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE
+
+        params = inspect.signature(BaseAgent.__init__).parameters
+        assert params["temperature"].default == DEFAULT_TEMPERATURE
+        assert params["max_tokens"].default == DEFAULT_MAX_TOKENS

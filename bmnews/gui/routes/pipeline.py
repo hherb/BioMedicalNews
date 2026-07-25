@@ -8,12 +8,11 @@ from collections import deque
 from collections.abc import Callable
 from typing import Any
 
-from bmlib.db import fetch_scalar
 from flask import Blueprint, Flask, current_app, render_template
 
 from bmnews.config import AppConfig
 from bmnews.constants import DEFAULT_PAGE_SIZE
-from bmnews.db.operations import get_paper_with_score
+from bmnews.db.operations import count_unscored_papers, get_paper_with_score
 
 pipeline_bp = Blueprint("pipeline", __name__)
 logger = logging.getLogger(__name__)
@@ -127,11 +126,7 @@ def resume() -> str:
     from bmnews.pipeline import run_score
 
     conn = current_app.config["BMNEWS_DB"]
-    count = fetch_scalar(
-        conn,
-        "SELECT COUNT(*) FROM papers p LEFT JOIN scores s ON s.paper_id = p.id "
-        "WHERE s.id IS NULL",
-    ) or 0
+    count = count_unscored_papers(conn)
 
     if count == 0 or _pipeline_status["running"]:
         return render_template("fragments/status_bar.html",
