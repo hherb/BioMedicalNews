@@ -80,6 +80,22 @@ UNSCORED_BATCH_SIZE: int = 500
 #: Default ``LIMIT`` for ad-hoc paper queries that don't paginate.
 DEFAULT_QUERY_LIMIT: int = 100
 
+#: Where migration 4 writes any ``papers`` row it could not carry across to
+#: ``publications``. That migration drops ``papers``, so a stranded row is
+#: otherwise unrecoverable — this file is the record of what was lost.
+STRANDED_PAPERS_PATH: str = "~/.bmnews/stranded-papers.json"
+
+#: How many stranded rows are named individually in the log before the rest
+#: are summarised. The rescue file always holds every one of them.
+STRANDED_PAPERS_LOG_LIMIT: int = 20
+
+#: How many buffered source-extras entries may accumulate during a sync before
+#: they are flushed to ``paper_extras``.  bmlib stores a day's records only
+#: after that day's fetch finishes, so a flush cannot resolve records still in
+#: flight; this caps the buffer at roughly one busy day rather than the whole
+#: lookback window.
+EXTRAS_FLUSH_THRESHOLD: int = 1000
+
 # --- GUI --------------------------------------------------------------------
 
 #: Number of papers per page in the GUI list and CLI search results.

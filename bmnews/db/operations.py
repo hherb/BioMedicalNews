@@ -83,6 +83,11 @@ def store_paper(
     it. Unlike the old ``papers`` table, a paper with only a PMID is stored
     rather than dropped.
 
+    The pipeline itself no longer calls this — :func:`bmlib.publications.sync`
+    does the storing during a fetch. It remains the supported way to put a
+    single known paper into the database from a script or a test, which is
+    what it is exercised as.
+
     Args:
         conn: DB-API connection.
         doi: Paper DOI. Optional — a PMID identifies a paper just as well.
@@ -419,16 +424,21 @@ def get_papers_filtered(
         conditions.append(f"s.study_design = {ph}")
         params.append(study_design)
     if search:
-        conditions.append(f"(p.title LIKE {ph} OR p.abstract LIKE {ph})")
+        # SQLite's LIKE already ignores ASCII case; PostgreSQL's does not and
+        # has ILIKE for exactly this, so the operator differs per backend.
+        like = f"LIKE {ph}" if _is_sqlite(conn) else f"ILIKE {ph}"
+        conditions.append(f"(p.title {like} OR p.abstract {like})")
         params.extend([f"%{search}%", f"%{search}%"])
 
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
 
+    # NULLS LAST throughout: a paper with no score (or no date) sorts to the
+    # end rather than jumping to the top of a descending sort on PostgreSQL.
     sort_map = {
         "combined": "s.combined_score DESC NULLS LAST",
         "relevance": "s.relevance_score DESC NULLS LAST",
         "quality": "s.quality_score DESC NULLS LAST",
-        "date": "p.publication_date DESC",
+        "date": "p.publication_date DESC NULLS LAST",
     }
     order_by = sort_map.get(sort, "s.combined_score DESC NULLS LAST")
 
@@ -488,14 +498,17 @@ def get_cached_digest_papers(conn: Any, days: int | None = None) -> list[dict]:
         date_filter = ""
         params = ()
 
+    # EXISTS rather than a JOIN + DISTINCT: a paper carried by several digests
+    # would otherwise appear once per link, and de-duplicating that with
+    # DISTINCT means sorting every selected column — including the abstract.
     rows = fetch_all(
         conn,
         f"""
-        SELECT DISTINCT {_PAPER_COLUMNS}, {_SCORE_COLUMNS}
+        SELECT {_PAPER_COLUMNS}, {_SCORE_COLUMNS}
         {_PAPER_FROM}
         JOIN scores s ON s.paper_id = p.id
-        JOIN digest_papers dp ON dp.paper_id = p.id
-        WHERE 1=1 {date_filter}
+        WHERE EXISTS (SELECT 1 FROM digest_papers dp WHERE dp.paper_id = p.id)
+        {date_filter}
         ORDER BY s.combined_score DESC
         """,
         params,
@@ -612,16 +625,44 @@ def get_fulltext_sources(conn: Any, paper_id: int) -> list[FullTextSourceEntry]:
 
 
 def save_paper_metadata(conn: Any, *, paper_id: int, metadata: dict) -> None:
-    """Store the source-specific extras a paper arrived with.
+    """Merge source-specific extras into what is already stored for a paper.
 
     These are the fields bmlib's ``publications`` table has no column for —
     Europe PMC's ``cited_by``, for instance.
+
+    One publication can be fed by several sources, so this merges key by key
+    rather than replacing the blob: a key *metadata* carries wins (a citation
+    count that has gone up should not be pinned to its first reading), and a
+    key it says nothing about is left alone rather than dropped along with
+    whatever source contributed it.
+
+    Args:
+        conn: DB-API connection.
+        paper_id: The ``publications`` row these extras belong to.
+        metadata: Extras to merge in. An empty dict is a no-op.
     """
-    _upsert_extras(
+    if not metadata:
+        return
+
+    with _transaction(conn):
+        merged = get_paper_metadata(conn, paper_id)
+        merged.update(metadata)
+        _upsert_extras(
+            conn,
+            paper_id=paper_id,
+            columns={"metadata_json": json.dumps(merged)},
+        )
+
+
+def get_paper_metadata(conn: Any, paper_id: int) -> dict:
+    """Return the stored source extras for a paper, or ``{}`` if it has none."""
+    ph = _placeholder(conn)
+    row = fetch_one(
         conn,
-        paper_id=paper_id,
-        columns={"metadata_json": json.dumps(metadata)},
+        f"SELECT metadata_json FROM paper_extras WHERE publication_id = {ph}",
+        (paper_id,),
     )
+    return parse_metadata(row["metadata_json"]) if row else {}
 
 
 # --- Paper Tags ---
@@ -718,7 +759,9 @@ def _row_to_paper(row: Any) -> dict:
     """
     if row is None:
         return {}
-    paper = dict(row) if isinstance(row, dict) else {k: row[k] for k in row.keys()}
+    # dict() covers both backends: sqlite3.Row exposes the mapping protocol,
+    # and psycopg2's RealDictRow is already a dict subclass.
+    paper = dict(row)
 
     for column in _JSON_LIST_COLUMNS:
         if column in paper:

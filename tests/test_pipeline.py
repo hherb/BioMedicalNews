@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 from unittest.mock import patch
 
+import pytest
 from bmlib.db import connect_sqlite
 from bmlib.publications import register_source
 from bmlib.publications.models import (
@@ -12,9 +13,11 @@ from bmlib.publications.models import (
     FetchResult,
     SourceDescriptor,
     SyncProgress,
+    SyncReport,
 )
 from click.testing import CliRunner
 
+from bmnews import pipeline
 from bmnews.cli import main
 from bmnews.config import load_config
 from bmnews.db.operations import (
@@ -302,6 +305,128 @@ class TestRunSync:
         assert messages
         assert all(isinstance(m, str) for m in messages)
         assert any(STUB_SOURCE in m for m in messages)
+
+    def test_extras_from_two_identifier_shapes_are_merged_not_overwritten(self, tmp_path):
+        """Both records resolve to one publication, so neither may clobber the other.
+
+        The first carries only a DOI, the second the same DOI *and* a PMID —
+        different buffer keys, one publication.
+        """
+        conn = self._run(
+            [
+                FetchedRecord(
+                    title="Merged", source=STUB_SOURCE, doi="10.1234/merge",
+                    extras={"cited_by": 3},
+                ),
+                FetchedRecord(
+                    title="Merged", source=STUB_SOURCE, doi="10.1234/merge", pmid="77",
+                    extras={"altmetric": 12},
+                ),
+            ],
+            tmp_path,
+        )
+
+        metadata = get_paper_by_doi(conn, "10.1234/merge")["metadata"]
+        assert metadata == {"cited_by": 3, "altmetric": 12}
+
+
+class TestRunSyncExtrasDurability:
+    """Extras must not be lost when a sync dies partway through."""
+
+    def test_extras_are_stored_even_when_sync_raises(self, tmp_path):
+        """bmlib commits each day as it goes; the extras must follow suit.
+
+        sync() stores the record and *then* blows up. The publication is
+        committed, so its extras have to be written rather than discarded
+        along with the exception — nothing will re-deliver that record.
+        """
+        db_path = str(tmp_path / "boom.db")
+        conn = connect_sqlite(db_path)
+        init_db(conn)
+        conn.close()
+
+        record = FetchedRecord(
+            title="Survivor", source=STUB_SOURCE, doi="10.1234/survivor",
+            extras={"cited_by": 5},
+        )
+
+        def exploding_sync(conn, *, on_record=None, **kwargs):
+            store_paper(conn, doi=record.doi, title=record.title)
+            on_record(record)
+            raise RuntimeError("network died mid-window")
+
+        config = _test_config()
+        config.sources.enabled = [STUB_SOURCE]
+        _register_stub_source([record])
+
+        with (
+            patch("bmnews.pipeline.open_db", return_value=connect_sqlite(db_path)),
+            patch("bmnews.pipeline.sync", side_effect=exploding_sync),
+            pytest.raises(RuntimeError, match="network died"),
+        ):
+            run_sync(config)
+
+        conn = connect_sqlite(db_path)
+        assert get_paper_by_doi(conn, "10.1234/survivor")["metadata"] == {"cited_by": 5}
+
+    def test_the_buffer_is_drained_mid_sync_rather_than_growing(self, tmp_path):
+        """A long lookback window must not accumulate every record's extras.
+
+        Once the buffer hits the threshold it is written out, so what is held
+        tracks the records currently in flight rather than the whole window.
+        """
+        db_path = str(tmp_path / "flush.db")
+        conn = connect_sqlite(db_path)
+        init_db(conn)
+        conn.close()
+
+        # More distinct records than the (patched) threshold allows, all of
+        # them already stored so every one of them can be resolved.
+        records = [
+            FetchedRecord(
+                title=f"P{i}", source=STUB_SOURCE, doi=f"10.1234/p{i}", extras={"n": i},
+            )
+            for i in range(5)
+        ]
+
+        def flushing_sync(conn, *, on_record=None, **kwargs):
+            for record in records:
+                store_paper(conn, doi=record.doi, title=record.title)
+                on_record(record)
+            return SyncReport(
+                sources_synced=[STUB_SOURCE], days_processed=1,
+                records_added=len(records), records_merged=0, records_failed=0,
+            )
+
+        # ``pending`` is run_sync's actual buffer, so its size on the way in is
+        # how large the buffer was allowed to get before being drained.
+        drained_at: list[int] = []
+        real_store_extras = pipeline._store_extras
+
+        def spy(conn, pending):
+            drained_at.append(len(pending))
+            real_store_extras(conn, pending)
+
+        config = _test_config()
+        config.sources.enabled = [STUB_SOURCE]
+        _register_stub_source(records)
+
+        with (
+            patch("bmnews.pipeline.open_db", return_value=connect_sqlite(db_path)),
+            patch("bmnews.pipeline.sync", side_effect=flushing_sync),
+            patch("bmnews.pipeline._store_extras", side_effect=spy),
+            patch("bmnews.pipeline.EXTRAS_FLUSH_THRESHOLD", 2),
+        ):
+            run_sync(config)
+
+        # Drained several times mid-sync, never holding more than the
+        # threshold's worth...
+        assert len(drained_at) > 1
+        assert max(drained_at) <= 2
+        # ...and every record's extras still landed.
+        conn = connect_sqlite(db_path)
+        for i in range(5):
+            assert get_paper_by_doi(conn, f"10.1234/p{i}")["metadata"] == {"n": i}
 
 
 class TestRunSyncSourceDispatch:

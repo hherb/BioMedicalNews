@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import date, timedelta
 
 from bmlib.db import connect_sqlite, fetch_all, fetch_scalar, run_migrations, table_exists
 
+from bmnews.db import migrations
 from bmnews.db.migrations import MIGRATIONS
 from bmnews.db.operations import (
     get_all_tags,
     get_cached_digest_papers,
     get_fulltext_sources,
     get_paper_by_doi,
+    get_paper_metadata,
     get_paper_tags,
     get_paper_with_score,
     get_papers_by_tag,
@@ -75,6 +78,24 @@ class TestSchema:
         from bmlib.db.migrations import get_applied_versions
         versions = get_applied_versions(conn)
         assert {1, 2, 3, 4} <= versions
+
+    def test_removing_a_publication_takes_its_bmnews_rows_with_it(self):
+        """bmlib owns the publications row; nothing of ours may outlive it."""
+        conn = _db()
+        pid = store_paper(conn, doi="10.1/cascade", title="Doomed",
+                          metadata={"cited_by": 1})
+        save_score(conn, paper_id=pid, combined_score=0.5)
+        save_paper_tags(conn, paper_id=pid, tags=["onc"])
+        record_digest(conn, [pid], delivery_method="stdout")
+
+        conn.execute("DELETE FROM publications WHERE id = ?", (pid,))
+        conn.commit()
+
+        for table in ("scores", "paper_tags", "digest_papers", "paper_extras"):
+            column = "publication_id" if table == "paper_extras" else "paper_id"
+            assert fetch_scalar(
+                conn, f"SELECT COUNT(*) FROM {table} WHERE {column} = ?", (pid,)
+            ) == 0, f"{table} kept a row pointing at a deleted publication"
 
 
 class TestPapers:
@@ -311,6 +332,28 @@ class TestPapersFiltered:
         assert len(results) == 1
         assert results[0]["doi"] == "10.1101/f1"
 
+    def test_search_ignores_case(self):
+        """SQLite's LIKE does this for free; PostgreSQL needs ILIKE."""
+        conn = _db()
+        self._seed(conn)
+        assert len(get_papers_filtered(conn, search="IMMUNOTHERAPY")) == 1
+        assert len(get_papers_filtered(conn, search="alpha paper")) == 1
+
+    def test_search_matches_the_title_as_well_as_the_abstract(self):
+        conn = _db()
+        self._seed(conn)
+        assert len(get_papers_filtered(conn, search="Gamma")) == 1
+
+    def test_an_unscored_paper_sorts_last_not_first(self):
+        """A NULL score must not outrank a real one in a descending sort."""
+        conn = _db()
+        self._seed(conn)
+        store_paper(conn, doi="10.1101/f4", title="Delta Paper", source="medrxiv")
+
+        results = get_papers_filtered(conn, sort="combined")
+        assert len(results) == 4
+        assert results[-1]["doi"] == "10.1101/f4"
+
     def test_pagination(self):
         conn = _db()
         self._seed(conn)
@@ -342,6 +385,16 @@ class TestCachedDigestPapers:
         assert len(cached) == 1
         assert cached[0]["doi"] == "10.1101/c1"
         assert cached[0]["combined_score"] == 0.8
+
+    def test_a_paper_in_two_digests_is_returned_once(self):
+        conn = _db()
+        pid = store_paper(conn, doi="10.1101/twice", title="Twice",
+                          abstract="A", published_date="2026-02-10")
+        save_score(conn, paper_id=pid, combined_score=0.8, summary="Sum")
+        record_digest(conn, [pid], delivery_method="stdout")
+        record_digest(conn, [pid], delivery_method="email")
+
+        assert len(get_cached_digest_papers(conn)) == 1
 
     def test_filters_by_publication_date(self):
         conn = _db()
@@ -465,13 +518,37 @@ class TestPaperExtras:
         assert paper["metadata"] == {"cited_by": 4}
         assert paper["fulltext_html"] == "<p>Text</p>"
 
-    def test_metadata_survives_a_second_write(self):
+    def test_a_rewritten_key_takes_the_newer_value(self):
         conn = _db()
         pid = store_paper(conn, doi="10.1/meta", title="Meta")
         save_paper_metadata(conn, paper_id=pid, metadata={"cited_by": 1})
         save_paper_metadata(conn, paper_id=pid, metadata={"cited_by": 2})
 
         assert get_paper_with_score(conn, pid)["metadata"] == {"cited_by": 2}
+
+    def test_a_second_source_adds_keys_without_dropping_the_first(self):
+        """One publication can be fed by several sources — neither wins outright."""
+        conn = _db()
+        pid = store_paper(conn, doi="10.1/two-sources", title="Shared")
+        save_paper_metadata(conn, paper_id=pid, metadata={"cited_by": 4})
+        save_paper_metadata(conn, paper_id=pid, metadata={"altmetric": 9})
+
+        assert get_paper_with_score(conn, pid)["metadata"] == {
+            "cited_by": 4, "altmetric": 9,
+        }
+
+    def test_an_empty_metadata_write_changes_nothing(self):
+        conn = _db()
+        pid = store_paper(conn, doi="10.1/empty-meta", title="Meta")
+        save_paper_metadata(conn, paper_id=pid, metadata={"cited_by": 4})
+        save_paper_metadata(conn, paper_id=pid, metadata={})
+
+        assert get_paper_with_score(conn, pid)["metadata"] == {"cited_by": 4}
+
+    def test_get_paper_metadata_is_empty_for_a_paper_with_no_extras(self):
+        conn = _db()
+        pid = store_paper(conn, doi="10.1/no-extras", title="Bare")
+        assert get_paper_metadata(conn, pid) == {}
 
     def test_identifiers_are_stored_with_the_paper(self):
         conn = _db()
@@ -787,3 +864,75 @@ class TestMigrationToPublications:
         run_migrations(conn, MIGRATIONS)
         assert fetch_scalar(conn, "SELECT COUNT(*) FROM publications") == 0
         assert not table_exists(conn, "papers")
+
+    def test_later_rows_refresh_metadata_rather_than_being_ignored(self):
+        """Two rows for one work: the newer reading of a key is the one to keep."""
+        conn = _v3_db()
+        _insert_v3_paper(conn, "10.1/m", "M", metadata={"cited_by": 1, "journal": "J"})
+        _insert_v3_paper(conn, "10.1/M", "M again", metadata={"cited_by": 9})
+        run_migrations(conn, MIGRATIONS)
+
+        metadata = get_paper_by_doi(conn, "10.1/m")["metadata"]
+        assert metadata["cited_by"] == 9
+        # A key the later row said nothing about is not dropped with it.
+        assert metadata["journal"] == "J"
+
+    def test_a_later_row_does_not_blank_out_cached_fulltext(self):
+        conn = _v3_db()
+        _insert_v3_paper(conn, "10.1/ft", "FT", fulltext_html="<p>body</p>",
+                         fulltext_source="europepmc")
+        _insert_v3_paper(conn, "10.1/FT", "FT again")
+        run_migrations(conn, MIGRATIONS)
+
+        assert get_paper_by_doi(conn, "10.1/ft")["fulltext_html"] == "<p>body</p>"
+
+
+class TestMigrationStrandedPapers:
+    """``papers`` is dropped, so a row that cannot be carried across is gone."""
+
+    def _migrate_with_a_stranded_row(self, tmp_path, monkeypatch):
+        rescue = tmp_path / "stranded.json"
+        monkeypatch.setattr(migrations, "STRANDED_PAPERS_PATH", str(rescue))
+
+        conn = _v3_db()
+        # papers.doi was NOT NULL, so a blank DOI is the only way to get here.
+        _insert_v3_paper(conn, "", "Unidentifiable", abstract="Worth keeping")
+        _insert_v3_paper(conn, "10.1/ok", "Fine")
+        run_migrations(conn, MIGRATIONS)
+        return conn, rescue
+
+    def test_the_rest_of_the_migration_still_completes(self, tmp_path, monkeypatch):
+        conn, _ = self._migrate_with_a_stranded_row(tmp_path, monkeypatch)
+        assert fetch_scalar(conn, "SELECT COUNT(*) FROM publications") == 1
+        assert get_paper_by_doi(conn, "10.1/ok") is not None
+
+    def test_the_row_is_written_out_before_papers_is_dropped(self, tmp_path, monkeypatch):
+        _, rescue = self._migrate_with_a_stranded_row(tmp_path, monkeypatch)
+
+        stranded = json.loads(rescue.read_text())
+        assert len(stranded) == 1
+        assert stranded[0]["title"] == "Unidentifiable"
+        assert stranded[0]["abstract"] == "Worth keeping"
+        assert stranded[0]["reason"] == "no DOI or PMID"
+
+    def test_it_is_reported_as_an_error_not_a_warning(self, tmp_path, monkeypatch, caplog):
+        """A GUI session never shows a warning; losing data has to be an error."""
+        with caplog.at_level(logging.ERROR, logger="bmnews.db.migrations"):
+            self._migrate_with_a_stranded_row(tmp_path, monkeypatch)
+
+        assert any("could not be migrated" in r.message for r in caplog.records)
+
+    def test_an_unwritable_rescue_path_does_not_abort_the_migration(
+        self, tmp_path, monkeypatch,
+    ):
+        monkeypatch.setattr(
+            migrations, "STRANDED_PAPERS_PATH", str(tmp_path / "nope.txt" / "x.json"),
+        )
+        (tmp_path / "nope.txt").write_text("not a directory")
+
+        conn = _v3_db()
+        _insert_v3_paper(conn, "", "Unidentifiable")
+        _insert_v3_paper(conn, "10.1/ok", "Fine")
+        run_migrations(conn, MIGRATIONS)
+
+        assert fetch_scalar(conn, "SELECT COUNT(*) FROM publications") == 1

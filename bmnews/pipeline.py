@@ -22,7 +22,7 @@ from bmlib.templates import TemplateEngine
 # into bmlib's registry, so every enabled source resolves through it.
 import bmnews.fetchers  # noqa: F401
 from bmnews.config import AppConfig
-from bmnews.constants import UNSCORED_BATCH_SIZE
+from bmnews.constants import EXTRAS_FLUSH_THRESHOLD, UNSCORED_BATCH_SIZE
 from bmnews.db.operations import (
     get_cached_digest_papers,
     get_papers_for_digest,
@@ -154,27 +154,44 @@ def run_sync(
     end = date.today()
     start = end - timedelta(days=config.sources.lookback_days)
 
-    # bmlib hands each record to on_record *before* storing it, so the extras
-    # are buffered here and written once the publication ids exist.
-    pending_extras: dict[tuple[str | None, str | None], dict[str, Any]] = {}
-
-    def collect_extras(record: FetchedRecord) -> None:
-        extras = _record_extras(record)
-        if extras:
-            pending_extras[(record.doi, record.pmid)] = extras
-
     with closing(open_db(config)) as conn:
         init_db(conn)
-        report = sync(
-            conn,
-            sources=sources,
-            date_from=start,
-            date_to=end,
-            source_configs=_source_configs(config),
-            on_record=collect_extras,
-            on_progress=_progress_reporter(on_progress),
-        )
-        _store_extras(conn, pending_extras)
+
+        # bmlib hands each record to on_record *before* storing it, so extras
+        # are buffered here and written once the publication ids exist.  See
+        # ``_store_extras`` for how the buffer is drained without growing with
+        # the size of the lookback window.
+        pending_extras: dict[tuple[str | None, str | None], dict[str, Any]] = {}
+
+        def collect_extras(record: FetchedRecord) -> None:
+            extras = _record_extras(record)
+            if extras:
+                pending_extras[(record.doi, record.pmid)] = extras
+            if len(pending_extras) >= EXTRAS_FLUSH_THRESHOLD:
+                _store_extras(conn, pending_extras)
+
+        try:
+            report = sync(
+                conn,
+                sources=sources,
+                date_from=start,
+                date_to=end,
+                source_configs=_source_configs(config),
+                on_record=collect_extras,
+                on_progress=_progress_reporter(on_progress),
+            )
+        finally:
+            # bmlib commits each day as it goes, so a sync that dies partway
+            # still leaves earlier days durably stored.  Draining here rather
+            # than only on success means their extras are stored too, instead
+            # of being discarded with the exception — the next run will not
+            # re-deliver those records, because bmlib now considers them known.
+            try:
+                _store_extras(conn, pending_extras)
+            except Exception:
+                # Never let a failed drain replace the exception that is
+                # already on its way out; extras are the least of the losses.
+                logger.exception("Could not store buffered source extras")
 
     logger.info(
         "Sync complete: %d added, %d merged, %d failed across %d day(s)",
@@ -191,13 +208,39 @@ def _store_extras(
     conn: Any,
     pending: dict[tuple[str | None, str | None], dict[str, Any]],
 ) -> None:
-    """Persist buffered source extras against the publications they belong to."""
-    for (doi, pmid), extras in pending.items():
+    """Persist buffered source extras, keeping the ones not yet storable.
+
+    Drains *pending* in place.  An entry whose publication cannot be resolved
+    yet is left in the buffer rather than dropped: bmlib stores a day's records
+    only after that day's fetch completes, so the records currently in flight
+    have no row to attach to until the day commits.  Anything still unresolved
+    when the sync ends never made it into the database at all — a record that
+    failed to store, or one with no usable identifier — so the final drain
+    discards it.
+
+    This bounds the buffer to roughly one day of in-flight records rather than
+    the whole lookback window.
+
+    Args:
+        conn: DB-API connection.
+        pending: Extras keyed by ``(doi, pmid)``, emptied of everything that
+            could be written.
+    """
+    unresolved: dict[tuple[str | None, str | None], dict[str, Any]] = {}
+    for key, extras in pending.items():
+        doi, pmid = key
         paper_id = publication_id(conn, doi=doi, pmid=pmid)
         if paper_id is None:
-            # The record failed to store, or carried no usable identifier.
+            unresolved[key] = extras
             continue
+        # Merge rather than replace: two records for the same work can carry
+        # different identifier tuples (a DOI-only one and a DOI+PMID one) and
+        # still resolve to this same publication, so overwriting here would
+        # discard whatever the other source contributed.
         save_paper_metadata(conn, paper_id=paper_id, metadata=extras)
+
+    pending.clear()
+    pending.update(unresolved)
 
 
 def run_score(
@@ -226,8 +269,8 @@ def run_score(
         total = len(unscored)
         if total == UNSCORED_BATCH_SIZE:
             logger.warning(
-                "Scoring the oldest %d unscored papers; more may remain. "
-                "Re-run `bmnews score` to continue.", UNSCORED_BATCH_SIZE,
+                "Scoring the %d most recently stored unscored papers; more may "
+                "remain. Re-run `bmnews score` to continue.", UNSCORED_BATCH_SIZE,
             )
         logger.info("Scoring %d papers...", total)
         if on_progress:

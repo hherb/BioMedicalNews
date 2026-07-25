@@ -130,6 +130,23 @@ The HTML template for email digests and file output.
 
 **When to customize:** To change the visual styling, add your institution's branding, rearrange information, or add/remove fields.
 
+> **If you customized a digest template before v0.3.0, update these fields.**
+> Papers now come from `bmlib.publications`, which stores richer shapes than
+> the old `papers` table did. A template that still uses the old names renders
+> nothing for them, and one that prints `authors` directly renders a Python
+> list (`['Smith J', 'Doe A']`) rather than a readable line.
+>
+> | Was | Now |
+> |-----|-----|
+> | `{{ paper.authors }}` (string) | `{{ paper.authors\|join('; ') }}` (list) |
+> | `{{ paper.published_date }}` | `{{ paper.publication_date }}` |
+> | `{{ paper.source }}` (one) | `{{ paper.sources\|join(', ') }}` (a paper can be seen on several) |
+> | `{{ paper.categories }}` (string) | `{{ paper.keywords\|join('; ') }}` (list) |
+>
+> `url` is unchanged in name but is now derived from the DOI, PMID or PMC id
+> rather than stored, so it no longer goes stale. The packaged templates are
+> already updated — this only affects copies in `~/.bmnews/templates/`.
+
 ### `digest_text.txt` — Plain-text digest
 
 The plain-text template used for terminal output and as the email fallback for clients that don't support HTML.

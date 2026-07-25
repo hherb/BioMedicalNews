@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**bmnews** (v0.2.1) is a biomedical news reader that fetches preprints from medRxiv, bioRxiv, Europe PMC, PubMed, and OpenAlex, scores them for relevance and quality using LLMs, and delivers curated digests via email, file, stdout, or a desktop GUI. Built on [bmlib](https://github.com/hherb/bmlib) for LLM abstraction, database utilities, quality assessment, fetcher registry, fulltext retrieval, and template rendering.
+**bmnews** (v0.3.0) is a biomedical news reader that fetches preprints from medRxiv, bioRxiv, Europe PMC, PubMed, and OpenAlex, scores them for relevance and quality using LLMs, and delivers curated digests via email, file, stdout, or a desktop GUI. Built on [bmlib](https://github.com/hherb/bmlib) for LLM abstraction, database utilities, quality assessment, fetcher registry, fulltext retrieval, and template rendering.
 
 ## Development Commands
 
@@ -58,7 +58,7 @@ All stages are **incremental**: sync records each fetched day in `download_days`
 
 ```
 bmnews/
-├── __init__.py          # Package version (0.2.1)
+├── __init__.py          # Package version (0.3.0)
 ├── cli.py               # Click CLI commands (run, fetch, score, digest, init, gui, search)
 ├── config.py            # TOML config loading (AppConfig + nested section dataclasses)
 ├── constants.py         # Fixed application constants (scoring weights, page sizes, timeouts)
@@ -167,7 +167,7 @@ Owned by bmnews:
 - **scores** — scoring results (relevance, quality, combined scores, summary, study_design, quality_tier, assessment JSON)
 - **digests** / **digest_papers** — digest delivery tracking (many-to-many)
 - **paper_tags** — per-paper interest tags matched during scoring
-- **paper_extras** — the leftovers bmlib has no column for: the source `extras` blob (`cited_by`) and the GUI's cached full text
+- **paper_extras** — the leftovers bmlib has no column for: the source `extras` blob (`cited_by`) and the GUI's cached full text. One publication can be fed by several sources, so `save_paper_metadata()` merges key by key rather than replacing the blob (a later value wins; a key it says nothing about survives).
 
 `scores`, `paper_tags` and `digest_papers` keep a column named `paper_id`; it references `publications(id)`. "Paper" stays bmnews's noun for the thing — the GUI routes are `/papers/<id>`.
 
@@ -175,7 +175,7 @@ Migrations in `db/migrations.py`:
 1. `initial_schema` — papers, scores, digests, digest_papers tables
 2. `add_paper_tags` — paper_tags table for interest matching
 3. `add_fulltext_columns` — adds pmid, pmcid, fulltext_html, fulltext_source to papers; backfills pmid/pmcid from metadata_json for europepmc papers
-4. `migrate_to_publications` — replays every `papers` row through `store_publication()` so bmlib's dedupe decides identity, repoints the four bmnews-owned tables at the resulting ids, and drops `papers`. Where two rows collapse into one publication, the surviving score is the highest `combined_score` (the one the digest showed); tags and digest links are unioned.
+4. `migrate_to_publications` — replays every `papers` row through `store_publication()` so bmlib's dedupe decides identity, repoints the three bmnews-owned tables that reference a paper (`scores`, `paper_tags`, `digest_papers` — `digests` itself carries no paper reference) at the resulting ids, and drops `papers`. Where two rows collapse into one publication, the surviving score is the highest `combined_score` (the one the digest showed); tags and digest links are unioned, and metadata merges key by key with the later row winning. **This migration is destructive and one-way**: a row that can be keyed on neither DOI nor PMID cannot be represented, so it is logged at ERROR and written to `~/.bmnews/stranded-papers.json` (`constants.STRANDED_PAPERS_PATH`) before `papers` is dropped.
 
 Backend-aware SQL: `placeholder(conn)` (from `bmlib.db`) returns `?` (SQLite) or `%s` (PostgreSQL). Schema DDL maintained as separate SQLite and PostgreSQL strings per migration. The `sources` filter in `get_papers_filtered()` unnests a JSON array, so it is backend-specific too — `json_each` on SQLite, `json_array_elements_text` on PostgreSQL.
 

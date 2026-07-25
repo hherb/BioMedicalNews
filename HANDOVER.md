@@ -2,8 +2,8 @@
 
 **Status: done.** bmnews no longer has a `papers` table. Fetching and storing
 are one `bmlib.publications.sync()` call, papers live in bmlib's
-`publications` table, and the four bmnews-owned tables (`scores`,
-`paper_tags`, `digests`, `digest_papers`) point at it.
+`publications` table, and the bmnews-owned tables (`scores`, `paper_tags`,
+`digest_papers`, plus `digests` behind them) point at it.
 
 What follows records how the plan was resolved, because the decisions are not
 recoverable from the diff. The one section still open — `bmlib.transparency` —

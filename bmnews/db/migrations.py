@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import Any
 
 from bmlib.db import Migration, create_tables, execute, fetch_all, is_sqlite, placeholder
 from bmlib.publications import ensure_schema, store_publication
 from bmlib.publications.models import FullTextSource, Publication
 
+from bmnews.constants import STRANDED_PAPERS_LOG_LIMIT, STRANDED_PAPERS_PATH
 from bmnews.db.operations import publication_id
 from bmnews.metadata import parse_metadata
 
@@ -225,7 +227,7 @@ ALTER TABLE papers ADD COLUMN IF NOT EXISTS fulltext_source TEXT NOT NULL DEFAUL
 # replace — that table records *where* full text lives, not the fetched body.
 _M004_EXTRAS_SQLITE = """\
 CREATE TABLE IF NOT EXISTS paper_extras (
-    publication_id INTEGER PRIMARY KEY REFERENCES publications(id),
+    publication_id INTEGER PRIMARY KEY REFERENCES publications(id) ON DELETE CASCADE,
     metadata_json TEXT NOT NULL DEFAULT '{}',
     fulltext_html TEXT,
     fulltext_source TEXT NOT NULL DEFAULT ''
@@ -234,14 +236,20 @@ CREATE TABLE IF NOT EXISTS paper_extras (
 
 _M004_EXTRAS_POSTGRESQL = _M004_EXTRAS_SQLITE
 
-# The four bmnews-owned tables, rebuilt so their foreign key points at
-# ``publications``. ``paper_id`` keeps its name: "paper" is bmnews's own noun
-# for the thing (the GUI routes are /papers/<id>), and renaming the column
-# would ripple through the scorer's result dicts for no behavioural gain.
+# The bmnews-owned tables that reference a paper, rebuilt so their foreign key
+# points at ``publications``. (``digests`` itself carries no paper reference —
+# only ``digest_papers`` links the two — so it is left alone.) ``paper_id``
+# keeps its name: "paper" is bmnews's own noun for the thing (the GUI routes
+# are /papers/<id>), and renaming the column would ripple through the scorer's
+# result dicts for no behavioural gain.
+#
+# ON DELETE CASCADE throughout: bmlib owns the ``publications`` row, so if it
+# ever removes one, the bmnews rows hanging off it should go with it rather
+# than linger pointing at nothing.
 _M004_REPOINTED_SQLITE = """\
 CREATE TABLE scores_new (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    paper_id INTEGER NOT NULL REFERENCES publications(id),
+    paper_id INTEGER NOT NULL REFERENCES publications(id) ON DELETE CASCADE,
     relevance_score REAL NOT NULL DEFAULT 0.0,
     quality_score REAL NOT NULL DEFAULT 0.0,
     combined_score REAL NOT NULL DEFAULT 0.0,
@@ -254,14 +262,14 @@ CREATE TABLE scores_new (
 );
 
 CREATE TABLE paper_tags_new (
-    paper_id INTEGER NOT NULL REFERENCES publications(id),
+    paper_id INTEGER NOT NULL REFERENCES publications(id) ON DELETE CASCADE,
     tag TEXT NOT NULL,
     PRIMARY KEY (paper_id, tag)
 );
 
 CREATE TABLE digest_papers_new (
     digest_id INTEGER NOT NULL REFERENCES digests(id),
-    paper_id INTEGER NOT NULL REFERENCES publications(id),
+    paper_id INTEGER NOT NULL REFERENCES publications(id) ON DELETE CASCADE,
     PRIMARY KEY (digest_id, paper_id)
 );
 """
@@ -269,7 +277,7 @@ CREATE TABLE digest_papers_new (
 _M004_REPOINTED_POSTGRESQL = """\
 CREATE TABLE scores_new (
     id SERIAL PRIMARY KEY,
-    paper_id INTEGER NOT NULL REFERENCES publications(id),
+    paper_id INTEGER NOT NULL REFERENCES publications(id) ON DELETE CASCADE,
     relevance_score REAL NOT NULL DEFAULT 0.0,
     quality_score REAL NOT NULL DEFAULT 0.0,
     combined_score REAL NOT NULL DEFAULT 0.0,
@@ -282,14 +290,14 @@ CREATE TABLE scores_new (
 );
 
 CREATE TABLE paper_tags_new (
-    paper_id INTEGER NOT NULL REFERENCES publications(id),
+    paper_id INTEGER NOT NULL REFERENCES publications(id) ON DELETE CASCADE,
     tag TEXT NOT NULL,
     PRIMARY KEY (paper_id, tag)
 );
 
 CREATE TABLE digest_papers_new (
     digest_id INTEGER NOT NULL REFERENCES digests(id),
-    paper_id INTEGER NOT NULL REFERENCES publications(id),
+    paper_id INTEGER NOT NULL REFERENCES publications(id) ON DELETE CASCADE,
     PRIMARY KEY (digest_id, paper_id)
 );
 """
@@ -372,7 +380,7 @@ def _copy_papers(conn: Any) -> tuple[dict[int, int], dict[int, dict]]:
     """
     id_map: dict[int, int] = {}
     extras: dict[int, dict] = {}
-    unidentifiable = 0
+    stranded: list[dict] = []
 
     for row in fetch_all(conn, "SELECT * FROM papers ORDER BY id"):
         meta = parse_metadata(row["metadata_json"])
@@ -383,8 +391,7 @@ def _copy_papers(conn: Any) -> tuple[dict[int, int], dict[int, dict]]:
             # PMID, so such a row cannot be represented (and could not be
             # looked up again anyway). papers.doi was NOT NULL, so this only
             # catches rows whose DOI was stored blank.
-            unidentifiable += 1
-            logger.warning("Skipping paper %s with no DOI or PMID: %.80s", row["id"], row["title"])
+            stranded.append(_stranded_row(row, "no DOI or PMID"))
             continue
 
         store_publication(conn, pub, fulltext_sources=_fulltext_sources(meta))
@@ -392,31 +399,69 @@ def _copy_papers(conn: Any) -> tuple[dict[int, int], dict[int, dict]]:
         # the row is looked back up by whichever canonical form it now holds.
         new_id = publication_id(conn, doi=pub.doi, pmid=pub.pmid)
         if new_id is None:  # pragma: no cover — defensive
-            unidentifiable += 1
-            logger.warning("Could not resolve stored publication for paper %s", row["id"])
+            stranded.append(_stranded_row(row, "stored publication could not be found again"))
             continue
 
         id_map[row["id"]] = new_id
         _merge_extras(extras, new_id, row, meta)
 
-    if unidentifiable:
-        logger.warning("%d paper(s) could not be migrated and were left behind", unidentifiable)
+    _report_stranded(stranded)
     return id_map, extras
+
+
+def _stranded_row(row: Any, reason: str) -> dict:
+    """Capture a ``papers`` row that cannot be migrated, for the rescue file."""
+    return {"reason": reason, **dict(row)}
+
+
+def _report_stranded(stranded: list[dict]) -> None:
+    """Log and save any rows that could not be carried across.
+
+    ``papers`` is dropped at the end of this migration, so a row left behind
+    is gone for good. Writing it out first means a user who hits this can
+    still see exactly what was lost — and re-enter it — rather than having
+    only a log line that a GUI session never shows them.
+
+    Args:
+        stranded: The rows that could not be migrated, with a ``reason``.
+    """
+    if not stranded:
+        return
+
+    logger.error("%d paper(s) could not be migrated and were left behind", len(stranded))
+    for entry in stranded[:STRANDED_PAPERS_LOG_LIMIT]:
+        logger.error("  paper %s (%s): %.80s", entry.get("id"), entry["reason"], entry.get("title"))
+    if len(stranded) > STRANDED_PAPERS_LOG_LIMIT:
+        logger.error("  ... and %d more", len(stranded) - STRANDED_PAPERS_LOG_LIMIT)
+
+    rescue_path = Path(STRANDED_PAPERS_PATH).expanduser()
+    try:
+        rescue_path.parent.mkdir(parents=True, exist_ok=True)
+        rescue_path.write_text(json.dumps(stranded, indent=2, default=str), encoding="utf-8")
+    except OSError as exc:
+        # An unwritable home directory must not abort an otherwise good
+        # migration — the rows are in the log either way.
+        logger.error("Could not write stranded papers to %s: %s", rescue_path, exc)
+    else:
+        logger.error("Their full contents were saved to %s", rescue_path)
 
 
 def _merge_extras(extras: dict[int, dict], pub_id: int, row: Any, meta: dict) -> None:
     """Fold one paper's bmnews-only data into the extras for its publication.
 
     Two papers can collapse into one publication, so this merges rather than
-    overwrites, matching bmlib's own rule: first value seen wins, later rows
-    only fill gaps.
+    overwrites. Rows are replayed oldest id first and the later one wins per
+    key, matching what :func:`bmnews.db.operations.save_paper_metadata` does
+    at runtime: the most recent reading of a value like a citation count is
+    the one to keep, and a key the later row says nothing about survives.
     """
     current = extras.setdefault(
         pub_id, {"metadata": {}, "fulltext_html": None, "fulltext_source": ""}
     )
-    for key, value in meta.items():
-        current["metadata"].setdefault(key, value)
-    if not current["fulltext_html"] and row["fulltext_html"]:
+    current["metadata"].update(meta)
+    # Same rule for the cached body: a later row is a more recent fetch. An
+    # empty one does not blank out what an earlier row already cached.
+    if row["fulltext_html"]:
         current["fulltext_html"] = row["fulltext_html"]
         current["fulltext_source"] = row["fulltext_source"] or ""
 
