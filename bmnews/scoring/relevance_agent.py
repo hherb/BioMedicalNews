@@ -50,16 +50,46 @@ class RelevanceAgent(BaseAgent):
             )
         except ValueError:
             logger.warning("Failed to score after retries: %s", title[:80])
-            result = {
-                "relevance_score": 0.0,
-                "summary": "",
-                "relevance_rationale": "LLM response error",
-                "key_findings": [],
-                "matched_tags": [],
-            }
+            result = _fallback_result("LLM response error")
 
-        # Clamp score
-        score = float(result.get("relevance_score", 0.0))
+        # The model may return a JSON array or scalar despite the prompt.
+        if not isinstance(result, dict):
+            logger.warning("LLM returned non-object JSON for: %s", title[:80])
+            result = _fallback_result("LLM returned unexpected JSON shape")
+
+        # Clamp score. A model that answers "high" instead of 0.9 must not
+        # take down the whole scoring run.
+        try:
+            score = float(result.get("relevance_score", 0.0))
+        except (TypeError, ValueError):
+            logger.warning(
+                "Non-numeric relevance_score %r for: %s",
+                result.get("relevance_score"), title[:80],
+            )
+            score = 0.0
         result["relevance_score"] = max(0.0, min(1.0, score))
 
+        # Downstream code indexes these unconditionally.
+        for key in ("key_findings", "matched_tags"):
+            if not isinstance(result.get(key), list):
+                result[key] = []
+
         return result
+
+
+def _fallback_result(rationale: str) -> dict[str, Any]:
+    """Build a neutral, zero-relevance scoring result.
+
+    Args:
+        rationale: Human-readable reason recorded in the assessment.
+
+    Returns:
+        A result dict with the same keys :meth:`RelevanceAgent.score` returns.
+    """
+    return {
+        "relevance_score": 0.0,
+        "summary": "",
+        "relevance_rationale": rationale,
+        "key_findings": [],
+        "matched_tags": [],
+    }

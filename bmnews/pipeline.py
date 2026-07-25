@@ -7,33 +7,39 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from collections.abc import Callable
+from contextlib import closing
+from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-from bmlib.db import transaction
+import httpx
 from bmlib.llm import LLMClient
+from bmlib.publications.fetchers import get_fetcher, source_names
+from bmlib.publications.models import FetchedRecord
 from bmlib.templates import TemplateEngine
 
 from bmnews.config import AppConfig
-from bmnews.db.schema import init_db, open_db
-from bmnews.db.operations import (
-    upsert_paper,
-    update_paper_identifiers,
-    get_unscored_papers,
-    save_score,
-    save_paper_tags,
-    get_papers_for_digest,
-    get_cached_digest_papers,
-    record_digest,
+from bmnews.constants import (
+    HTTP_TIMEOUT_SECONDS,
+    KNOWN_LLM_PROVIDERS,
+    UNSCORED_BATCH_SIZE,
 )
-from bmlib.publications.fetchers import list_sources, get_fetcher, source_names
-from bmlib.publications.models import FetchedRecord
-
-from bmnews.fetchers import FetchedPaper, fetch_europepmc
-from bmnews.scoring.scorer import score_papers
+from bmnews.db.operations import (
+    get_cached_digest_papers,
+    get_papers_for_digest,
+    get_unscored_papers,
+    record_digest,
+    save_paper_tags,
+    save_score,
+    update_paper_identifiers,
+    upsert_paper,
+)
+from bmnews.db.schema import init_db, open_db
 from bmnews.digest.renderer import render_digest
 from bmnews.digest.sender import send_email
+from bmnews.fetchers import FetchedPaper, fetch_europepmc
+from bmnews.scoring.scorer import score_papers
 
 logger = logging.getLogger(__name__)
 
@@ -91,25 +97,49 @@ def _fetch_via_registry(
     source_config: dict[str, str],
     on_progress: Callable[[str], None] | None = None,
 ) -> list[FetchedPaper]:
-    """Fetch papers from a bmlib-registered source via the registry."""
-    import httpx
-    from datetime import date, timedelta
+    """Fetch papers from a bmlib-registered source, one day at a time.
 
+    Args:
+        source_name: Registry name of the source (e.g. ``"medrxiv"``).
+        lookback_days: How many days back from today to fetch.
+        source_config: Extra keyword arguments passed to the bmlib fetcher.
+        on_progress: Optional callback receiving a status message per day.
+
+    Returns:
+        Normalized :class:`FetchedPaper` objects for every record returned.
+        A failure on one day is logged and skipped rather than aborting the
+        whole range.
+    """
     fetcher = get_fetcher(source_name)
     end = date.today()
     start = end - timedelta(days=lookback_days)
 
     papers: list[FetchedPaper] = []
 
-    with httpx.Client(timeout=30.0) as client:
+    with httpx.Client(timeout=HTTP_TIMEOUT_SECONDS) as client:
         current = start
+        day = 0
         while current <= end:
+            day += 1
+            if on_progress:
+                on_progress(
+                    f"Fetching from {source_name}: {current.isoformat()} "
+                    f"(day {day}/{lookback_days + 1})..."
+                )
             collected: list[FetchedRecord] = []
-            fetcher(
-                client, current,
-                on_record=collected.append,
-                **source_config,
-            )
+            try:
+                fetcher(
+                    client, current,
+                    on_record=collected.append,
+                    **source_config,
+                )
+            except Exception:
+                # One bad day (rate limit, transient 5xx) must not discard the
+                # records already collected for the rest of the range.
+                logger.exception(
+                    "Error fetching %s for %s — skipping that day",
+                    source_name, current.isoformat(),
+                )
             for record in collected:
                 papers.append(_record_to_fetched_paper(record))
             current += timedelta(days=1)
@@ -118,7 +148,7 @@ def _fetch_via_registry(
 
 
 # Sources handled locally (not in bmlib registry)
-_LOCAL_SOURCES: dict[str, str] = {
+LOCAL_SOURCES: dict[str, str] = {
     "europepmc": "Europe PMC",
 }
 
@@ -160,35 +190,48 @@ def run_fetch(
 
 
 def run_store(config: AppConfig, papers: list[FetchedPaper]) -> int:
-    """Store fetched papers in the database. Returns count of new papers."""
-    conn = open_db(config)
-    init_db(conn)
+    """Insert or update fetched papers in the database.
 
+    Args:
+        config: Application config.
+        papers: Papers to persist. Each is upserted on its DOI, so re-storing
+            a previously seen paper refreshes it rather than duplicating it.
+
+    Returns:
+        The number of papers written (inserted *or* updated).
+    """
     stored = 0
-    for paper in papers:
-        pid = upsert_paper(
-            conn,
-            doi=paper.doi,
-            title=paper.title,
-            authors=paper.authors,
-            abstract=paper.abstract,
-            url=paper.url,
-            source=paper.source,
-            published_date=paper.published_date,
-            categories=paper.categories,
-            metadata_json=json.dumps(paper.metadata),
-        )
-        pmid = paper.metadata.get("pmid")
-        pmcid = paper.metadata.get("pmcid")
-        if pmid or pmcid:
-            update_paper_identifiers(
-                conn, paper_id=pid,
-                pmid=pmid or None,
-                pmcid=pmcid or None,
-            )
-        stored += 1
+    with closing(open_db(config)) as conn:
+        init_db(conn)
 
-    conn.close()
+        for paper in papers:
+            if not paper.doi:
+                # doi is the natural key; a blank one would collide with every
+                # other DOI-less paper via the UNIQUE constraint.
+                logger.warning("Skipping paper without DOI: %s", paper.title[:80])
+                continue
+            pid = upsert_paper(
+                conn,
+                doi=paper.doi,
+                title=paper.title,
+                authors=paper.authors,
+                abstract=paper.abstract,
+                url=paper.url,
+                source=paper.source,
+                published_date=paper.published_date,
+                categories=paper.categories,
+                metadata_json=json.dumps(paper.metadata),
+            )
+            pmid = paper.metadata.get("pmid")
+            pmcid = paper.metadata.get("pmcid")
+            if pmid or pmcid:
+                update_paper_identifiers(
+                    conn, paper_id=pid,
+                    pmid=pmid or None,
+                    pmcid=pmcid or None,
+                )
+            stored += 1
+
     logger.info("Stored %d papers", stored)
     return stored
 
@@ -206,70 +249,91 @@ def run_score(
         on_scored: Optional callback receiving the paper_id after each
             score is committed to the database.
     """
-    conn = open_db(config)
-    init_db(conn)
-
-    unscored = get_unscored_papers(conn)
-    if not unscored:
-        logger.info("No unscored papers found")
-        conn.close()
-        return 0
-
-    total = len(unscored)
-    logger.info("Scoring %d papers...", total)
-    if on_progress:
-        on_progress(f"Scoring {total} papers...")
-
-    llm = build_llm_client(config)
-    templates = build_template_engine(config)
-    # Always construct "provider:model" format for bmlib.
-    # config.llm.model stores the bare model name (e.g. "glm-4.7-flash:latest"),
-    # NOT the "provider:model" format that LLMClient expects.
-    raw_model = config.llm.model
-    if raw_model and ":" in raw_model:
-        # Could be "provider:model" OR "ollama_model:tag" — disambiguate
-        prefix = raw_model.split(":", 1)[0].lower()
-        known_providers = {"anthropic", "ollama", "openai", "deepseek", "mistral", "gemini"}
-        if prefix in known_providers:
-            model = raw_model  # already in provider:model format
-        else:
-            model = f"{config.llm.provider}:{raw_model}"  # bare model with tag
-    elif raw_model:
-        model = f"{config.llm.provider}:{raw_model}"
-    else:
-        model = f"{config.llm.provider}:"
-
     scored_count = 0
 
-    def _score_progress(i: int, _total: int, result: Any) -> None:
-        nonlocal scored_count
-        # Save each score immediately so the GUI sees updates
-        if isinstance(result, dict):
-            paper_id = result["paper_id"]
-            tags = result.pop("matched_tags", [])
-            save_score(conn, **result)
-            if tags:
-                save_paper_tags(conn, paper_id=paper_id, tags=tags)
-            scored_count += 1
-            if on_scored:
-                on_scored(paper_id)
+    with closing(open_db(config)) as conn:
+        init_db(conn)
+
+        unscored = get_unscored_papers(conn, limit=UNSCORED_BATCH_SIZE)
+        if not unscored:
+            logger.info("No unscored papers found")
+            return 0
+
+        total = len(unscored)
+        if total == UNSCORED_BATCH_SIZE:
+            logger.warning(
+                "Scoring the oldest %d unscored papers; more may remain. "
+                "Re-run `bmnews score` to continue.", UNSCORED_BATCH_SIZE,
+            )
+        logger.info("Scoring %d papers...", total)
         if on_progress:
-            on_progress(f"Scoring paper {i}/{_total}...")
+            on_progress(f"Scoring {total} papers...")
 
-    score_papers(
-        papers=unscored,
-        llm=llm,
-        model=model,
-        template_engine=templates,
-        interests=config.user.research_interests,
-        concurrency=config.llm.concurrency,
-        quality_tier=config.quality.default_tier,
-        progress_callback=_score_progress,
-    )
+        llm = build_llm_client(config)
+        templates = build_template_engine(config)
+        model = _resolve_model_string(config)
 
-    conn.close()
+        def _score_progress(i: int, _total: int, result: Any) -> None:
+            """Persist one paper's score and report progress.
+
+            Args:
+                i: 1-based index of the paper just scored.
+                _total: Total number of papers in this run.
+                result: The scoring result dict for that paper.
+            """
+            nonlocal scored_count
+            # Save each score immediately so the GUI sees updates
+            if isinstance(result, dict):
+                # Copy: matched_tags is not a `scores` column, and popping it
+                # from the caller's dict would corrupt the returned results.
+                fields = dict(result)
+                paper_id = fields["paper_id"]
+                tags = fields.pop("matched_tags", [])
+                save_score(conn, **fields)
+                if tags:
+                    save_paper_tags(conn, paper_id=paper_id, tags=tags)
+                scored_count += 1
+                if on_scored:
+                    on_scored(paper_id)
+            if on_progress:
+                on_progress(f"Scoring paper {i}/{_total}...")
+
+        score_papers(
+            papers=unscored,
+            llm=llm,
+            model=model,
+            template_engine=templates,
+            interests=config.user.research_interests,
+            concurrency=config.llm.concurrency,
+            quality_tier=config.quality.default_tier,
+            progress_callback=_score_progress,
+        )
+
     logger.info("Scored %d papers", scored_count)
     return scored_count
+
+
+def _resolve_model_string(config: AppConfig) -> str:
+    """Build the ``"provider:model"`` string that bmlib's LLMClient expects.
+
+    ``config.llm.model`` may hold either an already-qualified
+    ``"anthropic:claude-sonnet-4-5"`` or a bare Ollama name with a tag such as
+    ``"llama3.1:latest"``. These are told apart by checking whether the part
+    before the first colon is a known provider.
+
+    Args:
+        config: Application config.
+
+    Returns:
+        A ``"provider:model"`` string.
+    """
+    raw_model = config.llm.model
+    if not raw_model:
+        return f"{config.llm.provider}:"
+    prefix = raw_model.split(":", 1)[0].lower()
+    if ":" in raw_model and prefix in KNOWN_LLM_PROVIDERS:
+        return raw_model
+    return f"{config.llm.provider}:{raw_model}"
 
 
 def run_digest(config: AppConfig, output: str | None = None) -> str:
@@ -282,61 +346,62 @@ def run_digest(config: AppConfig, output: str | None = None) -> str:
     Returns:
         The rendered digest text.
     """
-    conn = open_db(config)
-    init_db(conn)
+    with closing(open_db(config)) as conn:
+        init_db(conn)
 
-    papers = get_papers_for_digest(
-        conn,
-        min_combined=config.scoring.min_combined,
-        max_papers=config.email.max_papers,
-    )
-
-    if not papers:
-        logger.info("No papers above threshold for digest")
-        conn.close()
-        return ""
-
-    templates = build_template_engine(config)
-
-    # Render both formats
-    html_body = render_digest(
-        papers, templates,
-        subject_prefix=config.email.subject_prefix,
-        fmt="html",
-    )
-    text_body = render_digest(
-        papers, templates,
-        subject_prefix=config.email.subject_prefix,
-        fmt="text",
-    )
-
-    # Deliver
-    paper_ids = [p["id"] for p in papers if "id" in p]
-
-    if output:
-        Path(output).write_text(html_body, encoding="utf-8")
-        logger.info("Digest written to %s", output)
-        record_digest(conn, paper_ids, delivery_method="file")
-    elif config.email.enabled and config.email.smtp_host:
-        subject = f"{config.email.subject_prefix} {datetime.now().strftime('%Y-%m-%d')}"
-        success = send_email(
-            html_body=html_body,
-            text_body=text_body,
-            subject=subject,
-            from_address=config.email.from_address,
-            to_address=config.email.to_address or config.user.email,
-            smtp_host=config.email.smtp_host,
-            smtp_port=config.email.smtp_port,
-            smtp_user=config.email.smtp_user,
-            smtp_password=config.email.smtp_password,
-            use_tls=config.email.use_tls,
+        papers = get_papers_for_digest(
+            conn,
+            min_combined=config.scoring.min_combined,
+            max_papers=config.email.max_papers,
         )
-        record_digest(conn, paper_ids, delivery_method="email" if success else "email_failed")
-    else:
-        print(text_body)
-        record_digest(conn, paper_ids, delivery_method="stdout")
 
-    conn.close()
+        if not papers:
+            logger.info("No papers above threshold for digest")
+            return ""
+
+        templates = build_template_engine(config)
+
+        # Render both formats
+        html_body = render_digest(
+            papers, templates,
+            subject_prefix=config.email.subject_prefix,
+            fmt="html",
+        )
+        text_body = render_digest(
+            papers, templates,
+            subject_prefix=config.email.subject_prefix,
+            fmt="text",
+        )
+
+        # Deliver
+        paper_ids = [p["id"] for p in papers if "id" in p]
+
+        if output:
+            Path(output).write_text(html_body, encoding="utf-8")
+            logger.info("Digest written to %s", output)
+            record_digest(conn, paper_ids, delivery_method="file")
+        elif config.email.enabled and config.email.smtp_host:
+            subject = f"{config.email.subject_prefix} {datetime.now().strftime('%Y-%m-%d')}"
+            success = send_email(
+                html_body=html_body,
+                text_body=text_body,
+                subject=subject,
+                from_address=config.email.from_address,
+                to_address=config.email.to_address or config.user.email,
+                smtp_host=config.email.smtp_host,
+                smtp_port=config.email.smtp_port,
+                smtp_user=config.email.smtp_user,
+                smtp_password=config.email.smtp_password,
+                use_tls=config.email.use_tls,
+            )
+            record_digest(
+                conn, paper_ids,
+                delivery_method="email" if success else "email_failed",
+            )
+        else:
+            print(text_body)
+            record_digest(conn, paper_ids, delivery_method="stdout")
+
     return text_body
 
 
@@ -350,11 +415,9 @@ def show_cached_digests(config: AppConfig, days: int | None = None) -> str:
     Returns:
         Rendered text, or empty string if no cached papers.
     """
-    conn = open_db(config)
-    init_db(conn)
-
-    papers = get_cached_digest_papers(conn, days=days)
-    conn.close()
+    with closing(open_db(config)) as conn:
+        init_db(conn)
+        papers = get_cached_digest_papers(conn, days=days)
 
     if not papers:
         logger.info("No cached digest papers found")

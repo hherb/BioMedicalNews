@@ -16,6 +16,7 @@ from bmlib.db import Migration, create_tables
 
 
 def _is_sqlite(conn: Any) -> bool:
+    """Return True if *conn* is a sqlite3 connection."""
     return "sqlite3" in type(conn).__module__
 
 

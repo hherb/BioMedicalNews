@@ -8,14 +8,23 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any
 
 from bmlib.llm import LLMClient
-from bmlib.templates import TemplateEngine
 from bmlib.quality.data_models import QualityAssessment, QualityFilter
 from bmlib.quality.manager import QualityManager
+from bmlib.templates import TemplateEngine
 
+from bmnews.constants import (
+    DEFAULT_QUALITY_SCORE,
+    QUALITY_SCORE_SCALE,
+    QUALITY_TIER_LLM_CLASSIFIER,
+    QUALITY_TIER_METADATA_ONLY,
+    QUALITY_TIER_SCORES,
+    QUALITY_WEIGHT,
+    RELEVANCE_WEIGHT,
+)
 from bmnews.scoring.relevance_agent import RelevanceAgent
 
 logger = logging.getLogger(__name__)
@@ -28,8 +37,8 @@ def score_papers(
     template_engine: TemplateEngine,
     interests: str,
     concurrency: int = 1,
-    quality_tier: int = 2,
-    progress_callback: Any = None,
+    quality_tier: int = QUALITY_TIER_LLM_CLASSIFIER,
+    progress_callback: Callable[[int, int, dict], None] | None = None,
 ) -> list[dict]:
     """Score a list of papers for relevance and quality.
 
@@ -41,7 +50,10 @@ def score_papers(
         interests: Free-text description of user research interests.
         concurrency: Number of concurrent scoring tasks.
         quality_tier: Max quality assessment tier (1=metadata, 2=classifier, 3=deep).
-        progress_callback: Optional callback(current, total, result) called after each paper.
+        progress_callback: Optional ``callback(current, total, result)`` invoked
+            after each paper. It is always called on the calling thread — even
+            when *concurrency* > 1 — so callbacks may safely touch a database
+            connection that is not shared across threads.
 
     Returns:
         List of dicts with scoring results, each containing:
@@ -76,26 +88,48 @@ def score_papers(
             }
             for future in as_completed(futures):
                 paper = futures[future]
+                # Count every finished paper, including failures, so progress
+                # still reaches total/total when some papers error out.
+                completed += 1
                 try:
                     result = future.result()
-                    results.append(result)
-                    completed += 1
-                    if progress_callback:
-                        progress_callback(completed, total, result)
                 except Exception:
                     logger.exception("Error scoring paper %s", paper.get("doi", "?"))
+                    continue
+                results.append(result)
+                if progress_callback:
+                    progress_callback(completed, total, result)
 
     return results
 
 
 def _build_quality_filter(max_tier: int) -> QualityFilter:
-    """Map a max-tier integer to a QualityFilter."""
-    if max_tier <= 1:
-        return QualityFilter(use_metadata_only=True, use_llm_classification=False, use_detailed_assessment=False)
-    if max_tier == 2:
-        return QualityFilter(use_metadata_only=False, use_llm_classification=True, use_detailed_assessment=False)
-    # max_tier >= 3
-    return QualityFilter(use_metadata_only=False, use_llm_classification=True, use_detailed_assessment=True)
+    """Map a max-tier integer to the matching :class:`QualityFilter`.
+
+    Args:
+        max_tier: 1 = metadata only, 2 = add the LLM classifier,
+            3 or more = also run the deep assessment.
+
+    Returns:
+        A filter enabling every assessment stage up to *max_tier*.
+    """
+    if max_tier <= QUALITY_TIER_METADATA_ONLY:
+        return QualityFilter(
+            use_metadata_only=True,
+            use_llm_classification=False,
+            use_detailed_assessment=False,
+        )
+    if max_tier == QUALITY_TIER_LLM_CLASSIFIER:
+        return QualityFilter(
+            use_metadata_only=False,
+            use_llm_classification=True,
+            use_detailed_assessment=False,
+        )
+    return QualityFilter(
+        use_metadata_only=False,
+        use_llm_classification=True,
+        use_detailed_assessment=True,
+    )
 
 
 def _score_single(
@@ -131,8 +165,12 @@ def _score_single(
         filter_settings=quality_filter,
     )
     quality_score = _quality_tier_to_score(quality_assessment)
-    study_design = quality_assessment.study_design.value if quality_assessment.study_design else ""
-    quality_tier_name = quality_assessment.quality_tier.name if quality_assessment.quality_tier else ""
+    study_design = (
+        quality_assessment.study_design.value if quality_assessment.study_design else ""
+    )
+    quality_tier_name = (
+        quality_assessment.quality_tier.name if quality_assessment.quality_tier else ""
+    )
 
     logger.debug(
         "Paper %s quality: design=%s tier=%s (assessment_tier=%d, confidence=%.2f)",
@@ -141,7 +179,7 @@ def _score_single(
     )
 
     # --- Combined score (weighted) ---
-    combined = 0.6 * relevance_score + 0.4 * quality_score
+    combined = RELEVANCE_WEIGHT * relevance_score + QUALITY_WEIGHT * quality_score
 
     return {
         "paper_id": paper_id,
@@ -160,16 +198,31 @@ def _score_single(
 
 
 def _extract_pub_types(paper: dict) -> list[str]:
-    """Extract publication types from paper metadata."""
+    """Collect publication-type hints for a paper.
+
+    Args:
+        paper: Paper dict, optionally carrying a ``metadata_json`` blob with a
+            ``pub_type`` entry and a semicolon-separated ``categories`` string.
+
+    Returns:
+        A new list combining metadata publication types and categories.
+    """
     metadata_str = paper.get("metadata_json", "{}")
     try:
         metadata = json.loads(metadata_str) if isinstance(metadata_str, str) else metadata_str
     except (json.JSONDecodeError, TypeError):
         metadata = {}
+    if not isinstance(metadata, dict):
+        metadata = {}
 
-    pub_types = metadata.get("pub_type", [])
-    if isinstance(pub_types, str):
-        pub_types = [pub_types]
+    raw_types = metadata.get("pub_type", [])
+    if isinstance(raw_types, str):
+        pub_types = [raw_types]
+    elif isinstance(raw_types, list):
+        # Copy: extending in place would mutate the caller's metadata dict.
+        pub_types = list(raw_types)
+    else:
+        pub_types = []
 
     # Also check categories
     categories = paper.get("categories", "")
@@ -180,18 +233,19 @@ def _extract_pub_types(paper: dict) -> list[str]:
 
 
 def _quality_tier_to_score(assessment: QualityAssessment) -> float:
-    """Convert a quality assessment to a 0.0–1.0 score."""
-    if assessment.quality_score is not None and assessment.quality_score > 0:
-        return min(1.0, assessment.quality_score / 10.0)
+    """Convert a quality assessment to a 0.0–1.0 score.
 
-    # Map tier to approximate score
-    tier_scores = {
-        "UNCLASSIFIED": 0.3,
-        "TIER_1_ANECDOTAL": 0.3,
-        "TIER_2_OBSERVATIONAL": 0.5,
-        "TIER_3_CONTROLLED": 0.7,
-        "TIER_4_EXPERIMENTAL": 0.85,
-        "TIER_5_SYNTHESIS": 0.95,
-    }
+    Prefers bmlib's explicit 0–10 ``quality_score`` when present, otherwise
+    falls back to the approximate score for the assessed tier.
+
+    Args:
+        assessment: The assessment returned by bmlib's QualityManager.
+
+    Returns:
+        A score in the range 0.0–1.0.
+    """
+    if assessment.quality_score is not None and assessment.quality_score > 0:
+        return min(1.0, assessment.quality_score / QUALITY_SCORE_SCALE)
+
     tier_name = assessment.quality_tier.name if assessment.quality_tier else "UNCLASSIFIED"
-    return tier_scores.get(tier_name, 0.3)
+    return QUALITY_TIER_SCORES.get(tier_name, DEFAULT_QUALITY_SCORE)

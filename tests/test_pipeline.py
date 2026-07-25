@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import tempfile
+from datetime import date, timedelta
 from unittest.mock import patch
 
 from bmlib.db import connect_sqlite, fetch_one
@@ -24,12 +24,21 @@ def _test_config():
     return config
 
 
+def _days_ago(days: int) -> str:
+    """Return an ISO date *days* before today.
+
+    Tests must not hard-code calendar dates: a fixed "recent" date stops being
+    recent and silently turns a passing suite red months later.
+    """
+    return (date.today() - timedelta(days=days)).isoformat()
+
+
 def _seeded_db():
     """Return a conn with papers, scores, and a digest recorded."""
     conn = connect_sqlite(":memory:")
     init_db(conn)
     pid = upsert_paper(conn, doi="10.1101/cached1", title="Cached Paper",
-                       abstract="Abs", published_date="2026-02-10",
+                       abstract="Abs", published_date=_days_ago(2),
                        source="medrxiv")
     save_score(conn, paper_id=pid, combined_score=0.8, relevance_score=0.9,
                quality_score=0.7, summary="Great paper.")
@@ -135,3 +144,59 @@ class TestRunStore:
         assert row["pmid"] is None
         assert row["pmcid"] is None
         conn2.close()
+
+
+class TestRunStoreIdentifiers:
+    """Regression tests for identifiers landing on the wrong paper row.
+
+    A batch that mixes new inserts with re-fetched papers used to scramble
+    PMIDs: SQLite leaves ``lastrowid`` pointing at the last row actually
+    inserted, so the id returned for a conflicting upsert belonged to a
+    different paper.
+    """
+
+    @patch("bmnews.pipeline.open_db")
+    def test_mixed_insert_and_conflict_batch(self, mock_open_db, tmp_path):
+        db_path = str(tmp_path / "mixed.db")
+        conn = connect_sqlite(db_path)
+        init_db(conn)
+        conn.close()
+
+        def _paper(i, pmid=None):
+            return FetchedPaper(
+                doi=f"10.1234/p{i}", title=f"Paper {i}", source="europepmc",
+                metadata={"pmid": pmid} if pmid else {},
+            )
+
+        config = _test_config()
+
+        # Day 1: paper 0 arrives without identifiers.
+        mock_open_db.return_value = connect_sqlite(db_path)
+        run_store(config, [_paper(0)])
+
+        # Day 2: one brand-new paper (INSERT) followed by the already-stored
+        # paper 0, now carrying a PMID (ON CONFLICT → UPDATE).
+        mock_open_db.return_value = connect_sqlite(db_path)
+        run_store(config, [_paper(9, "9999"), _paper(0, "1000")])
+
+        conn = connect_sqlite(db_path)
+        p0 = fetch_one(conn, "SELECT pmid FROM papers WHERE doi = ?", ("10.1234/p0",))
+        p9 = fetch_one(conn, "SELECT pmid FROM papers WHERE doi = ?", ("10.1234/p9",))
+        conn.close()
+
+        assert p0["pmid"] == "1000"
+        assert p9["pmid"] == "9999"
+
+    @patch("bmnews.pipeline.open_db")
+    def test_paper_without_doi_is_skipped(self, mock_open_db, tmp_path):
+        db_path = str(tmp_path / "nodoi.db")
+        conn = connect_sqlite(db_path)
+        init_db(conn)
+        conn.close()
+        mock_open_db.return_value = connect_sqlite(db_path)
+
+        stored = run_store(_test_config(), [
+            FetchedPaper(doi="", title="No DOI", source="medrxiv"),
+            FetchedPaper(doi="10.1234/has-doi", title="Has DOI", source="medrxiv"),
+        ])
+        assert stored == 1

@@ -6,17 +6,30 @@ import json
 import logging
 import socket
 import threading
-from pathlib import Path
+import time
 from typing import Any
 
 from bmnews import __version__
-from bmnews.config import AppConfig, DEFAULT_CONFIG_DIR
+from bmnews.config import DEFAULT_CONFIG_DIR, AppConfig
+from bmnews.constants import (
+    DEFAULT_WINDOW_HEIGHT,
+    DEFAULT_WINDOW_WIDTH,
+    MIN_WINDOW_HEIGHT,
+    MIN_WINDOW_WIDTH,
+    SERVER_POLL_INTERVAL_SECONDS,
+    SERVER_START_TIMEOUT_SECONDS,
+)
 from bmnews.db.schema import init_db, open_db
 
 logger = logging.getLogger(__name__)
 
 _WINDOW_STATE_PATH = DEFAULT_CONFIG_DIR / "window_state.json"
-_DEFAULT_GEOMETRY = {"x": None, "y": None, "width": 1200, "height": 800}
+_DEFAULT_GEOMETRY: dict[str, int | None] = {
+    "x": None,
+    "y": None,
+    "width": DEFAULT_WINDOW_WIDTH,
+    "height": DEFAULT_WINDOW_HEIGHT,
+}
 
 
 def _position_on_screen(x: int | None, y: int | None) -> bool:
@@ -70,6 +83,26 @@ def _find_free_port() -> int:
         return s.getsockname()[1]
 
 
+def _wait_for_server(port: int, timeout: float) -> bool:
+    """Block until the local HTTP server accepts a connection.
+
+    Args:
+        port: Port the Flask server was told to listen on.
+        timeout: Maximum time to wait, in seconds.
+
+    Returns:
+        True if the server became reachable within *timeout*, else False.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                return True
+        except OSError:
+            time.sleep(SERVER_POLL_INTERVAL_SECONDS)
+    return False
+
+
 def _build_app(config: AppConfig) -> tuple[Any, Any]:
     """Create the Flask app and database connection."""
     from bmnews.gui.app import create_app
@@ -97,23 +130,28 @@ def launch(config: AppConfig, port: int | None = None) -> None:
 
     app, conn = _build_app(config)
 
-    # Start Flask in a daemon thread
-    ready = threading.Event()
-
-    def run_server():
-        ready.set()
+    def run_server() -> None:
+        """Serve the Flask app on the chosen port (blocks until shutdown)."""
         app.run(host="127.0.0.1", port=port, use_reloader=False, threaded=True)
 
     server_thread = threading.Thread(target=run_server, daemon=True)
     server_thread.start()
-    ready.wait(timeout=5)
+
+    # Probe the socket rather than signalling before app.run(): setting an
+    # Event on the first line of the thread returns immediately and proves
+    # nothing about whether the server is actually listening yet.
+    if not _wait_for_server(port, SERVER_START_TIMEOUT_SECONDS):
+        logger.warning(
+            "Flask server not reachable on port %d after %.1fs — "
+            "opening the window anyway", port, SERVER_START_TIMEOUT_SECONDS,
+        )
 
     # Open the native window with saved geometry
     geo = _load_window_state()
     kwargs: dict[str, Any] = {
         "width": geo["width"],
         "height": geo["height"],
-        "min_size": (600, 400),
+        "min_size": (MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT),
     }
     if geo["x"] is not None and geo["y"] is not None:
         kwargs["x"] = geo["x"]
@@ -125,13 +163,15 @@ def launch(config: AppConfig, port: int | None = None) -> None:
         **kwargs,
     )
 
-    def _on_closing():
+    def _on_closing() -> bool:
+        """Persist window geometry, then allow the close to proceed."""
         _save_window_state(window)
         return True
 
     window.events.closing += _on_closing
-    webview.start()
-
-    # Cleanup
-    conn.close()
-    logger.info("GUI closed")
+    try:
+        webview.start()
+    finally:
+        # Always release the DB handle, even if the webview loop raises.
+        conn.close()
+        logger.info("GUI closed")

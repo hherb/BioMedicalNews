@@ -25,8 +25,25 @@ def send_email(
 ) -> bool:
     """Send an email with HTML and plain-text alternatives.
 
-    Returns True on success, False on failure.
+    Args:
+        html_body: HTML version of the message.
+        text_body: Plain-text alternative.
+        subject: Message subject line.
+        from_address: Envelope and header sender address.
+        to_address: Recipient address.
+        smtp_host: SMTP server hostname.
+        smtp_port: SMTP server port.
+        smtp_user: Username for authentication; skipped when empty.
+        smtp_password: Password for authentication; skipped when empty.
+        use_tls: Whether to upgrade the connection with STARTTLS.
+
+    Returns:
+        True on success, False if delivery failed for any reason.
     """
+    if not to_address:
+        logger.error("No recipient address configured — digest not sent")
+        return False
+
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = from_address
@@ -36,18 +53,19 @@ def send_email(
     msg.attach(MIMEText(html_body, "html", "utf-8"))
 
     try:
-        if use_tls:
-            server = smtplib.SMTP(smtp_host, smtp_port)
-            server.ehlo()
-            server.starttls()
-        else:
-            server = smtplib.SMTP(smtp_host, smtp_port)
+        # The context manager closes the socket even when login or sendmail
+        # raises — the previous code leaked the connection on any failure.
+        with smtplib.SMTP(smtp_host, smtp_port) as server:
+            if use_tls:
+                server.ehlo()
+                server.starttls()
+                server.ehlo()
 
-        if smtp_user and smtp_password:
-            server.login(smtp_user, smtp_password)
+            if smtp_user and smtp_password:
+                server.login(smtp_user, smtp_password)
 
-        server.sendmail(from_address, [to_address], msg.as_string())
-        server.quit()
+            server.sendmail(from_address, [to_address], msg.as_string())
+
         logger.info("Digest email sent to %s", to_address)
         return True
 

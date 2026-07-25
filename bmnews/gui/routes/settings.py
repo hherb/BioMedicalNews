@@ -5,15 +5,15 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-
-from flask import Blueprint, current_app, render_template, request
+from typing import Any
 
 from bmlib.llm import LLMClient
 from bmlib.publications.fetchers import list_sources as bmlib_list_sources
-from bmlib.publications.models import SourceDescriptor
+from flask import Blueprint, abort, current_app, render_template, request
+from markupsafe import escape
 
-from bmnews.config import AppConfig
-from bmnews.pipeline import TEMPLATES_DIR, _LOCAL_SOURCES
+from bmnews.config import DEFAULT_CONFIG_DIR, AppConfig
+from bmnews.pipeline import LOCAL_SOURCES, TEMPLATES_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -25,13 +25,18 @@ def _available_sources() -> list[dict[str, str]]:
     sources = []
     for desc in bmlib_list_sources():
         sources.append({"name": desc.name, "display_name": desc.display_name})
-    for name, display_name in _LOCAL_SOURCES.items():
+    for name, display_name in LOCAL_SOURCES.items():
         sources.append({"name": name, "display_name": display_name})
     return sources
 
 
 @settings_bp.route("/settings")
-def settings_page():
+def settings_page() -> str:
+    """Render the settings form with the current configuration.
+
+    Returns:
+        The ``settings`` HTMX fragment.
+    """
     config: AppConfig = current_app.config["BMNEWS_CONFIG"]
     templates = sorted(TEMPLATES_DIR.glob("*.*"))
     template_names = [t.name for t in templates]
@@ -49,43 +54,90 @@ def settings_page():
     )
 
 
+_TRUTHY = ("true", "1", "on", "yes")
+
+
+def _coerce_form_value(field_type: str, value: str) -> Any:
+    """Coerce a form string to the type declared on a config dataclass field.
+
+    Args:
+        field_type: The field's annotation, as a string (``from __future__
+            import annotations`` means annotations are never evaluated).
+        value: The raw form value.
+
+    Returns:
+        The coerced value.
+
+    Raises:
+        ValueError: If *value* is not valid for a numeric field.
+    """
+    if "bool" in field_type:
+        return value.lower() in _TRUTHY
+    if "int" in field_type:
+        return int(value)
+    if "float" in field_type:
+        return float(value)
+    if "list" in field_type:
+        return [v.strip() for v in value.split(",") if v.strip()]
+    return value
+
+
 @settings_bp.route("/settings/save", methods=["POST"])
-def save_settings():
+def save_settings() -> str:
+    """Apply posted settings to the live config and persist them to TOML.
+
+    Form field names use ``section.field`` notation (e.g. ``llm.provider``).
+    Invalid numeric values are reported back rather than raising a 500, and
+    nothing is persisted unless every field parsed cleanly.
+
+    Returns:
+        A flash-message HTML fragment.
+    """
     config: AppConfig = current_app.config["BMNEWS_CONFIG"]
 
-    # Handle sources.enabled from multi-value checkboxes
-    enabled_sources = request.form.getlist("sources.enabled")
-    if enabled_sources is not None:
-        config.sources.enabled = enabled_sources
+    # Handle sources.enabled from multi-value checkboxes. Unchecked boxes are
+    # absent from the POST entirely, so a hidden marker distinguishes
+    # "deliberately cleared" from "this form never had a sources section" —
+    # without it, any partial form post would disable every source.
+    if request.form.get("sources.enabled_submitted"):
+        config.sources.enabled = [
+            s for s in request.form.getlist("sources.enabled") if s.strip()
+        ]
 
+    errors: list[str] = []
     for key, value in request.form.items():
-        if key == "sources.enabled":
+        if key in ("sources.enabled", "sources.enabled_submitted"):
             continue  # already handled above
-        parts = key.split(".", 1)
-        if len(parts) == 2:
-            section_name, field_name = parts
-            section = getattr(config, section_name, None)
-            if section is not None and hasattr(section, field_name):
-                if field_name in getattr(section, "__dataclass_fields__", {}):
-                    field = section.__dataclass_fields__[field_name]
-                    ftype = str(field.type)
-                    if "bool" in ftype:
-                        setattr(section, field_name, value.lower() in ("true", "1", "on", "yes"))
-                    elif "int" in ftype:
-                        setattr(section, field_name, int(value))
-                    elif "float" in ftype:
-                        setattr(section, field_name, float(value))
-                    elif "list" in ftype:
-                        setattr(section, field_name, [v.strip() for v in value.split(",") if v.strip()])
-                    else:
-                        setattr(section, field_name, value)
-                else:
-                    # Handle property setters (e.g. backward-compat booleans)
-                    setattr(section, field_name, value)
+        section_name, _, field_name = key.partition(".")
+        if not field_name:
+            continue
+        section = getattr(config, section_name, None)
+        if section is None or not hasattr(section, field_name):
+            continue
+
+        dataclass_fields = getattr(section, "__dataclass_fields__", {})
+        if field_name in dataclass_fields:
+            field_type = str(dataclass_fields[field_name].type)
+            try:
+                setattr(section, field_name, _coerce_form_value(field_type, value))
+            except ValueError:
+                errors.append(f"{key}: {value!r} is not a valid number")
+        else:
+            # Property setters (e.g. the backward-compat source booleans)
+            # expect a real bool, not the raw "on"/"false" string.
+            setattr(section, field_name, value.lower() in _TRUTHY)
+
+    if errors:
+        detail = escape("; ".join(errors))
+        return f'<div class="flash error">Not saved — {detail}</div>'
 
     if not current_app.config.get("TESTING"):
         from bmnews.config import save_config
-        save_config(config)
+        try:
+            save_config(config)
+        except OSError as e:
+            logger.exception("Could not write config file")
+            return f'<div class="flash error">Could not save: {escape(str(e))}</div>'
 
     return '<div class="flash success">Settings saved.</div>'
 
@@ -158,7 +210,9 @@ def _get_model_options(
             cache[provider] = model_ids
             _save_model_cache(cache)
 
-    # Build <option> elements with current model pre-selected
+    # Build <option> elements with current model pre-selected. Both the model
+    # ids (from a remote API) and `current` (a query parameter) are escaped —
+    # neither is trusted enough to interpolate into markup raw.
     parts: list[str] = []
     found_current = False
     for mid in model_ids:
@@ -166,16 +220,18 @@ def _get_model_options(
         if mid == current:
             selected = " selected"
             found_current = True
-        parts.append(f'<option value="{mid}"{selected}>{mid}</option>')
+        safe = escape(mid)
+        parts.append(f'<option value="{safe}"{selected}>{safe}</option>')
     # If current model not in list but is set, add it at top
     if current and not found_current:
-        parts.insert(0, f'<option value="{current}" selected>{current}</option>')
+        safe = escape(current)
+        parts.insert(0, f'<option value="{safe}" selected>{safe}</option>')
     parts.append('<option value="__custom__">Custom...</option>')
     return "".join(parts)
 
 
 @settings_bp.route("/settings/models")
-def list_models():
+def list_models() -> str:
     """Return ``<option>`` elements for a provider's model ``<select>``.
 
     Query params:
@@ -192,49 +248,118 @@ def list_models():
     )
 
 
+def _template_names() -> list[str]:
+    """Return the sorted names of the packaged digest and prompt templates."""
+    return [t.name for t in sorted(TEMPLATES_DIR.glob("*.*"))]
+
+
+def _user_template_dir(config: AppConfig) -> Path:
+    """Return the directory holding user overrides of packaged templates."""
+    if config.template_dir:
+        return Path(config.template_dir).expanduser()
+    return DEFAULT_CONFIG_DIR / "templates"
+
+
+def _validate_template_name(name: str) -> str | None:
+    """Return *name* if it identifies a packaged template, else None.
+
+    Restricting writes to names that already ship with the package keeps the
+    editor from being used to create or overwrite arbitrary files, and rules
+    out path components like ``..`` outright.
+    """
+    return name if name in _template_names() else None
+
+
 @settings_bp.route("/settings/templates")
-def template_list():
-    templates = sorted(TEMPLATES_DIR.glob("*.*"))
-    names = [t.name for t in templates]
-    return render_template("fragments/template_editor.html", template_names=names, content="", current="")
+def template_list() -> str:
+    """Render the template editor with no template selected.
+
+    Returns:
+        The ``template_editor`` HTMX fragment.
+    """
+    return render_template(
+        "fragments/template_editor.html",
+        template_names=_template_names(), content="", current="",
+    )
 
 
 @settings_bp.route("/settings/template/<name>")
-def template_load(name: str):
+def template_load(name: str) -> str:
+    """Render the template editor loaded with a template's current content.
+
+    The user's override is preferred over the packaged default.
+
+    Args:
+        name: File name of a packaged template.
+
+    Returns:
+        The ``template_editor`` HTMX fragment.
+
+    Raises:
+        werkzeug.exceptions.NotFound: If *name* is not a packaged template.
+    """
     config: AppConfig = current_app.config["BMNEWS_CONFIG"]
-    user_dir = Path(config.template_dir).expanduser() if config.template_dir else None
+    if _validate_template_name(name) is None:
+        abort(404)
 
-    if user_dir and (user_dir / name).exists():
-        content = (user_dir / name).read_text(encoding="utf-8")
-    elif (TEMPLATES_DIR / name).exists():
-        content = (TEMPLATES_DIR / name).read_text(encoding="utf-8")
+    override = _user_template_dir(config) / name
+    if override.exists():
+        content = override.read_text(encoding="utf-8")
     else:
-        content = ""
+        content = (TEMPLATES_DIR / name).read_text(encoding="utf-8")
 
-    templates = sorted(TEMPLATES_DIR.glob("*.*"))
-    names = [t.name for t in templates]
     return render_template("fragments/template_editor.html",
-                           template_names=names, content=content, current=name)
+                           template_names=_template_names(),
+                           content=content, current=name)
 
 
 @settings_bp.route("/settings/template/<name>", methods=["POST"])
-def template_save(name: str):
-    config: AppConfig = current_app.config["BMNEWS_CONFIG"]
-    content = request.form.get("content", "")
+def template_save(name: str) -> str:
+    """Save an edited template as a user override.
 
-    user_dir = Path(config.template_dir).expanduser() if config.template_dir else Path("~/.bmnews/templates").expanduser()
-    user_dir.mkdir(parents=True, exist_ok=True)
-    (user_dir / name).write_text(content, encoding="utf-8")
+    Args:
+        name: File name of a packaged template.
+
+    Returns:
+        A flash-message HTML fragment.
+
+    Raises:
+        werkzeug.exceptions.NotFound: If *name* is not a packaged template.
+    """
+    config: AppConfig = current_app.config["BMNEWS_CONFIG"]
+    if _validate_template_name(name) is None:
+        abort(404)
+
+    content = request.form.get("content", "")
+    user_dir = _user_template_dir(config)
+    try:
+        user_dir.mkdir(parents=True, exist_ok=True)
+        (user_dir / name).write_text(content, encoding="utf-8")
+    except OSError as e:
+        logger.exception("Could not write template %s", name)
+        return f'<div class="flash error">Could not save: {escape(str(e))}</div>'
 
     return '<div class="flash success">Template saved.</div>'
 
 
 @settings_bp.route("/settings/template/<name>/reset", methods=["POST"])
-def template_reset(name: str):
-    config: AppConfig = current_app.config["BMNEWS_CONFIG"]
-    user_dir = Path(config.template_dir).expanduser() if config.template_dir else Path("~/.bmnews/templates").expanduser()
+def template_reset(name: str) -> str:
+    """Delete a user override so the packaged template takes effect again.
 
-    override = user_dir / name
+    Args:
+        name: File name of a packaged template.
+
+    Returns:
+        The ``template_editor`` fragment reloaded with the packaged content.
+
+    Raises:
+        werkzeug.exceptions.NotFound: If *name* is not a packaged template.
+    """
+    config: AppConfig = current_app.config["BMNEWS_CONFIG"]
+    if _validate_template_name(name) is None:
+        abort(404)
+
+    override = _user_template_dir(config) / name
     if override.exists():
         override.unlink()
 

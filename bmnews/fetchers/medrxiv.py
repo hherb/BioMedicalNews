@@ -11,27 +11,44 @@ from datetime import date, timedelta
 
 import httpx
 
+from bmnews.constants import HTTP_TIMEOUT_SECONDS, MAX_FETCH_PAGES, RXIV_PAGE_SIZE
 from bmnews.fetchers.base import FetchedPaper
 
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.medrxiv.org/details"
-PAGE_SIZE = 100
+PAGE_SIZE = RXIV_PAGE_SIZE
 
 
 def fetch_medrxiv(
     lookback_days: int = 7,
-    timeout: float = 30.0,
+    timeout: float = HTTP_TIMEOUT_SECONDS,
 ) -> list[FetchedPaper]:
-    """Fetch recent preprints from medRxiv."""
+    """Fetch recent preprints from medRxiv.
+
+    Args:
+        lookback_days: How many days back from today to fetch.
+        timeout: Per-request HTTP timeout in seconds.
+
+    Returns:
+        Normalized papers from medRxiv.
+    """
     return _fetch_rxiv("medrxiv", lookback_days, timeout)
 
 
 def fetch_biorxiv(
     lookback_days: int = 7,
-    timeout: float = 30.0,
+    timeout: float = HTTP_TIMEOUT_SECONDS,
 ) -> list[FetchedPaper]:
-    """Fetch recent preprints from bioRxiv."""
+    """Fetch recent preprints from bioRxiv.
+
+    Args:
+        lookback_days: How many days back from today to fetch.
+        timeout: Per-request HTTP timeout in seconds.
+
+    Returns:
+        Normalized papers from bioRxiv.
+    """
     return _fetch_rxiv("biorxiv", lookback_days, timeout)
 
 
@@ -40,7 +57,17 @@ def _fetch_rxiv(
     lookback_days: int,
     timeout: float,
 ) -> list[FetchedPaper]:
-    """Fetch from a medRxiv/bioRxiv API endpoint with pagination."""
+    """Fetch from a medRxiv/bioRxiv details endpoint, walking all pages.
+
+    Args:
+        server: Either ``"medrxiv"`` or ``"biorxiv"``.
+        lookback_days: How many days back from today to fetch.
+        timeout: Per-request HTTP timeout in seconds.
+
+    Returns:
+        Normalized papers. Returns whatever was collected so far if the API
+        errors partway through pagination.
+    """
     end = date.today()
     start = end - timedelta(days=lookback_days)
     start_str = start.isoformat()
@@ -50,7 +77,7 @@ def _fetch_rxiv(
     cursor = 0
 
     with httpx.Client(timeout=timeout) as client:
-        while True:
+        for _page in range(MAX_FETCH_PAGES):
             url = f"{BASE_URL}/{server}/{start_str}/{end_str}/{cursor}"
             logger.debug("Fetching %s", url)
 
@@ -61,7 +88,12 @@ def _fetch_rxiv(
                 logger.error("HTTP error fetching %s: %s", url, e)
                 break
 
-            data = resp.json()
+            try:
+                data = resp.json()
+            except ValueError:
+                logger.error("Malformed JSON from %s — stopping pagination", url)
+                break
+
             collection = data.get("collection", [])
             if not collection:
                 break
@@ -94,12 +126,20 @@ def _fetch_rxiv(
             total = 0
             for msg in messages:
                 if isinstance(msg, dict) and "total" in msg:
-                    total = int(msg["total"])
+                    try:
+                        total = int(msg["total"])
+                    except (TypeError, ValueError):
+                        total = 0
                     break
 
             cursor += PAGE_SIZE
             if cursor >= total:
                 break
+        else:
+            logger.warning(
+                "Stopped after %d %s pages — results may be truncated",
+                MAX_FETCH_PAGES, server,
+            )
 
     logger.info("Fetched %d papers from %s", len(papers), server)
     return papers

@@ -6,6 +6,10 @@
             <form hx-post="/settings/save" hx-target="#settings-flash" hx-swap="innerHTML">
                 <section class="settings-section">
                     <h2>Sources</h2>
+                    {# Unchecked checkboxes are simply absent from the POST, so
+                       this marker tells the server the section was submitted
+                       and an empty selection is deliberate. #}
+                    <input type="hidden" name="sources.enabled_submitted" value="1">
                     {% for src in available_sources %}
                     <label><input type="checkbox" name="sources.enabled" value="{{ src.name }}"
                            {% if src.name in config.sources.enabled %}checked{% endif %}> {{ src.display_name }}</label>

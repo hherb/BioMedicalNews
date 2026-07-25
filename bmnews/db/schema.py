@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from bmlib.db import connect_sqlite, connect_postgresql, run_migrations
+from bmlib.db import connect_postgresql, connect_sqlite, run_migrations
 
 from bmnews.db.migrations import MIGRATIONS
 
@@ -28,7 +28,7 @@ def init_db(conn: Any) -> None:
         logger.info("Database schema initialized (%d migration(s) applied)", applied)
 
 
-def open_db(config) -> Any:
+def open_db(config: Any) -> Any:
     """Open a database connection from an AppConfig's database section.
 
     Returns a DB-API connection (sqlite3 or psycopg2).

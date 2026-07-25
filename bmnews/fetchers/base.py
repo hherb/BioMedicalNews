@@ -20,4 +20,5 @@ class FetchedPaper:
 
     @property
     def has_abstract(self) -> bool:
+        """Whether this paper has a non-empty abstract to score."""
         return bool(self.abstract and self.abstract.strip())

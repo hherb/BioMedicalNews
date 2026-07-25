@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import logging
 import sys
+from contextlib import closing
 
 import click
 
 from bmnews import __version__
 from bmnews.config import load_config, write_default_config
+from bmnews.constants import CLI_TITLE_TRUNCATE, DEFAULT_PAGE_SIZE
 
 
 @click.group()
@@ -22,7 +24,9 @@ def main(ctx: click.Context, config_path: str | None, verbose: bool) -> None:
     config = load_config(config_path)
     ctx.obj["config"] = config
 
-    level = logging.DEBUG if verbose else getattr(logging, config.log_level, logging.INFO)
+    # getattr on a lowercase name silently falls back to INFO, so normalise.
+    configured = getattr(logging, str(config.log_level).upper(), logging.INFO)
+    level = logging.DEBUG if verbose else configured
     logging.basicConfig(
         level=level,
         format="%(asctime)s %(name)s %(levelname)s: %(message)s",
@@ -95,9 +99,8 @@ def init(ctx: click.Context, config_path: str | None) -> None:
 
     # Init database
     config = load_config(path)
-    conn = open_db(config)
-    init_db(conn)
-    conn.close()
+    with closing(open_db(config)) as conn:
+        init_db(conn)
     click.echo("Database initialized.")
 
 
@@ -106,49 +109,41 @@ def init(ctx: click.Context, config_path: str | None) -> None:
 @click.pass_context
 def gui(ctx: click.Context, port: int | None) -> None:
     """Launch the desktop GUI."""
+    # launch() imports pywebview lazily, so the missing-dependency case only
+    # surfaces once it runs — importing the module alone would not catch it.
     try:
         from bmnews.gui.launcher import launch
-    except ImportError:
-        click.echo("GUI dependencies not installed. Run: uv pip install bmnews[gui]")
-        sys.exit(1)
 
-    launch(ctx.obj["config"], port=port)
+        launch(ctx.obj["config"], port=port)
+    except ImportError as e:
+        click.echo(f"GUI dependencies not installed ({e}).")
+        click.echo("Run: uv pip install 'bmnews[gui]'")
+        sys.exit(1)
 
 
 @main.command()
 @click.argument("query")
+@click.option("--limit", default=DEFAULT_PAGE_SIZE, type=int, show_default=True,
+              help="Maximum number of results to show.")
 @click.pass_context
-def search(ctx: click.Context, query: str) -> None:
+def search(ctx: click.Context, query: str, limit: int) -> None:
     """Search stored papers by keyword."""
-    from bmlib.db import fetch_all
+    from bmnews.db.operations import get_papers_filtered
     from bmnews.db.schema import open_db
 
     config = ctx.obj["config"]
-    conn = open_db(config)
+    with closing(open_db(config)) as conn:
+        papers = get_papers_filtered(conn, search=query, limit=limit)
 
-    ph = "?" if "sqlite3" in type(conn).__module__ else "%s"
-    like_param = f"%{query}%"
-    rows = fetch_all(
-        conn,
-        f"""
-        SELECT p.doi, p.title, p.published_date, s.combined_score
-        FROM papers p
-        LEFT JOIN scores s ON s.paper_id = p.id
-        WHERE p.title LIKE {ph} OR p.abstract LIKE {ph}
-        ORDER BY s.combined_score DESC NULLS LAST
-        LIMIT 20
-        """,
-        (like_param, like_param),
-    )
-
-    if not rows:
+    if not papers:
         click.echo("No papers found.")
-    else:
-        for row in rows:
-            score_str = f" [{row['combined_score']:.2f}]" if row["combined_score"] else ""
-            click.echo(f"  {row['doi']}{score_str} — {row['title'][:80]}")
+        return
 
-    conn.close()
+    for paper in papers:
+        score = paper.get("combined_score")
+        score_str = f" [{score:.2f}]" if score is not None else ""
+        title = (paper.get("title") or "")[:CLI_TITLE_TRUNCATE]
+        click.echo(f"  {paper.get('doi', '')}{score_str} — {title}")
 
 
 if __name__ == "__main__":

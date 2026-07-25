@@ -2,15 +2,19 @@
     {% include "fragments/paper_card.html" %}
 {% endfor %}
 
-{% if papers|length == 0 %}
+{% if papers|length == 0 and not append %}
     <div class="empty-state">
         <p>No papers found.</p>
     </div>
 {% endif %}
 
-{% if papers|length >= limit and not append %}
+{# A full page implies there may be more. The button must also be rendered on
+   appended pages, otherwise pagination stops dead after the first click.
+   The active search term has to be carried along too, or "load more" would
+   silently switch back to unfiltered results. #}
+{% if papers|length >= limit %}
     <button class="load-more"
-            hx-get="/papers/more?offset={{ offset + limit }}&sort={{ sort }}&source={{ source }}&tier={{ tier }}&design={{ design }}"
+            hx-get="/papers/more?offset={{ offset + limit }}&limit={{ limit }}&sort={{ sort|urlencode }}&source={{ source|urlencode }}&tier={{ tier|urlencode }}&design={{ design|urlencode }}&q={{ search|default('', true)|urlencode }}"
             hx-target="this"
             hx-swap="outerHTML">
         Load more
