@@ -1,82 +1,91 @@
 # Handover — migrating storage onto `bmlib.publications`
 
-Status after the bmlib audit (PR #4): every *fetch* path now goes through bmlib's
-source registry, but bmnews still stores what it fetches in its own `papers`
-table. bmlib ships a complete alternative — `bmlib.publications.sync` /
-`storage` / `schema` — that bmnews duplicates in a simpler form
-(`pipeline._fetch_via_registry()` + `pipeline.run_store()`).
+**Status: done.** bmnews no longer has a `papers` table. Fetching and storing
+are one `bmlib.publications.sync()` call, papers live in bmlib's
+`publications` table, and the bmnews-owned tables (`scores`, `paper_tags`,
+`digest_papers`, plus `digests` behind them) point at it.
 
-This is the plan for closing that gap. It is a data migration, not a
-refactor, so it is deliberately not part of PR #4.
+What follows records how the plan was resolved, because the decisions are not
+recoverable from the diff. The one section still open — `bmlib.transparency` —
+is at the bottom; it was always independent of this migration.
 
-## What bmlib gives us that bmnews lacks
+## The blocker: `bmlib.publications` was SQLite-only
+
+`storage.py` hardcoded `?` placeholders, `schema.py` used `INTEGER PRIMARY KEY
+AUTOINCREMENT`, and bmnews supports PostgreSQL. Of the three options, the
+preferred one was taken: **backend-aware SQL was upstreamed into bmlib**
+(hherb/bmlib#28) rather than dropping PostgreSQL from bmnews or abandoning the
+migration.
+
+Testing PostgreSQL properly for the first time turned up three bugs in bmlib
+that this migration would otherwise have inherited:
+
+- `fetch_scalar()` always returned `None` there — psycopg2's `RealDictRow` is
+  keyed by column name, so `row[0]` raised `KeyError` into a silent fallback.
+- `transaction()` did not nest, so `sync()`'s one-commit-per-day batching
+  degraded to one commit per record and a failed day could not roll back.
+- `create_tables()` committed mid-migration, so a migration that failed
+  part-way left its DDL applied.
+
+The nesting fix has a trap worth remembering: nesting is counted by bmlib, not
+read from psycopg2's transaction status. psycopg2 opens a transaction on the
+first statement of *any* kind — a bare `SELECT` leaves the connection
+`INTRANS` — so status-based detection would classify ordinary blocks as nested
+and silently stop committing every write.
+
+**bmnews requires the bmlib change.** `pyproject.toml` tracks bmlib's `main`,
+so bmlib#28 has to land before this branch works from a clean install.
+
+## What the migration bought
 
 - **`download_days` resume tracking** — a day that failed is recorded and
-  re-fetched next run. bmnews currently refetches the whole lookback window
-  every time and silently loses a failed day.
+  re-fetched next run. bmnews used to refetch the whole lookback window every
+  time and silently lose a failed day.
 - **Identity merging** — `store_publication()` normalises DOIs and PMIDs,
   dedupes across sources, and consolidates a split identity (the same work
   arriving with a DOI from one source and a PMID from another).
-- **PMID-only records** — bmnews's `papers.doi` is `NOT NULL UNIQUE`, so
-  `run_store()` *drops* any paper without a DOI. bmlib keys on either.
+- **PMID-only records** — bmnews's `papers.doi` was `NOT NULL UNIQUE`, so
+  `run_store()` *dropped* any paper without a DOI. bmlib keys on either.
 - **One transaction per day**, with the write lock held only for the store
   loop rather than across network I/O.
 
-## Blocker to resolve first
+## How the schema was reconciled
 
-**`bmlib.publications` is SQLite-only.** `storage.py` hardcodes `?`
-placeholders (24 of them) and `schema.py` uses `INTEGER PRIMARY KEY
-AUTOINCREMENT` plus partial indexes. bmnews supports PostgreSQL
-(`config.database.backend`). Pick one before starting:
+| bmnews `papers` | Where it went |
+|---|---|
+| `authors` (`"A; B"` string) | `publications.authors` (JSON list); templates render `authors\|join('; ')` |
+| `categories` (`"a; b"` string) | `publications.keywords` (JSON list) |
+| `metadata_json.pub_type` | `publications.publication_types` — still feeds Tier-1 quality classification |
+| `metadata_json.journal` | `publications.journal` |
+| `source` (single) | `publications.sources` (JSON list) + `first_seen_source`; the source filter unnests the array |
+| `url` | Derived from the identifiers in `operations.paper_url()` |
+| `pmcid` | Upstreamed — bmlib's `FetchedRecord.pmc_id` was being dropped on store, so a `pmcid` column was added there rather than kept bmnews-side |
+| `fulltext_html` / `fulltext_source` | `paper_extras` (see below). Fetcher-reported URLs go to bmlib's `fulltext_sources` table |
+| `metadata_json.cited_by` | `paper_extras.metadata_json` |
 
-1. Upstream backend-aware SQL into bmlib (mirrors what `bmnews/db/backend.py`
-   already does) — preferred, keeps both projects honest.
-2. Drop the PostgreSQL backend from bmnews.
-3. Keep bmnews's own storage layer and close this handover as "won't do".
+`paper_extras` is bmnews's side table for exactly two things bmlib has no
+column for: the source `extras` blob, and the GUI's cached full-text body.
+bmlib's `fulltext_sources` records *where* full text lives, not the fetched
+body, so it does not replace the cache.
 
-## Schema reconciliation
+Two shapes deliberately did **not** change: `scores.paper_id` and friends keep
+that name even though they now reference `publications(id)` — "paper" is
+bmnews's noun, and the GUI routes are `/papers/<id>` — and `_row_to_paper()`
+is the single place a row becomes a paper dict, so nothing downstream re-parses
+JSON.
 
-`publications` covers most of `papers`, but not all of it:
+## Merges, and what happens to a score
 
-| bmnews `papers` | bmlib `publications` | Action |
-|---|---|---|
-| `authors` (`"A; B"` string) | `authors` (JSON list) | Convert on migrate; update templates |
-| `categories` (`"a; b"` string) | `keywords` (JSON list) | Convert; `_record_categories()` becomes unnecessary |
-| `metadata_json.pub_type` | `publication_types` (JSON list) | Direct move — feeds Tier-1 quality classification |
-| `metadata_json.journal` | `journal` | Direct move |
-| `source` (single) | `sources` (list) + `first_seen_source` | Filter queries must match inside a list |
-| `url` | — | Derive from DOI at render time |
-| `pmcid` | — | **No column.** Needed for full-text retrieval — either upstream it or keep a bmnews-side side table |
-| `fulltext_html` / `fulltext_source` | `fulltext_sources` table + `bmlib.fulltext.FullTextCache` | Cache parsed HTML on disk instead of in a column |
-| `metadata_json.cited_by` | — | Lost unless kept in a side table |
+`store_publication()` can collapse two `papers` rows into one publication.
+`scores` is `UNIQUE(paper_id)`, so migration 4 keeps the **highest
+`combined_score`** — that is the one the digest showed and the user acted on.
+`paper_tags` and `digest_papers` union. `tests/test_db.py`'s
+`TestMigrationToPublications` starts from a populated v3 database and asserts
+no score, tag or digest link is orphaned.
 
-## Steps
-
-1. **Resolve the PostgreSQL blocker above.** Nothing else starts until this
-   is decided.
-2. **Migration 4** — `ensure_schema(conn)`, then copy every `papers` row
-   through `store_publication()` so bmlib's own dedupe decides identity.
-   Build a `papers.id → publications.id` map as you go.
-3. **Handle merges.** `store_publication()` can collapse two `papers` rows
-   into one publication. `scores` is `UNIQUE(paper_id)`, so decide a winner
-   (suggestion: highest `combined_score`, it is the one the user acted on).
-   `paper_tags` and `digest_papers` union cleanly.
-4. **Repoint the bmnews-owned tables** — `scores`, `digests`, `digest_papers`,
-   `paper_tags` all FK to `papers(id)`; remap via the id map, then drop
-   `papers`. These four tables stay bmnews's own; bmlib has no opinion on
-   scoring or digests.
-5. **Replace fetch + store with `sync()`.** `pipeline.run_fetch()` and
-   `run_store()` collapse into one `sync(conn, sources=..., date_from=...,
-   date_to=..., source_configs=..., on_progress=...)` call. Map
-   `SyncProgress` onto the existing `on_progress(str)` callback so the GUI
-   status bar keeps working. `FetchedPaper` and `_record_to_fetched_paper()`
-   can then go.
-6. **Rewrite the queries** in `db/operations.py` against `publications`.
-   The source filter is the awkward one — `sources` is a JSON list, so
-   `p.source = ?` becomes a `json_each` join.
-7. **Tests.** `tests/test_db.py` and `tests/test_pipeline.py` carry the
-   detail. Add a migration test that starts from a populated v3 database and
-   asserts no score, tag or digest link is orphaned.
+A `papers` row with neither a DOI nor a PMID cannot be represented (bmlib keys
+on one or the other) and is logged and left behind. `papers.doi` was
+`NOT NULL`, so this only catches rows whose DOI was stored blank.
 
 ## Also unused
 

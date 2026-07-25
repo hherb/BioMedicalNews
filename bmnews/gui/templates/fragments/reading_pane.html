@@ -2,15 +2,17 @@
     <h1 class="paper-title">{{ paper.title }}</h1>
 
     <div class="paper-meta">
-        <span class="authors">{{ paper.authors }}</span>
+        <span class="authors">{{ paper.authors|join('; ') }}</span>
         <span class="sep">&middot;</span>
-        <span class="date">{{ paper.published_date }}</span>
+        <span class="date">{{ paper.publication_date }}</span>
         <span class="sep">&middot;</span>
         {% if paper.journal %}
         <span class="journal-name">{{ paper.journal }}</span>
         <span class="sep">&middot;</span>
         {% endif %}
-        <span class="source-badge source-{{ paper.source }}">{{ paper.source }}</span>
+        {% for source in paper.sources %}
+        <span class="source-badge source-{{ source }}">{{ source }}</span>
+        {% endfor %}
     </div>
 
     {% if paper.relevance_score is not none %}

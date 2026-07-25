@@ -7,7 +7,7 @@ from bmlib.db import connect_sqlite
 from bmlib.fulltext import FullTextResult
 
 from bmnews.config import AppConfig
-from bmnews.db.operations import save_score, upsert_paper
+from bmnews.db.operations import save_score, store_paper
 from bmnews.db.schema import init_db
 from bmnews.gui.app import create_app
 
@@ -20,10 +20,10 @@ def app_with_paper():
     app = create_app(config, conn)
     app.config["TESTING"] = True
 
-    pid = upsert_paper(
+    pid = store_paper(
         conn, doi="10.1/integ", title="Integration Test Paper",
-        authors="Smith J, Doe A", abstract="Background: Test. Methods: Test.",
-        source="europepmc", metadata_json='{"pmid":"12345","pmcid":"PMC999"}',
+        authors=["Smith J", "Doe A"], abstract="Background: Test. Methods: Test.",
+        source="europepmc", pmid="12345", pmcid="PMC999",
     )
     save_score(conn, paper_id=pid, combined_score=0.8, relevance_score=0.9)
 

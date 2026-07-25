@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bmnews"
-version = "0.2.1"
+version = "0.3.0"
 description = "Biomedical news reader — fetches, scores, and delivers biomedical preprints matching your research interests"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
@@ -23,6 +23,9 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Medical Science Apps.",
 ]
 dependencies = [
+    # Needs bmlib with backend-aware bmlib.publications (hherb/bmlib#28): the
+    # publications schema, Publication.pmcid, and transaction() nesting on
+    # PostgreSQL. Tracks main, so that PR must land first.
     "bmlib @ git+https://github.com/hherb/bmlib.git",
     "httpx>=0.25",
     "click>=8.0",

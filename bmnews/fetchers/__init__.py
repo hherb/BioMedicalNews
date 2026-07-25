@@ -16,7 +16,6 @@ from __future__ import annotations
 from bmlib.publications import register_source
 from bmlib.publications.models import SourceDescriptor, SourceParam
 
-from bmnews.fetchers.base import FetchedPaper
 from bmnews.fetchers.europepmc import SOURCE_NAME as EUROPEPMC
 from bmnews.fetchers.europepmc import fetch_europepmc
 
@@ -47,7 +46,6 @@ register_local_sources()
 __all__ = [
     "EUROPEPMC",
     "EUROPEPMC_DESCRIPTOR",
-    "FetchedPaper",
     "fetch_europepmc",
     "register_local_sources",
 ]

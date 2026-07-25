@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**bmnews** (v0.2.1) is a biomedical news reader that fetches preprints from medRxiv, bioRxiv, Europe PMC, PubMed, and OpenAlex, scores them for relevance and quality using LLMs, and delivers curated digests via email, file, stdout, or a desktop GUI. Built on [bmlib](https://github.com/hherb/bmlib) for LLM abstraction, database utilities, quality assessment, fetcher registry, fulltext retrieval, and template rendering.
+**bmnews** (v0.3.0) is a biomedical news reader that fetches preprints from medRxiv, bioRxiv, Europe PMC, PubMed, and OpenAlex, scores them for relevance and quality using LLMs, and delivers curated digests via email, file, stdout, or a desktop GUI. Built on [bmlib](https://github.com/hherb/bmlib) for LLM abstraction, database utilities, quality assessment, fetcher registry, fulltext retrieval, and template rendering.
 
 ## Development Commands
 
@@ -46,32 +46,30 @@ bmnews gui --port 8080          # launch GUI on specific port
 
 ### Pipeline
 
-Linear pipeline with four independent stages, each runnable individually via CLI or composed with `bmnews run`:
+Linear pipeline with three independent stages, each runnable individually via CLI or composed with `bmnews run`:
 
 ```
-FETCH (httpx) → STORE (bmlib.db) → SCORE (bmlib.llm) → DIGEST (Jinja2 + SMTP)
+SYNC (bmlib.publications.sync) → SCORE (bmlib.llm) → DIGEST (Jinja2 + SMTP)
 ```
 
-All stages are **incremental**: fetch upserts (idempotent), score skips already-scored papers, digest only includes papers not yet in a prior digest.
+All stages are **incremental**: sync records each fetched day in `download_days` and re-fetches only the days that are missing or failed, score skips already-scored papers, digest only includes papers not yet in a prior digest.
 
 ### Directory Structure
 
 ```
 bmnews/
-├── __init__.py          # Package version (0.2.1)
+├── __init__.py          # Package version (0.3.0)
 ├── cli.py               # Click CLI commands (run, fetch, score, digest, init, gui, search)
 ├── config.py            # TOML config loading (AppConfig + nested section dataclasses)
 ├── constants.py         # Fixed application constants (scoring weights, page sizes, timeouts)
-├── metadata.py          # Defensive decoding of the papers.metadata_json blob
-├── pipeline.py          # Orchestration: fetch → store → score → digest (progress callbacks)
+├── metadata.py          # Defensive decoding of the paper_extras.metadata_json blob
+├── pipeline.py          # Orchestration: sync → score → digest (progress callbacks)
 ├── db/
 │   ├── schema.py        # Database connection factory (open_db, init_db)
-│   ├── backend.py       # SQLite vs PostgreSQL detection (is_sqlite, placeholder)
-│   ├── operations.py    # Pure-function CRUD (all SQL lives here, ~590 lines)
-│   └── migrations.py    # 3 versioned migrations (papers → paper_tags → fulltext columns)
+│   ├── operations.py    # Pure-function CRUD (all SQL lives here)
+│   └── migrations.py    # 4 versioned migrations (the 4th moves storage onto bmlib)
 ├── fetchers/
 │   ├── __init__.py      # Registers bmnews-supplied sources with bmlib's registry
-│   ├── base.py          # FetchedPaper dataclass (normalized paper representation)
 │   └── europepmc.py     # Europe PMC fetcher (bmlib registry calling convention)
 ├── scoring/
 │   ├── scorer.py        # Orchestrates relevance (LLM) + quality (bmlib.quality) scoring
@@ -112,7 +110,8 @@ bmlib_patch/                   # bmlib source archive and patch files
 cli.py → pipeline.py → config.py (AppConfig dataclass)
                       → db/schema.py (open_db, init_db, migrations)
                       → db/operations.py (pure-function CRUD)
-                      → bmlib.publications (registry: medrxiv, biorxiv, pubmed, openalex
+                      → bmlib.publications.sync (fetch + store, one call; registry:
+                                            medrxiv, biorxiv, pubmed, openalex
                                             + europepmc, registered by bmnews.fetchers)
                       → scoring/scorer.py → scoring/relevance_agent.py → bmlib.agents.BaseAgent
                                           → bmlib.quality.metadata_filter
@@ -138,9 +137,9 @@ bmlib is a companion library providing shared infrastructure. Key modules used:
 | `bmlib.templates` | `TemplateEngine` with user-dir override (`~/.bmnews/templates/`) → package `templates/` fallback |
 | `bmlib.quality` | `QualityManager`, `QualityFilter`, `QualityAssessment`, `StudyDesign`, `QualityTier`, `DESIGN_TO_TIER`, `DESIGN_TO_SCORE` — the evidence hierarchy and its scores live here, not in `bmnews.constants` |
 | `bmlib.fulltext` | `FullTextService` (3-tier: Europe PMC → Unpaywall → DOI), JATS XML parser, `FullTextError` |
-| `bmlib.publications` | `register_source()`, `list_sources()`, `get_fetcher()`, `source_names()`, `FetchedRecord`, `FetchResult`, `SourceDescriptor` — the registry every source goes through |
+| `bmlib.publications` | `sync()` — the whole fetch-and-store cycle; `ensure_schema()`, `store_publication()`, `get_publication_by_doi/pmid()` — the `publications` table bmnews's papers live in; `register_source()`, `source_names()`, `FetchedRecord`, `SyncProgress`, `SyncReport`, `SourceDescriptor` — the registry every source goes through |
 
-**Not currently used** (see `docs/plans/` before adopting): `bmlib.publications.sync` / `storage` / `schema` (bmnews keeps its own `papers` table, so adopting these needs a data migration) and `bmlib.transparency` (the `[transparency]` config section and extra are declared but unwired).
+**Not currently used** (see `docs/plans/` before adopting): `bmlib.transparency` (the `[transparency]` config section and extra are declared but unwired).
 
 ### Source Fetching
 
@@ -149,26 +148,36 @@ bmlib is a companion library providing shared infrastructure. Key modules used:
 - medRxiv, bioRxiv, PubMed and OpenAlex ship with bmlib.
 - Europe PMC is implemented in `bmnews/fetchers/europepmc.py` and registered into the same registry by `bmnews/fetchers/__init__.py` via `bmlib.publications.register_source()`. It follows the registry calling convention exactly: `fetcher(client, target_date, *, on_record, on_progress=None, **config)`, emitting `FetchedRecord` and returning a `FetchResult`.
 
-`pipeline._fetch_via_registry()` walks the lookback window one day at a time for any source, converts each `FetchedRecord` to a `FetchedPaper` in `_record_to_fetched_paper()`, and logs any `FetchResult` that did not complete.
+`pipeline.run_sync()` hands the whole cycle to `bmlib.publications.sync()`: it walks the lookback window, skips days already recorded as complete in `download_days`, stores each day in one transaction, and deduplicates records by DOI *and* PMID. `SyncProgress` is rendered down to bmnews's `on_progress(str)` callback by `_progress_reporter()` so the GUI status bar keeps working.
 
 Sources are configured via `config.sources.enabled` (e.g. `["medrxiv", "europepmc", "biorxiv", "pubmed", "openalex"]`); per-source options in `config.sources.source_options` are unpacked as keyword arguments to the fetcher (e.g. `query` for Europe PMC, `api_key` for PubMed).
 
-When adding fields to `FetchedRecord` handling, remember `metadata["pub_type"]` feeds bmlib's free Tier-1 quality classification — dropping it silently forces every paper onto the LLM classifier.
+`FetchedRecord.publication_types` feeds bmlib's free Tier-1 quality classification — dropping it silently forces every paper onto the LLM classifier. It reaches the scorer through the `publications.publication_types` column, via `_extract_pub_types()`.
 
 ### Database
 
-SQLite (default) or PostgreSQL. 5 tables with 3 versioned migrations in `db/migrations.py`:
-- **papers** — fetched paper metadata (DOI, title, authors, abstract, pmid, pmcid, fulltext_html, fulltext_source)
+SQLite (default) or PostgreSQL. Papers live in **bmlib's** tables; bmnews owns everything about scoring and delivery.
+
+Owned by bmlib (`bmlib.publications.ensure_schema`):
+- **publications** — the paper record (doi, pmid, pmcid, title, abstract, authors/keywords/publication_types/sources as JSON arrays, journal, is_open_access, license)
+- **fulltext_sources** — full-text URLs a fetcher reported for a publication
+- **download_days** — per-source, per-day fetch status, which is what makes sync resumable
+
+Owned by bmnews:
 - **scores** — scoring results (relevance, quality, combined scores, summary, study_design, quality_tier, assessment JSON)
 - **digests** / **digest_papers** — digest delivery tracking (many-to-many)
 - **paper_tags** — per-paper interest tags matched during scoring
+- **paper_extras** — the leftovers bmlib has no column for: the source `extras` blob (`cited_by`) and the GUI's cached full text. One publication can be fed by several sources, so `save_paper_metadata()` merges key by key rather than replacing the blob (a later value wins; a key it says nothing about survives).
 
-Migrations:
+`scores`, `paper_tags` and `digest_papers` keep a column named `paper_id`; it references `publications(id)`. "Paper" stays bmnews's noun for the thing — the GUI routes are `/papers/<id>`.
+
+Migrations in `db/migrations.py`:
 1. `initial_schema` — papers, scores, digests, digest_papers tables
 2. `add_paper_tags` — paper_tags table for interest matching
 3. `add_fulltext_columns` — adds pmid, pmcid, fulltext_html, fulltext_source to papers; backfills pmid/pmcid from metadata_json for europepmc papers
+4. `migrate_to_publications` — replays every `papers` row through `store_publication()` so bmlib's dedupe decides identity, repoints the three bmnews-owned tables that reference a paper (`scores`, `paper_tags`, `digest_papers` — `digests` itself carries no paper reference) at the resulting ids, and drops `papers`. Where two rows collapse into one publication, the surviving score is the highest `combined_score` (the one the digest showed); tags and digest links are unioned, and metadata merges key by key with the later row winning. **This migration is destructive and one-way**: a row that can be keyed on neither DOI nor PMID cannot be represented, so it is logged at ERROR and written to `~/.bmnews/stranded-papers.json` (`constants.STRANDED_PAPERS_PATH`) before `papers` is dropped.
 
-Backend-aware SQL: `_placeholder(conn)` returns `?` (SQLite) or `%s` (PostgreSQL). Schema DDL maintained as separate SQLite and PostgreSQL strings per migration.
+Backend-aware SQL: `placeholder(conn)` (from `bmlib.db`) returns `?` (SQLite) or `%s` (PostgreSQL). Schema DDL maintained as separate SQLite and PostgreSQL strings per migration. The `sources` filter in `get_papers_filtered()` unnests a JSON array, so it is backend-specific too — `json_each` on SQLite, `json_array_elements_text` on PostgreSQL.
 
 ### Configuration
 
@@ -209,7 +218,7 @@ Desktop app: pywebview (native window) + Flask (HTTP backend) + HTMX (frontend i
 - **HTMX fragment-based updates** — paper list pagination, paper detail, settings, and pipeline status polling (500ms interval) use partial HTML responses
 - **Async pipeline execution** — runs in daemon thread with `on_progress` and `on_scored` callbacks; OOB (out-of-band) HTMX swaps update individual paper cards and refresh the list
 - **Auto-resume** — on app startup, automatically scores any unscored papers
-- **Fulltext retrieval** — on-demand via `bmlib.fulltext.FullTextService` (Europe PMC → Unpaywall → DOI); JATS XML parsed to HTML; cached in `papers.fulltext_html`
+- **Fulltext retrieval** — on-demand via `bmlib.fulltext.FullTextService`, seeded with the URLs sync recorded in `fulltext_sources` and falling back to Europe PMC → Unpaywall → DOI; JATS XML parsed to HTML; cached in `paper_extras.fulltext_html`
 - **Dynamic model selector** — auto-populated from provider APIs with local caching
 - **Window geometry persistence** — saves/restores position and size in `~/.bmnews/window_state.json`
 - **Sorting/filtering** — by date, score, source, quality tier, study design
@@ -242,7 +251,8 @@ Desktop app: pywebview (native window) + Flask (HTTP backend) + HTMX (frontend i
 - **Module-level loggers** — `logger = logging.getLogger(__name__)`.
 - **No magic numbers** — fixed behavioural values live in `bmnews/constants.py`; anything a user should tune belongs in `bmnews/config.py`.
 - **Close connections with `contextlib.closing`** — `with closing(open_db(config)) as conn:`, so a raised exception can't leak the handle.
-- **Never rely on `cursor.lastrowid` after an upsert** — SQLite leaves it pointing at the last row actually *inserted* when `ON CONFLICT` takes the UPDATE path. Look the row up by its natural key instead (see `upsert_paper`).
+- **Never rely on `cursor.lastrowid` after an upsert** — SQLite leaves it pointing at the last row actually *inserted* when `ON CONFLICT` takes the UPDATE path. Look the row up by its natural key instead (see `store_paper`, which re-reads by normalised DOI/PMID).
+- **Decode a paper row exactly once** — `_row_to_paper()` is the only place the JSON array columns become lists and the outbound `url` is derived. Callers, templates and the scorer all take real lists; nothing re-parses JSON downstream.
 - **AGPL-3.0 license**.
 - **Commit messages** — conventional style: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`.
 
@@ -259,13 +269,13 @@ Test files:
 | File | Coverage |
 |---|---|
 | `test_config.py` | Config loading, TOML parsing, backward-compat defaults |
-| `test_db.py` | All database operations, migrations, upsert, filtering, tagging, digests, fulltext, digest selection filters |
+| `test_db.py` | All database operations, migrations, storing/dedup, filtering, tagging, digests, paper extras, digest selection filters, and the v3 → v4 data migration |
 | `test_digest.py` | HTML/text digest rendering |
 | `test_fetchers.py` | Europe PMC fetcher + its registration in bmlib's source registry |
 | `test_fulltext_integration.py` | Fulltext service integration (Europe PMC/Unpaywall/DOI) |
 | `test_gui_app.py` | Flask blueprints, HTMX responses, paper queries, pipeline status |
 | `test_gui_helpers.py` | Abstract HTML formatting |
-| `test_pipeline.py` | Show-cached flag, CLI integration, paper storage with PMID/PMCID, `FetchedRecord` → `FetchedPaper` conversion, source dispatch |
+| `test_pipeline.py` | Show-cached flag, CLI integration, `run_sync` storage via bmlib (identifiers, publication types, full-text sources, extras), source dispatch and per-source config |
 | `test_scoring.py` | Quality tier mapping, publication type extraction, tier floors, quality toggle, generation settings |
 
 ## Adding New Functionality
@@ -274,7 +284,7 @@ Test files:
 The preferred path is to add the fetcher to bmlib's registry. Once registered there, bmnews automatically picks it up — just add the source name to `config.sources.enabled`.
 
 ### New fetcher source (local to bmnews)
-Follow the Europe PMC pattern — do **not** add a second dispatch path in `pipeline.run_fetch()`:
+Follow the Europe PMC pattern — do **not** add a second dispatch path in `pipeline.run_sync()`:
 1. Create `bmnews/fetchers/newsource.py` with a function matching the registry convention: `fetcher(client, target_date, *, on_record, on_progress=None, **config)`, emitting `FetchedRecord` and returning a `FetchResult`
 2. Add a `SourceDescriptor` and a `register_source(...)` call to `register_local_sources()` in `bmnews/fetchers/__init__.py`
 3. Add tests with a fake HTTP client in `tests/test_fetchers.py`

@@ -1,7 +1,7 @@
-"""Helpers for the ``papers.metadata_json`` blob.
+"""Helpers for the ``paper_extras.metadata_json`` blob.
 
-Source-specific fields that have no dedicated column (publication types,
-journal name, full-text source URLs, …) are stored as a JSON object.  Decoding
+The fields a source reports that bmlib's ``publications`` schema has no column
+for — Europe PMC's ``cited_by``, say — are stored as a JSON object.  Decoding
 it defensively belongs in one place: the column holds data written by earlier
 versions of the app and by every fetcher, so a malformed or unexpectedly
 shaped value must degrade to "no metadata" rather than raise.

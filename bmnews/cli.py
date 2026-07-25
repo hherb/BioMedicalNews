@@ -50,18 +50,23 @@ def run(ctx: click.Context, days: int | None, show_cached: bool) -> None:
 @click.pass_context
 def fetch(ctx: click.Context, days: int | None) -> None:
     """Fetch papers from configured sources."""
-    from bmnews.pipeline import run_fetch, run_store
+    from bmnews.pipeline import run_sync
 
     config = ctx.obj["config"]
     if days is not None:
         config.sources.lookback_days = days
 
-    papers = run_fetch(config)
-    if papers:
-        stored = run_store(config, papers)
-        click.echo(f"Fetched and stored {stored} papers.")
+    report = run_sync(config)
+    stored = report.records_added + report.records_merged
+    if stored:
+        click.echo(
+            f"Fetched and stored {stored} papers "
+            f"({report.records_added} new, {report.records_merged} merged)."
+        )
     else:
         click.echo("No papers fetched.")
+    for error in report.errors:
+        click.echo(f"  warning: {error}", err=True)
 
 
 @main.command()

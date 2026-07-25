@@ -5,17 +5,16 @@ from __future__ import annotations
 import logging
 
 from bmlib.fulltext import FullTextError, FullTextService
-from bmlib.fulltext.models import FullTextSourceEntry
 from flask import Blueprint, abort, current_app, render_template, request
 from markupsafe import escape
 
 from bmnews.constants import DEFAULT_CONTACT_EMAIL, DEFAULT_PAGE_SIZE
 from bmnews.db.operations import (
+    get_fulltext_sources,
     get_paper_with_score,
     get_papers_filtered,
     save_fulltext,
 )
-from bmnews.metadata import parse_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +100,6 @@ def paper_detail(paper_id: int) -> str:
     paper = get_paper_with_score(conn, paper_id)
     if paper is None:
         abort(404)
-    _enrich_paper_metadata(paper)
     return render_template("fragments/reading_pane.html", paper=paper)
 
 
@@ -202,20 +200,10 @@ def paper_fulltext(paper_id: int) -> str:
             return _link_fragment(source, paper["fulltext_html"])
         return render_template("fragments/fulltext_content.html", paper=paper)
 
-    # Parse metadata for identifiers and source-provided fulltext URLs.
-    # Bad JSON in the DB must not turn into a 500.
-    meta = parse_metadata(paper.get("metadata_json"))
-    pmc_id = paper.get("pmcid") or meta.get("pmcid", "")
+    pmc_id = paper.get("pmcid") or ""
     doi = paper.get("doi") or ""
-    pmid = paper.get("pmid") or meta.get("pmid", "")
-
-    raw_sources = meta.get("fulltext_sources") or []
-    sources = []
-    for entry in raw_sources:
-        try:
-            sources.append(FullTextSourceEntry.from_dict(entry))
-        except (TypeError, ValueError, KeyError):
-            logger.debug("Skipping malformed fulltext source: %r", entry)
+    pmid = paper.get("pmid") or ""
+    sources = get_fulltext_sources(conn, paper_id)
 
     email = current_app.config.get("BMNEWS_EMAIL") or DEFAULT_CONTACT_EMAIL
     service = FullTextService(email=email)
@@ -253,12 +241,3 @@ def paper_fulltext(paper_id: int) -> str:
             return _link_fragment(source, str(value))
 
     return _UNAVAILABLE_HTML
-
-
-def _enrich_paper_metadata(paper: dict) -> None:
-    """Lift the journal name out of ``metadata_json`` into a top-level key.
-
-    Args:
-        paper: Paper dict, modified in place to gain a ``journal`` key.
-    """
-    paper["journal"] = parse_metadata(paper.get("metadata_json")).get("journal", "")

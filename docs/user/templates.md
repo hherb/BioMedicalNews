@@ -116,10 +116,12 @@ The HTML template for email digests and file output.
 | Field | Type | Description |
 |-------|------|-------------|
 | `title` | string | Paper title |
-| `url` | string | DOI link or direct URL |
-| `authors` | string | Author list |
-| `published_date` | string | Publication date |
-| `source` | string | Source server name |
+| `url` | string | Link derived from the DOI, PMID or PMC id |
+| `authors` | list[string] | Author names — render with `{{ paper.authors\|join('; ') }}` |
+| `publication_date` | string | Publication date |
+| `sources` | list[string] | Every source the paper was seen on |
+| `journal` | string | Journal name |
+| `keywords` | list[string] | Subject terms reported by the source |
 | `summary` | string | LLM-generated summary |
 | `relevance_score` | float | 0.0–1.0 relevance score |
 | `quality_tier` | string | Quality tier name |
@@ -127,6 +129,23 @@ The HTML template for email digests and file output.
 | `combined_score` | float | Weighted combined score |
 
 **When to customize:** To change the visual styling, add your institution's branding, rearrange information, or add/remove fields.
+
+> **If you customized a digest template before v0.3.0, update these fields.**
+> Papers now come from `bmlib.publications`, which stores richer shapes than
+> the old `papers` table did. A template that still uses the old names renders
+> nothing for them, and one that prints `authors` directly renders a Python
+> list (`['Smith J', 'Doe A']`) rather than a readable line.
+>
+> | Was | Now |
+> |-----|-----|
+> | `{{ paper.authors }}` (string) | `{{ paper.authors\|join('; ') }}` (list) |
+> | `{{ paper.published_date }}` | `{{ paper.publication_date }}` |
+> | `{{ paper.source }}` (one) | `{{ paper.sources\|join(', ') }}` (a paper can be seen on several) |
+> | `{{ paper.categories }}` (string) | `{{ paper.keywords\|join('; ') }}` (list) |
+>
+> `url` is unchanged in name but is now derived from the DOI, PMID or PMC id
+> rather than stored, so it no longer goes stale. The packaged templates are
+> already updated — this only affects copies in `~/.bmnews/templates/`.
 
 ### `digest_text.txt` — Plain-text digest
 

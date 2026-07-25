@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-
 from bmlib.quality.data_models import QualityAssessment, QualityTier, StudyDesign
 
 from bmnews.scoring.scorer import _extract_pub_types, _quality_tier_to_score
@@ -36,46 +34,41 @@ class TestQualityTierToScore:
 
 
 class TestExtractPubTypes:
-    def test_from_metadata_json(self):
-        paper = {
-            "metadata_json": json.dumps({"pub_type": ["Randomized Controlled Trial"]}),
-            "categories": "",
-        }
-        types = _extract_pub_types(paper)
-        assert "Randomized Controlled Trial" in types
+    """Publication types feed bmlib's free Tier-1 quality classification.
 
-    def test_from_categories(self):
-        paper = {"metadata_json": "{}", "categories": "Oncology; Clinical Trial"}
+    They arrive already decoded from the ``publications`` JSON columns by
+    ``db.operations._row_to_paper``, so this only has to combine them.
+    """
+
+    def test_from_publication_types(self):
+        paper = {"publication_types": ["Randomized Controlled Trial"], "keywords": []}
+        assert "Randomized Controlled Trial" in _extract_pub_types(paper)
+
+    def test_from_keywords(self):
+        paper = {"publication_types": [], "keywords": ["Oncology", "Clinical Trial"]}
         types = _extract_pub_types(paper)
         assert "Oncology" in types
         assert "Clinical Trial" in types
 
     def test_empty(self):
-        paper = {"metadata_json": "{}", "categories": ""}
-        types = _extract_pub_types(paper)
-        assert types == []
+        assert _extract_pub_types({"publication_types": [], "keywords": []}) == []
 
-    def test_does_not_mutate_caller_metadata(self):
-        """extend() used to write categories back into the caller's dict."""
-        metadata = {"pub_type": ["Journal Article"]}
-        paper = {"metadata_json": metadata, "categories": "Oncology; Review"}
+    def test_missing_keys(self):
+        """An unscored paper dict may not carry either column."""
+        assert _extract_pub_types({}) == []
+
+    def test_null_columns_degrade_to_empty(self):
+        assert _extract_pub_types({"publication_types": None, "keywords": None}) == []
+
+    def test_does_not_mutate_the_caller(self):
+        """extend() used to write keywords back into the caller's list."""
+        publication_types = ["Journal Article"]
+        paper = {"publication_types": publication_types, "keywords": ["Oncology"]}
 
         types = _extract_pub_types(paper)
 
         assert "Oncology" in types
-        assert metadata["pub_type"] == ["Journal Article"]
-
-    def test_malformed_metadata_json(self):
-        paper = {"metadata_json": "{not json", "categories": "Oncology"}
-        assert _extract_pub_types(paper) == ["Oncology"]
-
-    def test_non_dict_metadata_json(self):
-        paper = {"metadata_json": "[1, 2, 3]", "categories": ""}
-        assert _extract_pub_types(paper) == []
-
-    def test_scalar_pub_type(self):
-        paper = {"metadata_json": json.dumps({"pub_type": "Review"}), "categories": ""}
-        assert _extract_pub_types(paper) == ["Review"]
+        assert publication_types == ["Journal Article"]
 
 
 class TestCombinedScoreWeights:
