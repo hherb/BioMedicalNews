@@ -72,12 +72,13 @@ class TestSchema:
         assert table_exists(conn, "publications")
         assert table_exists(conn, "fulltext_sources")
         assert table_exists(conn, "download_days")
-        # ...bmnews owns scoring, tagging, digests and its own extras.
+        # ...bmnews owns scoring, tagging, digests, notifications and its own extras.
         assert table_exists(conn, "scores")
         assert table_exists(conn, "digests")
         assert table_exists(conn, "digest_papers")
         assert table_exists(conn, "paper_tags")
         assert table_exists(conn, "paper_extras")
+        assert table_exists(conn, "notifications")
         assert table_exists(conn, "schema_version")
 
     def test_papers_table_is_gone(self):
@@ -94,7 +95,7 @@ class TestSchema:
         from bmlib.db.migrations import get_applied_versions
 
         versions = get_applied_versions(conn)
-        assert {1, 2, 3, 4} <= versions
+        assert {1, 2, 3, 4, 5} <= versions
 
     def test_removing_a_publication_takes_its_bmnews_rows_with_it(self):
         """bmlib owns the publications row; nothing of ours may outlive it."""
@@ -1052,3 +1053,86 @@ class TestMigrationStrandedPapers:
         run_migrations(conn, MIGRATIONS)
 
         assert fetch_scalar(conn, "SELECT COUNT(*) FROM publications") == 1
+
+
+# ---------------------------------------------------------------------------
+# Migration 5: notification delivery records
+# ---------------------------------------------------------------------------
+
+
+class TestNotificationsTable:
+    """The schema the derived pending queue and per-channel retries rest on."""
+
+    def _seed(self, conn):
+        pid = store_paper(conn, doi="10.1/notified", title="Notified")
+        save_score(conn, paper_id=pid, combined_score=0.9)
+        return pid
+
+    def _record(self, conn, pid, *, watch="w", channel="mail", status="sent"):
+        ph = placeholder(conn)
+        execute(
+            conn,
+            "INSERT INTO notifications (watch, paper_id, channel, status)"
+            f" VALUES ({ph}, {ph}, {ph}, {ph})",
+            (watch, pid, channel, status),
+        )
+        conn.commit()
+
+    def test_a_delivery_can_be_recorded(self):
+        conn = _db()
+        self._record(conn, self._seed(conn))
+        assert fetch_scalar(conn, "SELECT COUNT(*) FROM notifications") == 1
+
+    def test_defaults_fill_in_attempts_error_and_timestamp(self):
+        conn = _db()
+        self._record(conn, self._seed(conn))
+        row = fetch_one(conn, "SELECT attempts, error, sent_at FROM notifications")
+        assert row["attempts"] == 1
+        assert row["error"] == ""
+        assert row["sent_at"]
+
+    def test_the_same_watch_paper_and_channel_cannot_be_recorded_twice(self):
+        """The unique key is what makes a retry an upsert rather than a duplicate."""
+        conn = _db()
+        pid = self._seed(conn)
+        self._record(conn, pid)
+        with pytest.raises(Exception):  # noqa: B017 — the driver's own IntegrityError
+            self._record(conn, pid)
+        conn.rollback()
+
+    def test_one_paper_can_be_delivered_on_two_channels(self):
+        """Retry state is per-channel: Matrix can succeed while email fails."""
+        conn = _db()
+        pid = self._seed(conn)
+        self._record(conn, pid, channel="mail", status="failed")
+        self._record(conn, pid, channel="matrix", status="sent")
+        assert fetch_scalar(conn, "SELECT COUNT(*) FROM notifications") == 2
+
+    def test_two_watches_can_deliver_the_same_paper(self):
+        conn = _db()
+        pid = self._seed(conn)
+        self._record(conn, pid, watch="a")
+        self._record(conn, pid, watch="b")
+        assert fetch_scalar(conn, "SELECT COUNT(*) FROM notifications") == 2
+
+    def test_removing_the_publication_removes_its_notifications(self):
+        conn = _db()
+        pid = self._seed(conn)
+        self._record(conn, pid)
+
+        ph = placeholder(conn)
+        execute(conn, f"DELETE FROM publications WHERE id = {ph}", (pid,))
+        conn.commit()
+
+        assert fetch_scalar(conn, "SELECT COUNT(*) FROM notifications") == 0
+
+    def test_notifying_a_paper_leaves_it_eligible_for_the_digest(self):
+        """Deliveries must not reuse digest_papers, or an alert would suppress
+        the digest entry for that paper. A notification is "now"; the digest is
+        the record, and a paper belongs in both."""
+        conn = _db()
+        pid = self._seed(conn)
+        self._record(conn, pid)
+
+        selected = get_papers_for_digest(conn, min_combined=0.5)
+        assert [p["id"] for p in selected] == [pid]

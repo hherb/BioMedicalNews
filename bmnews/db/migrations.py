@@ -602,6 +602,64 @@ def _m004_migrate_to_publications(conn: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Migration 5: notification delivery records
+# ---------------------------------------------------------------------------
+
+# One row per *delivered* notification, not per queued one. The pending queue
+# is derived on each run — papers a watch matches now, minus those already
+# sent — so editing a watch's criteria cannot leave stale rows queued under
+# criteria that no longer match.
+#
+# The unique key includes ``channel`` because one watch can deliver to both
+# email and Matrix and one can succeed while the other fails; retry state is
+# per-channel or it is wrong. A ``failed`` row is deliberately still selected
+# by the pending query, which is what makes a failed delivery retry.
+#
+# This table must stay separate from ``digest_papers``: ``get_papers_for_digest``
+# excludes papers present there and nothing else, so recording a notification in
+# it would silently suppress that paper's digest entry. A notification is "now";
+# the digest is the record, and a paper belongs in both.
+_M005_SQLITE = """\
+CREATE TABLE IF NOT EXISTS notifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    watch TEXT NOT NULL,
+    paper_id INTEGER NOT NULL REFERENCES publications(id) ON DELETE CASCADE,
+    channel TEXT NOT NULL,
+    status TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 1,
+    error TEXT NOT NULL DEFAULT '',
+    sent_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (watch, paper_id, channel)
+);
+
+CREATE INDEX IF NOT EXISTS idx_notifications_lookup
+    ON notifications (watch, channel, status);
+"""
+
+_M005_POSTGRESQL = """\
+CREATE TABLE IF NOT EXISTS notifications (
+    id SERIAL PRIMARY KEY,
+    watch TEXT NOT NULL,
+    paper_id INTEGER NOT NULL REFERENCES publications(id) ON DELETE CASCADE,
+    channel TEXT NOT NULL,
+    status TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 1,
+    error TEXT NOT NULL DEFAULT '',
+    sent_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    UNIQUE (watch, paper_id, channel)
+);
+
+CREATE INDEX IF NOT EXISTS idx_notifications_lookup
+    ON notifications (watch, channel, status);
+"""
+
+
+def _m005_add_notifications(conn: Any) -> None:
+    """Create the ``notifications`` table recording watch deliveries."""
+    create_tables(conn, _M005_SQLITE if _is_sqlite(conn) else _M005_POSTGRESQL)
+
+
+# ---------------------------------------------------------------------------
 # Migration registry
 # ---------------------------------------------------------------------------
 
@@ -610,4 +668,5 @@ MIGRATIONS: list[Migration] = [
     Migration(2, "add_paper_tags", _m002_add_paper_tags),
     Migration(3, "add_fulltext_columns", _m003_add_fulltext_columns),
     Migration(4, "migrate_to_publications", _m004_migrate_to_publications),
+    Migration(5, "add_notifications", _m005_add_notifications),
 ]

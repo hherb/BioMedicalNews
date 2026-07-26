@@ -147,3 +147,56 @@ class TestSaveConfig:
         assert loaded.sources.lookback_days == 3
         assert loaded.scoring.min_combined == 0.55
         assert loaded.email.enabled is True
+
+    def test_preserves_watches_and_channels(self, tmp_path):
+        """The serializer traps that dictated the notifications config shape.
+
+        ``_toml_value`` renders a list by stringifying each element, so an
+        array-of-tables would come back as TOML strings of Python dict reprs;
+        and ``_write_section`` emits three table levels, so anything deeper is
+        dropped on every GUI save. Keying by name avoids both — this asserts it
+        stays that way.
+        """
+        cfg = AppConfig()
+        cfg.notifications.enabled = True
+        cfg.notifications.channels = {
+            "mail": {"kind": "email", "to_address": "me@example.org"},
+            "matrix": {
+                "kind": "matrix",
+                "homeserver": "https://matrix.example.org",
+                "access_token": "syt_secret",
+                "room": "#bmnews-alerts:example.org",
+            },
+        }
+        cfg.notifications.watches = {
+            "melanoma-trials": {
+                "enabled": True,
+                "min_relevance": 0.8,
+                "min_quality_tier": "TIER_4_EXPERIMENTAL",
+                "tags": ["melanoma", "immunotherapy"],
+                "channels": ["matrix", "mail"],
+                "max_per_run": 5,
+            }
+        }
+
+        loaded = load_config(save_config(cfg, tmp_path / "config.toml"))
+
+        assert loaded.notifications.enabled is True
+        assert loaded.notifications.channels == cfg.notifications.channels
+        assert loaded.notifications.watches == cfg.notifications.watches
+
+    def test_a_saved_watch_still_parses(self, tmp_path):
+        """The round-trip has to survive the validating parse, not just tomllib."""
+        from bmnews.notify import parse_channels, parse_watches
+
+        cfg = AppConfig()
+        cfg.notifications.channels = {"mail": {"kind": "email", "to_address": "me@example.org"}}
+        cfg.notifications.watches = {"w": {"min_relevance": 0.8, "channels": ["mail"]}}
+
+        loaded = load_config(save_config(cfg, tmp_path / "config.toml"))
+
+        watches = parse_watches(loaded.notifications.watches)
+        channels = parse_channels(loaded.notifications.channels)
+        assert watches["w"].min_relevance == 0.8
+        assert watches["w"].channels == ("mail",)
+        assert channels["mail"].kind == "email"
