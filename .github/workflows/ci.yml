@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # bmlib is depended on as ``bmlib @ git+https://github.com/hherb/bmlib.git``
+  # with no pinned rev, so it tracks that repo's main branch. CI here is
+  # therefore not hermetic: a push to bmlib can break bmnews with no change to
+  # bmnews at all. This scheduled run surfaces that within a week instead of at
+  # the start of the next unrelated pull request.
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+# A new push to the same branch makes older runs irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Installed via the standalone script rather than a setup action:
+      # astral-sh/setup-uv no longer publishes moving major tags, so pinning it
+      # means pinning an exact version that then needs bumping. CLAUDE.md also
+      # asks for uv rather than pip for anything touching packages.
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Create environment
+        run: |
+          uv venv --python 3.11
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+      # The dev extra is enough to lint; the GUI extra only matters for tests.
+      - name: Install project
+        run: uv pip install -e ".[dev]"
+
+      - name: ruff check
+        run: ruff check bmnews/ tests/
+
+      # Advisory, not gating. 18 files in the tree predate this workflow and are
+      # unformatted; making this blocking would fail every pull request for
+      # reasons unrelated to its own diff. Run `ruff format bmnews/ tests/` once
+      # across the tree, then drop the continue-on-error line to enforce it.
+      - name: ruff format --check (advisory)
+        continue-on-error: true
+        run: ruff format --check bmnews/ tests/
+
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      # One version failing should not hide the result on the others.
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Create environment
+        run: |
+          uv venv --python ${{ matrix.python-version }}
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+      # The GUI extra brings in Flask, which tests/test_gui_app.py needs. The
+      # postgresql extra is deliberately left out: every test uses in-memory
+      # SQLite, so it would only add a psycopg2 build to each run and test
+      # nothing new. Exercising the PostgreSQL paths needs tests that target a
+      # live server, which do not exist yet.
+      - name: Install project
+        run: uv pip install -e ".[gui,dev]"
+
+      - name: Run tests
+        run: python -m pytest -q

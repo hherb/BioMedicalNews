@@ -113,11 +113,23 @@ in two:
 - **Python** applies the rest: keyword substring, tag sets, sources, journal,
   study design.
 
-This means **`LIMIT N` cannot go in the SQL.** Limiting to 5 rows before the
-Python filter rejects 3 of them would deliver 2 while more matches sat further
-down — silent under-delivery, and paging that appears to exhaust early. Instead
-the narrowed set is scanned in chunks (`NOTIFY_SCAN_CHUNK`) until N matches
-are collected or rows run out.
+This means **a bare `LIMIT N` cannot be the whole story.** Limiting to 5 rows
+before the Python filter rejects 3 of them would deliver 2 while more matches
+sat further down — silent under-delivery, and paging that appears to exhaust
+early.
+
+The fix is a top-up loop in Python: fetch a chunk (`NOTIFY_SCAN_CHUNK`), filter
+it, and if fewer than N matches have accumulated, fetch the next chunk from
+where the last one ended and keep going. Ask for 5, have 3 rejected, fetch more
+and take 3 further matches. The loop terminates on one of two conditions, and
+they mean different things:
+
+- **N matches collected** — a full batch; more may remain.
+- **A chunk comes back short of `NOTIFY_SCAN_CHUNK`** — the narrowed set is
+  genuinely exhausted, which is what "no papers remaining" reports.
+
+Conflating those two is the bug to avoid: a batch that happens to fill exactly
+at a chunk boundary is not exhaustion.
 
 The GUI's "N remaining" count comes from the same scan with no limit. On a
 personal corpus, behind score-floor narrowing, that is milliseconds; if it ever
@@ -233,13 +245,18 @@ and retained only for a bounded window, so they cover the crash case, not
 general dedup. Email has no equivalent; a duplicate email after a crash at
 exactly that point is the accepted worst case.
 
-**Encrypted rooms will not work.** A plain HTTP PUT cannot produce a readable
-message in an E2EE room — that needs megolm, i.e. `matrix-nio` with `libolm`, a
-heavy dependency. v1 requires an unencrypted room, checks for the
-`m.room.encryption` state event when validating the channel, and fails with a
-message that says exactly that rather than cheerfully posting ciphertext
-nobody can read. Supporting encryption is a project of its own, and would be a
-prerequisite for a public service.
+**Encrypted rooms will not work, and are not wanted.** A plain HTTP PUT cannot
+produce a readable message in an E2EE room — that needs megolm, i.e.
+`matrix-nio` with `libolm`, a heavy dependency. This is a deliberate
+non-requirement rather than a limitation to work around: the content is
+notifications about public preprints, so there is nothing confidential to
+protect, and that holds for public-service use too. Unencrypted rooms are
+therefore the supported configuration indefinitely, not a v1 shortcut.
+
+The channel still checks for the `m.room.encryption` state event when
+validating, and fails with a message saying the room is encrypted — not to
+signal "encryption pending", but because the alternative is posting ciphertext
+nobody can read and reporting success.
 
 **Rooms and HTML.** Accept either a room ID (`!abc:server`) or an alias
 (`#bmnews-alerts:server`), resolving an alias once via
@@ -304,7 +321,9 @@ no LLM:
 - **LLM predicate** on a watch — deferred, additive when wanted.
 - **ntfy / Slack / Discord** — the `kind` adapter split means each is a small
   addition later; ntfy in particular is a single POST.
-- **E2EE Matrix rooms** — needs a crypto SDK; prerequisite for public service use.
+- **E2EE Matrix rooms** — a deliberate non-requirement, not deferred work.
+  Public preprint notifications carry nothing confidential, including in a
+  public-service deployment.
 - **Daemon mode** — `run_notify()` is driven by `bmnews run` under cron or
   systemd. A `--daemon` loop over the same core is a thin follow-on.
 - **Per-user DM fan-out** — a public service would need the bot to create and
