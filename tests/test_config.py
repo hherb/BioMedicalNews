@@ -59,7 +59,6 @@ research_interests = ["genomics", "CRISPR"]
         assert config.user.name == "Dr. Test"
         assert config.user.research_interests == "genomics, CRISPR"
 
-
     def test_load_string_interests(self, tmp_path):
         cfg = tmp_path / "config.toml"
         cfg.write_text("""\

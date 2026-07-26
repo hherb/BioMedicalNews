@@ -40,9 +40,7 @@ def create_app(config: AppConfig, conn: Any) -> Flask:
     )
     app.config["BMNEWS_CONFIG"] = config
     app.config["BMNEWS_DB"] = conn
-    app.config["BMNEWS_EMAIL"] = (
-        getattr(config.user, "email", "") or DEFAULT_CONTACT_EMAIL
-    )
+    app.config["BMNEWS_EMAIL"] = getattr(config.user, "email", "") or DEFAULT_CONTACT_EMAIL
     app.jinja_env.filters["format_abstract"] = format_abstract_html
     app.jinja_env.globals["app_version"] = __version__
 
@@ -58,6 +56,7 @@ def create_app(config: AppConfig, conn: Any) -> Flask:
     def index() -> str:
         """Serve the full shell, or just the papers view for HTMX requests."""
         from flask import render_template, request
+
         if request.headers.get("HX-Request"):
             return render_template("fragments/papers_view.html")
         return render_template("base.html")

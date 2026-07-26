@@ -76,14 +76,14 @@ class TestSchema:
     def test_migrations_recorded(self):
         conn = _db()
         from bmlib.db.migrations import get_applied_versions
+
         versions = get_applied_versions(conn)
         assert {1, 2, 3, 4} <= versions
 
     def test_removing_a_publication_takes_its_bmnews_rows_with_it(self):
         """bmlib owns the publications row; nothing of ours may outlive it."""
         conn = _db()
-        pid = store_paper(conn, doi="10.1/cascade", title="Doomed",
-                          metadata={"cited_by": 1})
+        pid = store_paper(conn, doi="10.1/cascade", title="Doomed", metadata={"cited_by": 1})
         save_score(conn, paper_id=pid, combined_score=0.5)
         save_paper_tags(conn, paper_id=pid, tags=["onc"])
         record_digest(conn, [pid], delivery_method="stdout")
@@ -93,18 +93,22 @@ class TestSchema:
 
         for table in ("scores", "paper_tags", "digest_papers", "paper_extras"):
             column = "publication_id" if table == "paper_extras" else "paper_id"
-            assert fetch_scalar(
-                conn, f"SELECT COUNT(*) FROM {table} WHERE {column} = ?", (pid,)
-            ) == 0, f"{table} kept a row pointing at a deleted publication"
+            assert (
+                fetch_scalar(conn, f"SELECT COUNT(*) FROM {table} WHERE {column} = ?", (pid,)) == 0
+            ), f"{table} kept a row pointing at a deleted publication"
 
 
 class TestPapers:
     def test_store_and_retrieve(self):
         conn = _db()
         pid = store_paper(
-            conn, doi="10.1101/test1", title="Test Paper",
-            authors=["Smith J", "Doe A"], abstract="An abstract.",
-            source="medrxiv", published_date="2024-01-01",
+            conn,
+            doi="10.1101/test1",
+            title="Test Paper",
+            authors=["Smith J", "Doe A"],
+            abstract="An abstract.",
+            source="medrxiv",
+            published_date="2024-01-01",
         )
         assert pid > 0
         assert paper_exists(conn, "10.1101/test1")
@@ -120,7 +124,10 @@ class TestPapers:
         first = store_paper(conn, doi="10.1101/upd", title="Original Title")
 
         again = store_paper(
-            conn, doi="10.1101/upd", title="Updated Title", abstract="Now with an abstract",
+            conn,
+            doi="10.1101/upd",
+            title="Updated Title",
+            abstract="Now with an abstract",
         )
 
         assert again == first
@@ -172,21 +179,21 @@ class TestPapers:
         by_pmid = store_paper(conn, pmid="999", title="By PMID")
 
         assert get_paper_with_score(conn, by_doi)["url"] == "https://doi.org/10.1/url"
-        assert (
-            get_paper_with_score(conn, by_pmid)["url"]
-            == "https://pubmed.ncbi.nlm.nih.gov/999/"
-        )
+        assert get_paper_with_score(conn, by_pmid)["url"] == "https://pubmed.ncbi.nlm.nih.gov/999/"
 
 
 class TestScores:
     def test_save_and_retrieve(self):
         conn = _db()
-        pid = store_paper(conn, doi="10.1101/scored", title="Scored Paper",
-                          abstract="Abstract")
+        pid = store_paper(conn, doi="10.1101/scored", title="Scored Paper", abstract="Abstract")
         save_score(
-            conn, paper_id=pid, relevance_score=0.8,
-            quality_score=0.7, combined_score=0.76,
-            summary="A good paper.", study_design="RCT",
+            conn,
+            paper_id=pid,
+            relevance_score=0.8,
+            quality_score=0.7,
+            combined_score=0.76,
+            summary="A good paper.",
+            study_design="RCT",
         )
         scored = get_scored_papers(conn, min_combined=0.5)
         assert len(scored) == 1
@@ -232,14 +239,22 @@ class TestPaperWithScore:
     def test_returns_paper_and_score_data(self):
         conn = _db()
         pid = store_paper(
-            conn, doi="10.1101/pws1", title="PaperWithScore Test",
-            authors=["Doe J"], abstract="Some abstract.",
-            source="medrxiv", published_date="2025-06-01",
+            conn,
+            doi="10.1101/pws1",
+            title="PaperWithScore Test",
+            authors=["Doe J"],
+            abstract="Some abstract.",
+            source="medrxiv",
+            published_date="2025-06-01",
         )
         save_score(
-            conn, paper_id=pid, relevance_score=0.85,
-            quality_score=0.70, combined_score=0.78,
-            summary="An excellent study.", study_design="RCT",
+            conn,
+            paper_id=pid,
+            relevance_score=0.85,
+            quality_score=0.70,
+            combined_score=0.78,
+            summary="An excellent study.",
+            study_design="RCT",
             quality_tier="high",
         )
         result = get_paper_with_score(conn, pid)
@@ -256,7 +271,9 @@ class TestPaperWithScore:
     def test_returns_paper_without_score(self):
         conn = _db()
         pid = store_paper(
-            conn, doi="10.1101/pws_unscored", title="Unscored Paper",
+            conn,
+            doi="10.1101/pws_unscored",
+            title="Unscored Paper",
             abstract="No score here.",
         )
         paper = get_paper_with_score(conn, pid)
@@ -267,26 +284,65 @@ class TestPaperWithScore:
 
 class TestPapersFiltered:
     def _seed(self, conn):
-        p1 = store_paper(conn, doi="10.1101/f1", title="Alpha Paper",
-                         authors=["Smith"], abstract="Cancer immunotherapy trial",
-                         source="medrxiv", published_date="2026-02-10")
-        save_score(conn, paper_id=p1, relevance_score=0.9, quality_score=0.8,
-                   combined_score=0.86, study_design="rct",
-                   quality_tier="TIER_4_EXPERIMENTAL", summary="Sum1")
+        p1 = store_paper(
+            conn,
+            doi="10.1101/f1",
+            title="Alpha Paper",
+            authors=["Smith"],
+            abstract="Cancer immunotherapy trial",
+            source="medrxiv",
+            published_date="2026-02-10",
+        )
+        save_score(
+            conn,
+            paper_id=p1,
+            relevance_score=0.9,
+            quality_score=0.8,
+            combined_score=0.86,
+            study_design="rct",
+            quality_tier="TIER_4_EXPERIMENTAL",
+            summary="Sum1",
+        )
 
-        p2 = store_paper(conn, doi="10.1101/f2", title="Beta Paper",
-                         authors=["Jones"], abstract="Genomics cohort study",
-                         source="biorxiv", published_date="2026-02-12")
-        save_score(conn, paper_id=p2, relevance_score=0.7, quality_score=0.6,
-                   combined_score=0.66, study_design="cohort",
-                   quality_tier="TIER_3_CONTROLLED", summary="Sum2")
+        p2 = store_paper(
+            conn,
+            doi="10.1101/f2",
+            title="Beta Paper",
+            authors=["Jones"],
+            abstract="Genomics cohort study",
+            source="biorxiv",
+            published_date="2026-02-12",
+        )
+        save_score(
+            conn,
+            paper_id=p2,
+            relevance_score=0.7,
+            quality_score=0.6,
+            combined_score=0.66,
+            study_design="cohort",
+            quality_tier="TIER_3_CONTROLLED",
+            summary="Sum2",
+        )
 
-        p3 = store_paper(conn, doi="10.1101/f3", title="Gamma Paper",
-                         authors=["Lee"], abstract="Case report on rare disease",
-                         source="europepmc", published_date="2026-02-14")
-        save_score(conn, paper_id=p3, relevance_score=0.5, quality_score=0.3,
-                   combined_score=0.42, study_design="case_report",
-                   quality_tier="TIER_1_ANECDOTAL", summary="Sum3")
+        p3 = store_paper(
+            conn,
+            doi="10.1101/f3",
+            title="Gamma Paper",
+            authors=["Lee"],
+            abstract="Case report on rare disease",
+            source="europepmc",
+            published_date="2026-02-14",
+        )
+        save_score(
+            conn,
+            paper_id=p3,
+            relevance_score=0.5,
+            quality_score=0.3,
+            combined_score=0.42,
+            study_design="case_report",
+            quality_tier="TIER_1_ANECDOTAL",
+            summary="Sum3",
+        )
         return p1, p2, p3
 
     def test_default_returns_all_sorted_by_combined(self):
@@ -373,10 +429,16 @@ class TestPapersFiltered:
 class TestCachedDigestPapers:
     def test_returns_papers_from_previous_digests(self):
         conn = _db()
-        pid1 = store_paper(conn, doi="10.1101/c1", title="Cached 1",
-                           abstract="A1", published_date="2026-02-10")
-        pid2 = store_paper(conn, doi="10.1101/c2", title="Not in digest",
-                           abstract="A2", published_date="2026-02-10")
+        pid1 = store_paper(
+            conn, doi="10.1101/c1", title="Cached 1", abstract="A1", published_date="2026-02-10"
+        )
+        pid2 = store_paper(
+            conn,
+            doi="10.1101/c2",
+            title="Not in digest",
+            abstract="A2",
+            published_date="2026-02-10",
+        )
         save_score(conn, paper_id=pid1, combined_score=0.8, summary="Sum1")
         save_score(conn, paper_id=pid2, combined_score=0.7, summary="Sum2")
         record_digest(conn, [pid1], delivery_method="stdout")
@@ -388,8 +450,9 @@ class TestCachedDigestPapers:
 
     def test_a_paper_in_two_digests_is_returned_once(self):
         conn = _db()
-        pid = store_paper(conn, doi="10.1101/twice", title="Twice",
-                          abstract="A", published_date="2026-02-10")
+        pid = store_paper(
+            conn, doi="10.1101/twice", title="Twice", abstract="A", published_date="2026-02-10"
+        )
         save_score(conn, paper_id=pid, combined_score=0.8, summary="Sum")
         record_digest(conn, [pid], delivery_method="stdout")
         record_digest(conn, [pid], delivery_method="email")
@@ -398,10 +461,12 @@ class TestCachedDigestPapers:
 
     def test_filters_by_publication_date(self):
         conn = _db()
-        pid_old = store_paper(conn, doi="10.1101/old", title="Old Paper",
-                              abstract="A", published_date="2020-01-01")
-        pid_new = store_paper(conn, doi="10.1101/new", title="New Paper",
-                              abstract="B", published_date=_days_ago(2))
+        pid_old = store_paper(
+            conn, doi="10.1101/old", title="Old Paper", abstract="A", published_date="2020-01-01"
+        )
+        pid_new = store_paper(
+            conn, doi="10.1101/new", title="New Paper", abstract="B", published_date=_days_ago(2)
+        )
         save_score(conn, paper_id=pid_old, combined_score=0.8)
         save_score(conn, paper_id=pid_new, combined_score=0.9)
         record_digest(conn, [pid_old, pid_new], delivery_method="stdout")
@@ -412,10 +477,12 @@ class TestCachedDigestPapers:
 
     def test_no_days_returns_all_cached(self):
         conn = _db()
-        pid_old = store_paper(conn, doi="10.1101/old2", title="Old",
-                              abstract="A", published_date="2020-01-01")
-        pid_new = store_paper(conn, doi="10.1101/new2", title="New",
-                              abstract="B", published_date=_days_ago(2))
+        pid_old = store_paper(
+            conn, doi="10.1101/old2", title="Old", abstract="A", published_date="2020-01-01"
+        )
+        pid_new = store_paper(
+            conn, doi="10.1101/new2", title="New", abstract="B", published_date=_days_ago(2)
+        )
         save_score(conn, paper_id=pid_old, combined_score=0.8)
         save_score(conn, paper_id=pid_new, combined_score=0.9)
         record_digest(conn, [pid_old, pid_new], delivery_method="stdout")
@@ -425,8 +492,7 @@ class TestCachedDigestPapers:
 
     def test_empty_when_no_digests(self):
         conn = _db()
-        store_paper(conn, doi="10.1101/x", title="X", abstract="A",
-                    published_date="2026-02-10")
+        store_paper(conn, doi="10.1101/x", title="X", abstract="A", published_date="2026-02-10")
         cached = get_cached_digest_papers(conn)
         assert cached == []
 
@@ -434,16 +500,14 @@ class TestCachedDigestPapers:
 class TestPaperTags:
     def test_save_and_retrieve_tags(self):
         conn = _db()
-        pid = store_paper(conn, doi="10.1101/t1", title="Tagged Paper",
-                          abstract="A")
+        pid = store_paper(conn, doi="10.1101/t1", title="Tagged Paper", abstract="A")
         save_paper_tags(conn, paper_id=pid, tags=["AI", "oncology", "clinical trials"])
         tags = get_paper_tags(conn, pid)
         assert set(tags) == {"AI", "oncology", "clinical trials"}
 
     def test_replace_tags(self):
         conn = _db()
-        pid = store_paper(conn, doi="10.1101/t2", title="Re-tagged",
-                          abstract="B")
+        pid = store_paper(conn, doi="10.1101/t2", title="Re-tagged", abstract="B")
         save_paper_tags(conn, paper_id=pid, tags=["old_tag"])
         save_paper_tags(conn, paper_id=pid, tags=["new_tag1", "new_tag2"])
         tags = get_paper_tags(conn, pid)
@@ -475,15 +539,13 @@ class TestPaperTags:
 
     def test_empty_tags(self):
         conn = _db()
-        pid = store_paper(conn, doi="10.1101/t_empty", title="No Tags",
-                          abstract="C")
+        pid = store_paper(conn, doi="10.1101/t_empty", title="No Tags", abstract="C")
         tags = get_paper_tags(conn, pid)
         assert tags == []
 
     def test_save_empty_tags_clears(self):
         conn = _db()
-        pid = store_paper(conn, doi="10.1101/t_clear", title="Clear Tags",
-                          abstract="D")
+        pid = store_paper(conn, doi="10.1101/t_clear", title="Clear Tags", abstract="D")
         save_paper_tags(conn, paper_id=pid, tags=["tag1", "tag2"])
         save_paper_tags(conn, paper_id=pid, tags=[])
         tags = get_paper_tags(conn, pid)
@@ -534,7 +596,8 @@ class TestPaperExtras:
         save_paper_metadata(conn, paper_id=pid, metadata={"altmetric": 9})
 
         assert get_paper_with_score(conn, pid)["metadata"] == {
-            "cited_by": 4, "altmetric": 9,
+            "cited_by": 4,
+            "altmetric": 9,
         }
 
     def test_an_empty_metadata_write_changes_nothing(self):
@@ -553,7 +616,11 @@ class TestPaperExtras:
     def test_identifiers_are_stored_with_the_paper(self):
         conn = _db()
         pid = store_paper(
-            conn, doi="10.1/id", title="ID Paper", pmid="12345", pmcid="PMC678",
+            conn,
+            doi="10.1/id",
+            title="ID Paper",
+            pmid="12345",
+            pmcid="PMC678",
         )
         paper = get_paper_with_score(conn, pid)
         assert paper["pmid"] == "12345"
@@ -596,7 +663,11 @@ class TestStoreReturnsCorrectId:
         pid_b = store_paper(conn, doi="10.1101/ident-b", title="B")
 
         returned = store_paper(
-            conn, doi="10.1101/ident-a", title="A", pmid="111", pmcid="PMC111",
+            conn,
+            doi="10.1101/ident-a",
+            title="A",
+            pmid="111",
+            pmcid="PMC111",
         )
 
         assert get_paper_by_doi(conn, "10.1101/ident-a")["pmid"] == "111"
@@ -622,19 +693,19 @@ class TestDigestSelectionFilters:
     def _seed(self, conn, doi, *, relevance, combined, tier):
         pid = store_paper(conn, doi=doi, title=f"Paper {doi}")
         save_score(
-            conn, paper_id=pid, relevance_score=relevance,
-            combined_score=combined, quality_tier=tier,
+            conn,
+            paper_id=pid,
+            relevance_score=relevance,
+            combined_score=combined,
+            quality_tier=tier,
         )
         return pid
 
     def _conn(self):
         conn = _db()
-        self._seed(conn, "10.1/weak", relevance=0.2, combined=0.7,
-                   tier="TIER_1_ANECDOTAL")
-        self._seed(conn, "10.1/strong", relevance=0.9, combined=0.9,
-                   tier="TIER_4_EXPERIMENTAL")
-        self._seed(conn, "10.1/unknown", relevance=0.8, combined=0.8,
-                   tier="UNCLASSIFIED")
+        self._seed(conn, "10.1/weak", relevance=0.2, combined=0.7, tier="TIER_1_ANECDOTAL")
+        self._seed(conn, "10.1/strong", relevance=0.9, combined=0.9, tier="TIER_4_EXPERIMENTAL")
+        self._seed(conn, "10.1/unknown", relevance=0.8, combined=0.8, tier="UNCLASSIFIED")
         return conn
 
     def _dois(self, papers):
@@ -646,28 +717,36 @@ class TestDigestSelectionFilters:
 
     def test_min_relevance_excludes_low_relevance_papers(self):
         papers = get_papers_for_digest(
-            self._conn(), min_combined=0.5, min_relevance=0.5,
+            self._conn(),
+            min_combined=0.5,
+            min_relevance=0.5,
         )
         assert "10.1/weak" not in self._dois(papers)
         assert "10.1/strong" in self._dois(papers)
 
     def test_excluded_tiers_are_dropped(self):
         papers = get_papers_for_digest(
-            self._conn(), min_combined=0.5,
+            self._conn(),
+            min_combined=0.5,
             exclude_tiers=["TIER_1_ANECDOTAL", "TIER_2_OBSERVATIONAL"],
         )
         assert "10.1/weak" not in self._dois(papers)
 
     def test_unclassified_papers_survive_a_tier_floor(self):
         papers = get_papers_for_digest(
-            self._conn(), min_combined=0.5, exclude_tiers=["TIER_1_ANECDOTAL"],
+            self._conn(),
+            min_combined=0.5,
+            exclude_tiers=["TIER_1_ANECDOTAL"],
         )
         assert "10.1/unknown" in self._dois(papers)
 
     def test_max_papers_still_applies_with_filters(self):
         papers = get_papers_for_digest(
-            self._conn(), min_combined=0.5, min_relevance=0.1,
-            exclude_tiers=["TIER_1_ANECDOTAL"], max_papers=1,
+            self._conn(),
+            min_combined=0.5,
+            min_relevance=0.1,
+            exclude_tiers=["TIER_1_ANECDOTAL"],
+            max_papers=1,
         )
         assert len(papers) == 1
 
@@ -752,10 +831,16 @@ class TestMigrationToPublications:
         """A v3 database with representative content, migrated to v4."""
         conn = _v3_db()
         self.p1 = _insert_v3_paper(
-            conn, "10.1/a", "Paper A",
-            authors="Ann Lee; Bo Ng", categories="Oncology; Genomics",
-            source="medrxiv", pmid="111", pmcid="PMC1",
-            fulltext_html="<p>cached</p>", fulltext_source="europepmc",
+            conn,
+            "10.1/a",
+            "Paper A",
+            authors="Ann Lee; Bo Ng",
+            categories="Oncology; Genomics",
+            source="medrxiv",
+            pmid="111",
+            pmcid="PMC1",
+            fulltext_html="<p>cached</p>",
+            fulltext_source="europepmc",
             metadata={
                 "pub_type": ["Journal Article"],
                 "journal": "Nature",
@@ -778,9 +863,7 @@ class TestMigrationToPublications:
 
         conn.execute("INSERT INTO paper_tags (paper_id, tag) VALUES (?, ?)", (self.p1, "onc"))
         conn.execute("INSERT INTO paper_tags (paper_id, tag) VALUES (?, ?)", (self.p2, "onc"))
-        conn.execute(
-            "INSERT INTO digests (paper_count, delivery_method) VALUES (2, 'stdout')"
-        )
+        conn.execute("INSERT INTO digests (paper_count, delivery_method) VALUES (2, 'stdout')")
         digest_id = conn.execute("SELECT id FROM digests").fetchone()["id"]
         for pid in (self.p1, self.p2):
             conn.execute(
@@ -825,14 +908,10 @@ class TestMigrationToPublications:
 
     def test_no_score_tag_or_digest_link_is_orphaned(self):
         conn = self._migrated()
-        publication_ids = {
-            r["id"] for r in fetch_all(conn, "SELECT id FROM publications")
-        }
+        publication_ids = {r["id"] for r in fetch_all(conn, "SELECT id FROM publications")}
 
         for table in ("scores", "paper_tags", "digest_papers"):
-            referenced = {
-                r["paper_id"] for r in fetch_all(conn, f"SELECT paper_id FROM {table}")
-            }
+            referenced = {r["paper_id"] for r in fetch_all(conn, f"SELECT paper_id FROM {table}")}
             assert referenced, f"{table} lost every row"
             assert referenced <= publication_ids, f"{table} references a missing publication"
 
@@ -879,8 +958,9 @@ class TestMigrationToPublications:
 
     def test_a_later_row_does_not_blank_out_cached_fulltext(self):
         conn = _v3_db()
-        _insert_v3_paper(conn, "10.1/ft", "FT", fulltext_html="<p>body</p>",
-                         fulltext_source="europepmc")
+        _insert_v3_paper(
+            conn, "10.1/ft", "FT", fulltext_html="<p>body</p>", fulltext_source="europepmc"
+        )
         _insert_v3_paper(conn, "10.1/FT", "FT again")
         run_migrations(conn, MIGRATIONS)
 
@@ -923,10 +1003,14 @@ class TestMigrationStrandedPapers:
         assert any("could not be migrated" in r.message for r in caplog.records)
 
     def test_an_unwritable_rescue_path_does_not_abort_the_migration(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ):
         monkeypatch.setattr(
-            migrations, "STRANDED_PAPERS_PATH", str(tmp_path / "nope.txt" / "x.json"),
+            migrations,
+            "STRANDED_PAPERS_PATH",
+            str(tmp_path / "nope.txt" / "x.json"),
         )
         (tmp_path / "nope.txt").write_text("not a directory")
 

@@ -36,15 +36,27 @@ def paper_list() -> str:
     search_term = request.args.get("q", "").strip()
 
     papers, total = get_papers_filtered(
-        conn, sort=sort, source=source, quality_tier=tier,
-        study_design=design, search=search_term,
-        limit=DEFAULT_PAGE_SIZE, offset=0, with_total=True,
+        conn,
+        sort=sort,
+        source=source,
+        quality_tier=tier,
+        study_design=design,
+        search=search_term,
+        limit=DEFAULT_PAGE_SIZE,
+        offset=0,
+        with_total=True,
     )
 
     return render_template(
         "fragments/paper_list.html",
-        papers=papers, total=total, offset=0, limit=DEFAULT_PAGE_SIZE,
-        sort=sort, source=source, tier=tier, design=design,
+        papers=papers,
+        total=total,
+        offset=0,
+        limit=DEFAULT_PAGE_SIZE,
+        sort=sort,
+        source=source,
+        tier=tier,
+        design=design,
         search=search_term,
     )
 
@@ -71,15 +83,28 @@ def paper_list_more() -> str:
     limit = max(1, min(limit, DEFAULT_PAGE_SIZE * 5))
 
     papers = get_papers_filtered(
-        conn, sort=sort, source=source, quality_tier=tier,
-        study_design=design, search=search_term, limit=limit, offset=offset,
+        conn,
+        sort=sort,
+        source=source,
+        quality_tier=tier,
+        study_design=design,
+        search=search_term,
+        limit=limit,
+        offset=offset,
     )
 
     return render_template(
         "fragments/paper_list.html",
-        papers=papers, total=None, offset=offset, limit=limit,
-        sort=sort, source=source, tier=tier, design=design,
-        search=search_term, append=True,
+        papers=papers,
+        total=None,
+        offset=offset,
+        limit=limit,
+        sort=sort,
+        source=source,
+        tier=tier,
+        design=design,
+        search=search_term,
+        append=True,
     )
 
 
@@ -118,13 +143,24 @@ def search() -> str:
         return paper_list()
 
     papers, total = get_papers_filtered(
-        conn, search=q, limit=DEFAULT_PAGE_SIZE, offset=0, with_total=True,
+        conn,
+        search=q,
+        limit=DEFAULT_PAGE_SIZE,
+        offset=0,
+        with_total=True,
     )
 
     return render_template(
         "fragments/paper_list.html",
-        papers=papers, total=total, offset=0, limit=DEFAULT_PAGE_SIZE,
-        sort="combined", source="", tier="", design="", search=q,
+        papers=papers,
+        total=total,
+        offset=0,
+        limit=DEFAULT_PAGE_SIZE,
+        sort="combined",
+        source="",
+        tier="",
+        design="",
+        search=q,
     )
 
 
@@ -132,21 +168,27 @@ def search() -> str:
 # column holds a link or path rather than actual HTML.
 _LINK_SOURCES = {
     "pdf_cached": (
-        "fulltext-pdf", "PDF cached locally:", "Open PDF &#x2197;", True,
+        "fulltext-pdf",
+        "PDF cached locally:",
+        "Open PDF &#x2197;",
+        True,
     ),
     "unpaywall_pdf": (
-        "fulltext-pdf", "PDF available from open-access source:",
-        "Open PDF &#x2197;", False,
+        "fulltext-pdf",
+        "PDF available from open-access source:",
+        "Open PDF &#x2197;",
+        False,
     ),
     "publisher_url": (
-        "fulltext-external", "Full text available at publisher website:",
-        "Open Publisher Page &#x2197;", False,
+        "fulltext-external",
+        "Full text available at publisher website:",
+        "Open Publisher Page &#x2197;",
+        False,
     ),
 }
 
 _UNAVAILABLE_HTML = (
-    '<div class="fulltext-unavailable">'
-    "<p>Full text is not available for this paper.</p></div>"
+    '<div class="fulltext-unavailable"><p>Full text is not available for this paper.</p></div>'
 )
 
 
@@ -210,7 +252,9 @@ def paper_fulltext(paper_id: int) -> str:
     try:
         result = service.fetch_fulltext(
             fulltext_sources=sources or None,
-            pmc_id=pmc_id or None, doi=doi or None, pmid=pmid,
+            pmc_id=pmc_id or None,
+            doi=doi or None,
+            pmid=pmid,
             identifier=doi or None,
         )
     except FullTextError:
@@ -224,7 +268,10 @@ def paper_fulltext(paper_id: int) -> str:
     # Inline HTML (JATS-parsed or cached HTML)
     if result.html:
         save_fulltext(
-            conn, paper_id=paper_id, html=result.html, source=result.source,
+            conn,
+            paper_id=paper_id,
+            html=result.html,
+            source=result.source,
         )
         paper["fulltext_html"] = result.html
         paper["fulltext_source"] = result.source

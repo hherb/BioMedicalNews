@@ -205,7 +205,8 @@ def get_paper_with_score(conn: Any, paper_id: int) -> dict | None:
 
 
 def get_unscored_papers(
-    conn: Any, limit: int = UNSCORED_BATCH_SIZE,
+    conn: Any,
+    limit: int = UNSCORED_BATCH_SIZE,
 ) -> list[dict]:
     """Get papers that have no row in ``scores`` yet, newest first.
 
@@ -235,11 +236,14 @@ def get_unscored_papers(
 
 def count_unscored_papers(conn: Any) -> int:
     """Return how many stored papers have no row in ``scores`` yet."""
-    return fetch_scalar(
-        conn,
-        "SELECT COUNT(*) FROM publications p "
-        "LEFT JOIN scores s ON s.paper_id = p.id WHERE s.id IS NULL",
-    ) or 0
+    return (
+        fetch_scalar(
+            conn,
+            "SELECT COUNT(*) FROM publications p "
+            "LEFT JOIN scores s ON s.paper_id = p.id WHERE s.id IS NULL",
+        )
+        or 0
+    )
 
 
 # --- Scores ---
@@ -279,7 +283,7 @@ def save_score(
         INSERT INTO scores (paper_id, relevance_score, quality_score,
                            combined_score, summary, study_design,
                            quality_tier, assessment_json)
-        VALUES ({', '.join([ph] * 8)})
+        VALUES ({", ".join([ph] * 8)})
         ON CONFLICT(paper_id) DO UPDATE SET
             relevance_score = {excluded}.relevance_score,
             quality_score = {excluded}.quality_score,
@@ -291,15 +295,25 @@ def save_score(
             scored_at = {now}
     """
 
-    params = (paper_id, relevance_score, quality_score, combined_score,
-              summary, study_design, quality_tier, assessment_json)
+    params = (
+        paper_id,
+        relevance_score,
+        quality_score,
+        combined_score,
+        summary,
+        study_design,
+        quality_tier,
+        assessment_json,
+    )
 
     with _transaction(conn):
         execute(conn, sql, params)
 
 
 def get_scored_papers(
-    conn: Any, min_combined: float = 0.0, limit: int = DEFAULT_QUERY_LIMIT,
+    conn: Any,
+    min_combined: float = 0.0,
+    limit: int = DEFAULT_QUERY_LIMIT,
 ) -> list[dict]:
     """Get papers with scores above threshold, ordered by score."""
     ph = _placeholder(conn)
@@ -450,11 +464,14 @@ def get_papers_filtered(
 
     total = 0
     if with_total:
-        total = fetch_scalar(
-            conn,
-            f"SELECT COUNT(*) {base_query}",
-            tuple(params),
-        ) or 0
+        total = (
+            fetch_scalar(
+                conn,
+                f"SELECT COUNT(*) {base_query}",
+                tuple(params),
+            )
+            or 0
+        )
 
     rows = fetch_all(
         conn,
@@ -588,7 +605,11 @@ def _upsert_extras(conn: Any, *, paper_id: int, columns: dict[str, Any]) -> None
 
 
 def save_fulltext(
-    conn: Any, *, paper_id: int, html: str, source: str,
+    conn: Any,
+    *,
+    paper_id: int,
+    html: str,
+    source: str,
 ) -> None:
     """Store full-text HTML (or a link) and its source for a paper."""
     _upsert_extras(

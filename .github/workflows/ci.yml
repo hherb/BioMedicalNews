@@ -49,12 +49,10 @@ jobs:
       - name: ruff check
         run: ruff check bmnews/ tests/
 
-      # Advisory, not gating. 18 files in the tree predate this workflow and are
-      # unformatted; making this blocking would fail every pull request for
-      # reasons unrelated to its own diff. Run `ruff format bmnews/ tests/` once
-      # across the tree, then drop the continue-on-error line to enforce it.
-      - name: ruff format --check (advisory)
-        continue-on-error: true
+      # Gating. The tree was formatted in one sweep, so a failure here now means
+      # the pull request's own diff is unformatted: run `ruff format bmnews/
+      # tests/` and commit the result.
+      - name: ruff format --check
         run: ruff format --check bmnews/ tests/
 
   test:

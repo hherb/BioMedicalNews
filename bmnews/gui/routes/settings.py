@@ -44,7 +44,9 @@ def settings_page() -> str:
     available_sources = _available_sources()
     # Pre-fetch model list so the dropdown is populated on first render
     initial_models = _get_model_options(
-        config, provider=config.llm.provider, current=config.llm.model,
+        config,
+        provider=config.llm.provider,
+        current=config.llm.model,
     )
     return render_template(
         "fragments/settings.html",
@@ -101,9 +103,7 @@ def save_settings() -> str:
     # "deliberately cleared" from "this form never had a sources section" —
     # without it, any partial form post would disable every source.
     if request.form.get("sources.enabled_submitted"):
-        config.sources.enabled = [
-            s for s in request.form.getlist("sources.enabled") if s.strip()
-        ]
+        config.sources.enabled = [s for s in request.form.getlist("sources.enabled") if s.strip()]
 
     errors: list[str] = []
     for key, value in request.form.items():
@@ -134,6 +134,7 @@ def save_settings() -> str:
 
     if not current_app.config.get("TESTING"):
         from bmnews.config import save_config
+
         try:
             save_config(config)
         except OSError as e:
@@ -280,7 +281,9 @@ def template_list() -> str:
     """
     return render_template(
         "fragments/template_editor.html",
-        template_names=_template_names(), content="", current="",
+        template_names=_template_names(),
+        content="",
+        current="",
     )
 
 
@@ -309,9 +312,12 @@ def template_load(name: str) -> str:
     else:
         content = (TEMPLATES_DIR / name).read_text(encoding="utf-8")
 
-    return render_template("fragments/template_editor.html",
-                           template_names=_template_names(),
-                           content=content, current=name)
+    return render_template(
+        "fragments/template_editor.html",
+        template_names=_template_names(),
+        content=content,
+        current=name,
+    )
 
 
 @settings_bp.route("/settings/template/<name>", methods=["POST"])

@@ -16,6 +16,7 @@ from bmnews.db.schema import init_db
 @pytest.fixture
 def app():
     from bmnews.gui.app import create_app
+
     config = AppConfig()
     conn = connect_sqlite(":memory:")
     init_db(conn)
@@ -32,19 +33,45 @@ def client(app):
 @pytest.fixture
 def seeded_client(app):
     conn = app.config["BMNEWS_DB"]
-    p1 = store_paper(conn, doi="10.1101/g1", title="Alpha Paper",
-                     authors=["Smith J"], abstract="Cancer immunotherapy.",
-                     source="medrxiv", published_date="2026-02-10")
-    save_score(conn, paper_id=p1, relevance_score=0.9, quality_score=0.8,
-               combined_score=0.86, summary="A strong trial.",
-               study_design="rct", quality_tier="TIER_4_EXPERIMENTAL")
+    p1 = store_paper(
+        conn,
+        doi="10.1101/g1",
+        title="Alpha Paper",
+        authors=["Smith J"],
+        abstract="Cancer immunotherapy.",
+        source="medrxiv",
+        published_date="2026-02-10",
+    )
+    save_score(
+        conn,
+        paper_id=p1,
+        relevance_score=0.9,
+        quality_score=0.8,
+        combined_score=0.86,
+        summary="A strong trial.",
+        study_design="rct",
+        quality_tier="TIER_4_EXPERIMENTAL",
+    )
 
-    p2 = store_paper(conn, doi="10.1101/g2", title="Beta Paper",
-                     authors=["Jones K"], abstract="Genomics study.",
-                     source="biorxiv", published_date="2026-02-12")
-    save_score(conn, paper_id=p2, relevance_score=0.6, quality_score=0.5,
-               combined_score=0.56, summary="Interesting cohort.",
-               study_design="cohort", quality_tier="TIER_3_CONTROLLED")
+    p2 = store_paper(
+        conn,
+        doi="10.1101/g2",
+        title="Beta Paper",
+        authors=["Jones K"],
+        abstract="Genomics study.",
+        source="biorxiv",
+        published_date="2026-02-12",
+    )
+    save_score(
+        conn,
+        paper_id=p2,
+        relevance_score=0.6,
+        quality_score=0.5,
+        combined_score=0.56,
+        summary="Interesting cohort.",
+        study_design="cohort",
+        quality_tier="TIER_3_CONTROLLED",
+    )
     return app.test_client()
 
 
@@ -109,10 +136,13 @@ class TestSettingsRoute:
         assert b"Sources" in resp.data or b"sources" in resp.data
 
     def test_save_settings(self, client):
-        resp = client.post("/settings/save", data={
-            "sources.lookback_days": "14",
-            "scoring.min_relevance": "0.6",
-        })
+        resp = client.post(
+            "/settings/save",
+            data={
+                "sources.lookback_days": "14",
+                "scoring.min_relevance": "0.6",
+            },
+        )
         assert resp.status_code == 200
         config = client.application.config["BMNEWS_CONFIG"]
         assert config.sources.lookback_days == 14
@@ -130,6 +160,7 @@ class TestSettingsRoute:
 class TestPipelineRoute:
     def test_run_pipeline_returns_status(self, client):
         import time
+
         with patch("bmnews.pipeline.run_pipeline") as mock_run:
             resp = client.post("/pipeline/run")
             assert resp.status_code == 200
@@ -170,9 +201,12 @@ class TestEndToEnd:
         resp = seeded_client.get("/settings")
         assert resp.status_code == 200
 
-        resp = seeded_client.post("/settings/save", data={
-            "sources.lookback_days": "30",
-        })
+        resp = seeded_client.post(
+            "/settings/save",
+            data={
+                "sources.lookback_days": "30",
+            },
+        )
         assert resp.status_code == 200
         config = seeded_client.application.config["BMNEWS_CONFIG"]
         assert config.sources.lookback_days == 30
@@ -185,7 +219,8 @@ class TestFullTextRoute:
         with patch("bmnews.gui.routes.papers.FullTextService") as mock_svc:
             instance = mock_svc.return_value
             instance.fetch_fulltext.return_value = FullTextResult(
-                source="europepmc", html="<p>Full text content</p>",
+                source="europepmc",
+                html="<p>Full text content</p>",
             )
             resp = seeded_client.post(f"/papers/{paper['id']}/fulltext")
             assert resp.status_code == 200
@@ -196,7 +231,8 @@ class TestFullTextRoute:
         with patch("bmnews.gui.routes.papers.FullTextService") as mock_svc:
             instance = mock_svc.return_value
             instance.fetch_fulltext.return_value = FullTextResult(
-                source="europepmc", html="<p>Full text content</p>",
+                source="europepmc",
+                html="<p>Full text content</p>",
             )
             resp = seeded_client.post(f"/papers/{paper['id']}/fulltext")
             assert resp.status_code == 200
@@ -210,11 +246,13 @@ class TestFullTextRoute:
 class TestLauncher:
     def test_find_free_port(self):
         from bmnews.gui.launcher import _find_free_port
+
         port = _find_free_port()
         assert 1024 < port < 65536
 
     def test_build_app(self, tmp_path):
         from bmnews.gui.launcher import _build_app
+
         config = AppConfig()
         config.database.sqlite_path = str(tmp_path / "test.db")
         app, conn = _build_app(config)
@@ -228,6 +266,7 @@ class TestGuiCLI:
         from click.testing import CliRunner
 
         from bmnews.cli import main
+
         runner = CliRunner()
         result = runner.invoke(main, ["gui", "--help"])
         assert result.exit_code == 0
@@ -242,8 +281,11 @@ class TestPagination:
         conn = app.config["BMNEWS_DB"]
         for i in range(45):
             pid = store_paper(
-                conn, doi=f"10.1101/page{i}", title=f"Paged Paper {i}",
-                abstract="Kadabra unique term", source="medrxiv",
+                conn,
+                doi=f"10.1101/page{i}",
+                title=f"Paged Paper {i}",
+                abstract="Kadabra unique term",
+                source="medrxiv",
                 published_date="2026-02-10",
             )
             save_score(conn, paper_id=pid, combined_score=0.5)
@@ -274,8 +316,13 @@ class TestPagination:
 
     def test_more_applies_search_filter(self, many_papers_client):
         conn = many_papers_client.application.config["BMNEWS_DB"]
-        pid = store_paper(conn, doi="10.1101/other", title="Unrelated",
-                          abstract="nothing to see", source="medrxiv")
+        pid = store_paper(
+            conn,
+            doi="10.1101/other",
+            title="Unrelated",
+            abstract="nothing to see",
+            source="medrxiv",
+        )
         save_score(conn, paper_id=pid, combined_score=0.9)
 
         resp = many_papers_client.get("/papers/more?offset=0&limit=50&q=Kadabra")
@@ -295,11 +342,14 @@ class TestSettingsSave:
         assert b"Not saved" in resp.data
 
     def test_valid_values_are_applied(self, client):
-        resp = client.post("/settings/save", data={
-            "sources.lookback_days": "12",
-            "scoring.min_combined": "0.75",
-            "llm.provider": "anthropic",
-        })
+        resp = client.post(
+            "/settings/save",
+            data={
+                "sources.lookback_days": "12",
+                "scoring.min_combined": "0.75",
+                "llm.provider": "anthropic",
+            },
+        )
         assert resp.status_code == 200
         assert b"Settings saved" in resp.data
         config = client.application.config["BMNEWS_CONFIG"]
@@ -323,10 +373,13 @@ class TestSettingsSave:
 
     def test_checked_sources_are_applied(self, client):
         config = client.application.config["BMNEWS_CONFIG"]
-        client.post("/settings/save", data={
-            "sources.enabled_submitted": "1",
-            "sources.enabled": ["medrxiv", "pubmed"],
-        })
+        client.post(
+            "/settings/save",
+            data={
+                "sources.enabled_submitted": "1",
+                "sources.enabled": ["medrxiv", "pubmed"],
+            },
+        )
         assert config.sources.enabled == ["medrxiv", "pubmed"]
 
 
