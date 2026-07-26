@@ -82,7 +82,8 @@ def _known_sources(config: AppConfig) -> list[str]:
         else:
             logger.warning(
                 "Unknown source %r — skipping. Known sources: %s",
-                source_name, ", ".join(sorted(registry_names)),
+                source_name,
+                ", ".join(sorted(registry_names)),
             )
     return known
 
@@ -147,8 +148,11 @@ def run_sync(
     if not sources:
         logger.warning("No known sources enabled — nothing to fetch")
         return SyncReport(
-            sources_synced=[], days_processed=0, records_added=0,
-            records_merged=0, records_failed=0,
+            sources_synced=[],
+            days_processed=0,
+            records_added=0,
+            records_merged=0,
+            records_failed=0,
         )
 
     end = date.today()
@@ -195,8 +199,10 @@ def run_sync(
 
     logger.info(
         "Sync complete: %d added, %d merged, %d failed across %d day(s)",
-        report.records_added, report.records_merged,
-        report.records_failed, report.days_processed,
+        report.records_added,
+        report.records_merged,
+        report.records_failed,
+        report.days_processed,
     )
     for error in report.errors:
         logger.warning("Sync error: %s", error)
@@ -270,7 +276,8 @@ def run_score(
         if total == UNSCORED_BATCH_SIZE:
             logger.warning(
                 "Scoring the %d most recently stored unscored papers; more may "
-                "remain. Re-run `bmnews score` to continue.", UNSCORED_BATCH_SIZE,
+                "remain. Re-run `bmnews score` to continue.",
+                UNSCORED_BATCH_SIZE,
             )
         logger.info("Scoring %d papers...", total)
         if on_progress:
@@ -365,8 +372,7 @@ def run_digest(config: AppConfig, output: str | None = None) -> str:
             max_papers=config.email.max_papers,
             min_relevance=config.scoring.min_relevance,
             exclude_tiers=(
-                tiers_below(config.quality.min_quality_tier)
-                if config.quality.enabled else ()
+                tiers_below(config.quality.min_quality_tier) if config.quality.enabled else ()
             ),
         )
 
@@ -378,12 +384,14 @@ def run_digest(config: AppConfig, output: str | None = None) -> str:
 
         # Render both formats
         html_body = render_digest(
-            papers, templates,
+            papers,
+            templates,
             subject_prefix=config.email.subject_prefix,
             fmt="html",
         )
         text_body = render_digest(
-            papers, templates,
+            papers,
+            templates,
             subject_prefix=config.email.subject_prefix,
             fmt="text",
         )
@@ -410,7 +418,8 @@ def run_digest(config: AppConfig, output: str | None = None) -> str:
                 use_tls=config.email.use_tls,
             )
             record_digest(
-                conn, paper_ids,
+                conn,
+                paper_ids,
                 delivery_method="email" if success else "email_failed",
             )
         else:
@@ -440,7 +449,8 @@ def show_cached_digests(config: AppConfig, days: int | None = None) -> str:
 
     templates = build_template_engine(config)
     text_body = render_digest(
-        papers, templates,
+        papers,
+        templates,
         subject_prefix=config.email.subject_prefix,
         fmt="text",
     )

@@ -112,7 +112,8 @@ def fetch_europepmc(
         else:
             logger.warning(
                 "Stopped after %d EuropePMC pages for %s — results may be truncated",
-                MAX_FETCH_PAGES, date_str,
+                MAX_FETCH_PAGES,
+                date_str,
             )
     except Exception as exc:
         logger.error("Error fetching EuropePMC for %s: %s", date_str, exc)
@@ -214,10 +215,12 @@ def _fulltext_sources(item: dict) -> list[FullTextSourceEntry]:
             continue
         fmt = {"pdf": "pdf", "html": "html", "doi": "html"}.get(style)
         if fmt:
-            sources.append(FullTextSourceEntry(
-                url=url,
-                format=fmt,
-                source=SOURCE_NAME,
-                open_access=True,
-            ))
+            sources.append(
+                FullTextSourceEntry(
+                    url=url,
+                    format=fmt,
+                    source=SOURCE_NAME,
+                    open_access=True,
+                )
+            )
     return sources

@@ -96,6 +96,13 @@ STRANDED_PAPERS_LOG_LIMIT: int = 20
 #: lookback window.
 EXTRAS_FLUSH_THRESHOLD: int = 1000
 
+# --- Notifications ----------------------------------------------------------
+
+#: How many papers one watch delivers in a single run when the watch does not
+#: say. The rest stay in the derived pending queue and can be pulled on demand,
+#: so this bounds a batch rather than discarding anything.
+DEFAULT_NOTIFY_MAX_PER_RUN: int = 5
+
 # --- GUI --------------------------------------------------------------------
 
 #: Number of papers per page in the GUI list and CLI search results.

@@ -99,7 +99,12 @@ def score_papers(
         with ThreadPoolExecutor(max_workers=concurrency) as pool:
             futures = {
                 pool.submit(
-                    _score_single, paper, agent, quality_mgr, quality_filter, interests,
+                    _score_single,
+                    paper,
+                    agent,
+                    quality_mgr,
+                    quality_filter,
+                    interests,
                 ): paper
                 for paper in papers
             }
@@ -144,9 +149,7 @@ def tiers_below(min_tier: str) -> list[str]:
         logger.warning("Unknown min_quality_tier %r — not filtering by tier", min_tier)
         return []
     return [
-        tier.name
-        for tier in QualityTier
-        if tier < floor and tier is not QualityTier.UNCLASSIFIED
+        tier.name for tier in QualityTier if tier < floor and tier is not QualityTier.UNCLASSIFIED
     ]
 
 
@@ -231,17 +234,18 @@ def _score_single(
         filter_settings=quality_filter,
     )
     quality_score = _quality_tier_to_score(quality_assessment)
-    study_design = (
-        quality_assessment.study_design.value if quality_assessment.study_design else ""
-    )
+    study_design = quality_assessment.study_design.value if quality_assessment.study_design else ""
     quality_tier_name = (
         quality_assessment.quality_tier.name if quality_assessment.quality_tier else ""
     )
 
     logger.debug(
         "Paper %s quality: design=%s tier=%s (assessment_tier=%d, confidence=%.2f)",
-        paper_id, study_design, quality_tier_name,
-        quality_assessment.assessment_tier, quality_assessment.confidence,
+        paper_id,
+        study_design,
+        quality_tier_name,
+        quality_assessment.assessment_tier,
+        quality_assessment.confidence,
     )
 
     # --- Combined score (weighted) ---
@@ -256,10 +260,12 @@ def _score_single(
         "study_design": study_design,
         "quality_tier": quality_tier_name,
         "matched_tags": relevance_result.get("matched_tags", []),
-        "assessment_json": json.dumps({
-            "relevance": relevance_result,
-            "quality": quality_assessment.to_dict(),
-        }),
+        "assessment_json": json.dumps(
+            {
+                "relevance": relevance_result,
+                "quality": quality_assessment.to_dict(),
+            }
+        ),
     }
 
 

@@ -21,9 +21,14 @@ def app_with_paper():
     app.config["TESTING"] = True
 
     pid = store_paper(
-        conn, doi="10.1/integ", title="Integration Test Paper",
-        authors=["Smith J", "Doe A"], abstract="Background: Test. Methods: Test.",
-        source="europepmc", pmid="12345", pmcid="PMC999",
+        conn,
+        doi="10.1/integ",
+        title="Integration Test Paper",
+        authors=["Smith J", "Doe A"],
+        abstract="Background: Test. Methods: Test.",
+        source="europepmc",
+        pmid="12345",
+        pmcid="PMC999",
     )
     save_score(conn, paper_id=pid, combined_score=0.8, relevance_score=0.9)
 

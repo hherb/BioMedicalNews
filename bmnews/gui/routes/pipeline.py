@@ -61,9 +61,12 @@ def run() -> str:
     app: Flask = current_app._get_current_object()
 
     if not _pipeline_lock.acquire(blocking=False):
-        return render_template("fragments/status_bar.html",
-                               message="Pipeline already running...", status="busy",
-                               running=True)
+        return render_template(
+            "fragments/status_bar.html",
+            message="Pipeline already running...",
+            status="busy",
+            running=True,
+        )
 
     _pipeline_status.update(running=True, message="Starting pipeline...", status="busy")
 
@@ -93,7 +96,9 @@ def run() -> str:
         except Exception as e:
             logger.exception("Pipeline error")
             _pipeline_status.update(
-                running=False, message=f"Pipeline error: {e}", status="error",
+                running=False,
+                message=f"Pipeline error: {e}",
+                status="error",
             )
         finally:
             _pipeline_lock.release()
@@ -103,14 +108,16 @@ def run() -> str:
     except RuntimeError as e:
         # The worker never ran, so its finally block will not release the lock.
         _pipeline_status.update(
-            running=False, message=f"Could not start pipeline: {e}", status="error",
+            running=False,
+            message=f"Could not start pipeline: {e}",
+            status="error",
         )
         _pipeline_lock.release()
         raise
 
-    return render_template("fragments/status_bar.html",
-                           message="Starting pipeline...", status="busy",
-                           running=True)
+    return render_template(
+        "fragments/status_bar.html", message="Starting pipeline...", status="busy", running=True
+    )
 
 
 @pipeline_bp.route("/pipeline/resume", methods=["POST"])
@@ -129,18 +136,23 @@ def resume() -> str:
     count = count_unscored_papers(conn)
 
     if count == 0 or _pipeline_status["running"]:
-        return render_template("fragments/status_bar.html",
-                               message=_pipeline_status["message"],
-                               status=_pipeline_status["status"],
-                               running=_pipeline_status["running"])
+        return render_template(
+            "fragments/status_bar.html",
+            message=_pipeline_status["message"],
+            status=_pipeline_status["status"],
+            running=_pipeline_status["running"],
+        )
 
     config: AppConfig = current_app.config["BMNEWS_CONFIG"]
     app: Flask = current_app._get_current_object()
 
     if not _pipeline_lock.acquire(blocking=False):
-        return render_template("fragments/status_bar.html",
-                               message="Pipeline already running...", status="busy",
-                               running=True)
+        return render_template(
+            "fragments/status_bar.html",
+            message="Pipeline already running...",
+            status="busy",
+            running=True,
+        )
 
     _pipeline_status.update(
         running=True,
@@ -162,7 +174,9 @@ def resume() -> str:
         except Exception as e:
             logger.exception("Resume scoring error")
             _pipeline_status.update(
-                running=False, message=f"Scoring error: {e}", status="error",
+                running=False,
+                message=f"Scoring error: {e}",
+                status="error",
             )
         finally:
             _pipeline_lock.release()
@@ -171,14 +185,19 @@ def resume() -> str:
         _start_pipeline_thread(_run)
     except RuntimeError as e:
         _pipeline_status.update(
-            running=False, message=f"Could not start scoring: {e}", status="error",
+            running=False,
+            message=f"Could not start scoring: {e}",
+            status="error",
         )
         _pipeline_lock.release()
         raise
 
-    return render_template("fragments/status_bar.html",
-                           message=f"Resuming scoring of {count} papers...",
-                           status="busy", running=True)
+    return render_template(
+        "fragments/status_bar.html",
+        message=f"Resuming scoring of {count} papers...",
+        status="busy",
+        running=True,
+    )
 
 
 @pipeline_bp.route("/pipeline/status")
@@ -228,13 +247,25 @@ def status() -> str:
     if needs_list_refresh:
         # Trigger a full paper list reload via OOB swap
         from bmnews.db.operations import get_papers_filtered
+
         papers, total = get_papers_filtered(
-            conn, sort="date", limit=DEFAULT_PAGE_SIZE, offset=0, with_total=True,
+            conn,
+            sort="date",
+            limit=DEFAULT_PAGE_SIZE,
+            offset=0,
+            with_total=True,
         )
         list_html = render_template(
             "fragments/paper_list.html",
-            papers=papers, total=total, offset=0, limit=DEFAULT_PAGE_SIZE,
-            sort="date", source="", tier="", design="", search="",
+            papers=papers,
+            total=total,
+            offset=0,
+            limit=DEFAULT_PAGE_SIZE,
+            sort="date",
+            source="",
+            tier="",
+            design="",
+            search="",
         )
         html += f'<div id="paper-list" hx-swap-oob="innerHTML">{list_html}</div>'
     elif oob_cards:
