@@ -107,9 +107,15 @@ jobs:
         ports:
           - 5432:5432
         # Without this the job races the container: the first connection
-        # attempt can arrive before the server is accepting them.
+        # attempt can arrive before the server is accepting them. `-d` is not
+        # optional noise — without it pg_isready connects to a database named
+        # after the user, which does not exist here, and the container log
+        # fills with FATAL lines. The probe still passes (pg_isready reports
+        # ready whenever the server *responds*, rejection included), so the
+        # effect is a check that looks like it verifies the test database and
+        # does not.
         options: >-
-          --health-cmd "pg_isready -U bmnews"
+          --health-cmd "pg_isready -U bmnews -d bmnews_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
