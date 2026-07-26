@@ -7,6 +7,7 @@ provides typed dataclass access to all configuration sections.
 from __future__ import annotations
 
 import logging
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -294,6 +295,26 @@ def _toml_str(value: str) -> str:
     return '"' + "".join(out) + '"'
 
 
+#: Characters TOML allows in a bare key. Anything else has to be quoted.
+_BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _toml_key(key: str) -> str:
+    """Render *key* as a TOML key, quoting it when it cannot stand bare.
+
+    Sub-table names come from the user — a watch is named by its config table,
+    and the GUI lets that name be typed. A name carrying a space or a quote
+    would emit an unparseable header and a name carrying a dot would emit a
+    *valid* one that reads as two nested tables, so ``a.b`` would silently come
+    back as ``{"a": {"b": ...}}``. Either way :func:`save_config` destroys the
+    configuration it was asked to preserve.
+
+    Bare keys are left bare so existing files keep their shape rather than
+    churning every table heading on the next save.
+    """
+    return key if _BARE_KEY.match(key) else _toml_str(key)
+
+
 def _toml_value(value: Any) -> str | None:
     """Render a scalar or list config value as TOML, or None if unsupported."""
     if isinstance(value, bool):
@@ -352,14 +373,14 @@ def save_config(config: AppConfig, path: str | Path | None = None) -> Path:
                 for key, sub_value in scalars.items():
                     rendered = _toml_value(sub_value)
                     if rendered is not None:
-                        lines.append(f"{key} = {rendered}")
+                        lines.append(f"{_toml_key(key)} = {rendered}")
                 lines.append("")
             for key, sub_table in nested.items():
-                lines.append(f"[{name}.{field_name}.{key}]")
+                lines.append(f"[{name}.{field_name}.{_toml_key(key)}]")
                 for sub_key, leaf in sub_table.items():
                     rendered = _toml_value(leaf)
                     if rendered is not None:
-                        lines.append(f"{sub_key} = {rendered}")
+                        lines.append(f"{_toml_key(sub_key)} = {rendered}")
                 lines.append("")
 
     _write_section("database", config.database)

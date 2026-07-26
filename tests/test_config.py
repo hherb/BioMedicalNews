@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from bmnews.config import AppConfig, load_config, save_config, write_default_config
 
 
@@ -200,3 +202,46 @@ class TestSaveConfig:
         assert watches["w"].min_relevance == 0.8
         assert watches["w"].channels == ("mail",)
         assert channels["mail"].kind == "email"
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "melanoma-trials",  # a bare key, emitted unquoted
+            "my melanoma watch",  # a space makes the header unparseable
+            "sepsis.trials",  # a dot reads as two nested tables
+            'he said "hi"',  # quotes have to survive escaping
+            "",  # an empty name is not a key at all
+        ],
+    )
+    def test_a_watch_name_survives_the_round_trip_whatever_it_is(self, tmp_path, name):
+        """Watch names are user-authored, so the serializer has to quote them.
+
+        Unquoted, a name carrying a space wrote a header ``tomllib`` refuses,
+        and a name carrying a dot wrote a *valid* one meaning something else —
+        ``a.b`` came back as ``{"a": {"b": ...}}``. Either way saving destroyed
+        the configuration it was asked to preserve.
+        """
+        cfg = AppConfig()
+        cfg.notifications.watches = {name: {"min_relevance": 0.8}}
+
+        loaded = load_config(save_config(cfg, tmp_path / "config.toml"))
+
+        assert loaded.notifications.watches == {name: {"min_relevance": 0.8}}
+
+    def test_an_odd_key_inside_a_watch_survives_too(self, tmp_path):
+        """TOML permits quoted keys, so a watch table can hold one."""
+        cfg = AppConfig()
+        cfg.notifications.watches = {"w": {"odd key": 1, "min_relevance": 0.8}}
+
+        loaded = load_config(save_config(cfg, tmp_path / "config.toml"))
+
+        assert loaded.notifications.watches["w"] == {"odd key": 1, "min_relevance": 0.8}
+
+    def test_bare_names_are_left_unquoted(self, tmp_path):
+        """Quoting only what needs it keeps existing files from churning."""
+        cfg = AppConfig()
+        cfg.notifications.watches = {"melanoma-trials": {"min_relevance": 0.8}}
+
+        text = save_config(cfg, tmp_path / "config.toml").read_text()
+
+        assert "[notifications.watches.melanoma-trials]" in text

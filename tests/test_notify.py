@@ -244,6 +244,24 @@ class TestWatchParsing:
         with pytest.raises(WatchConfigError):
             Watch.from_config("w", data)
 
+    @pytest.mark.parametrize("value", ["false", "no", 0, 1, ""])
+    def test_enabled_must_be_a_real_boolean(self, value):
+        """``bool("false")`` is True — a switch written off would come out on.
+
+        Every other criterion raises on a value it cannot mean; this one used
+        to silently mean the opposite, which is worse than any of them.
+        """
+        with pytest.raises(WatchConfigError):
+            Watch.from_config("w", {"enabled": value})
+
+    @pytest.mark.parametrize(
+        "data", [{"min_relevance": True}, {"min_combined": False}, {"max_per_run": True}]
+    )
+    def test_a_boolean_is_not_a_number(self, data):
+        """``float(True)`` is 1.0 — a threshold nothing realistic clears."""
+        with pytest.raises(WatchConfigError):
+            Watch.from_config("w", data)
+
 
 class TestChannelParsing:
     def test_settings_are_kept_and_kind_is_not(self):

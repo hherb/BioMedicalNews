@@ -142,13 +142,14 @@ class Watch:
         Raises:
             WatchConfigError: If a value cannot be interpreted — a
                 non-numeric threshold, a score outside 0.0–1.0, a tier or
-                study design bmlib does not define, or ``max_per_run`` below 1.
+                study design bmlib does not define, a non-boolean ``enabled``,
+                or ``max_per_run`` below 1.
         """
         _warn_unknown(f"watch {name!r}", data, _WATCH_FIELDS)
 
         return cls(
             name=name,
-            enabled=bool(data.get("enabled", True)),
+            enabled=_flag("enabled", data.get("enabled", True)),
             min_relevance=_score("min_relevance", data.get("min_relevance", 0.0)),
             min_combined=_score("min_combined", data.get("min_combined", 0.0)),
             min_quality_tier=_tier(data.get("min_quality_tier", "")),
@@ -260,8 +261,28 @@ def _warn_unknown(subject: str, data: dict[str, Any], known: frozenset[str]) -> 
         )
 
 
+def _flag(key: str, value: Any) -> bool:
+    """Validate a boolean switch, rejecting anything that only looks like one.
+
+    ``bool("false")`` is ``True``, so coercing here would turn a switch the
+    user wrote off into one that is on — the exact silent misreading every
+    other field in this module raises about. TOML has real booleans, so
+    demanding one costs nothing.
+    """
+    if not isinstance(value, bool):
+        raise WatchConfigError(f"{key} must be true or false, got {value!r}")
+    return value
+
+
 def _score(key: str, value: Any) -> float:
-    """Coerce a 0.0–1.0 score threshold."""
+    """Coerce a 0.0–1.0 score threshold.
+
+    ``bool`` is rejected rather than coerced: ``float(True)`` is ``1.0``, a
+    threshold nothing realistic clears, and a config that says ``true`` here
+    means something other than what it would get.
+    """
+    if isinstance(value, bool):
+        raise WatchConfigError(f"{key} must be a number, got {value!r}")
     try:
         score = float(value)
     except (TypeError, ValueError):
@@ -315,6 +336,8 @@ def _max_per_run(value: Any) -> int:
     """Coerce the per-run delivery cap, which must leave something to send."""
     if value is None:
         return DEFAULT_NOTIFY_MAX_PER_RUN
+    if isinstance(value, bool):
+        raise WatchConfigError(f"max_per_run must be a whole number, got {value!r}")
     try:
         count = int(value)
     except (TypeError, ValueError):

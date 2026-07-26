@@ -115,10 +115,17 @@ def _new_pg_db() -> Any:
     _pg_schema_counter += 1
     schema = f"bmnews_test_{os.getpid()}_{_pg_schema_counter}"
 
-    cur = conn.cursor()
-    cur.execute(f"CREATE SCHEMA {schema}")
-    cur.execute(f"SET search_path TO {schema}")
-    conn.commit()
+    # Until the connection is registered for teardown, nothing else will close
+    # it — so a failure setting the schema up has to close it here or every
+    # later test in the run leaks another connection to the same server.
+    try:
+        cur = conn.cursor()
+        cur.execute(f"CREATE SCHEMA {schema}")
+        cur.execute(f"SET search_path TO {schema}")
+        conn.commit()
+    except Exception:
+        conn.close()
+        raise
 
     _pg_open.append((conn, schema))
     return conn
