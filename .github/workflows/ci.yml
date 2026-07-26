@@ -141,12 +141,18 @@ jobs:
       # going missing — drop the `pytestmark` from tests/test_db.py and this
       # job runs a SQLite-only suite and reports success. Collection is
       # independent of the DSN, so this check needs no database.
+      #
+      # Scoped to tests/test_db.py, not the whole suite: once any other module
+      # opts into `db_backend`, a suite-wide count stays above zero while the
+      # module this job exists for has quietly stopped being parameterised.
+      # The floor is well under the current count so ordinary test-writing
+      # does not trip it, and well above zero so losing the mark does.
       - name: Assert the PostgreSQL parameterisation still exists
         run: |
-          count=$(python -m pytest -q --collect-only 2>/dev/null \
+          count=$(python -m pytest -q --collect-only tests/test_db.py 2>/dev/null \
                   | grep -c '\[postgresql\]' || true)
-          echo "collected $count PostgreSQL-parameterised tests"
-          test "$count" -gt 0
+          echo "collected $count PostgreSQL-parameterised tests in tests/test_db.py"
+          test "$count" -ge 70
 
       # Setting the DSN is what un-skips the PostgreSQL parameterisation, so
       # the whole suite runs and tests/test_db.py runs twice — once per
