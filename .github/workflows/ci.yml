@@ -77,12 +77,75 @@ jobs:
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
       # The GUI extra brings in Flask, which tests/test_gui_app.py needs. The
-      # postgresql extra is deliberately left out: every test uses in-memory
-      # SQLite, so it would only add a psycopg2 build to each run and test
-      # nothing new. Exercising the PostgreSQL paths needs tests that target a
-      # live server, which do not exist yet.
+      # postgresql extra is left out here on purpose: without
+      # BMNEWS_TEST_PG_DSN the PostgreSQL parameterisation skips, so installing
+      # psycopg2 on all three versions would buy nothing. The test-postgresql
+      # job below is where that backend is exercised.
       - name: Install project
         run: uv pip install -e ".[gui,dev]"
 
       - name: Run tests
+        run: python -m pytest -q
+
+  # A separate job rather than another axis on the matrix above. The two ask
+  # different questions — the matrix asks "does bmnews work on this Python?",
+  # this asks "does bmnews work on this database?" — and crossing them would
+  # triple the PostgreSQL containers for no extra answer. It also keeps the
+  # failure legible: a red check here means a backend problem, not a version
+  # problem.
+  test-postgresql:
+    name: Test (PostgreSQL)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: bmnews
+          POSTGRES_PASSWORD: bmnews
+          POSTGRES_DB: bmnews_test
+        ports:
+          - 5432:5432
+        # Without this the job races the container: the first connection
+        # attempt can arrive before the server is accepting them.
+        options: >-
+          --health-cmd "pg_isready -U bmnews"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Create environment
+        run: |
+          uv venv --python 3.11
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Install project
+        run: uv pip install -e ".[gui,dev,postgresql]"
+
+      # A bad DSN or a container that never started shows up as a failure, so
+      # those need no guard. What would pass quietly is the parameterisation
+      # going missing — drop the `pytestmark` from tests/test_db.py and this
+      # job runs a SQLite-only suite and reports success. Collection is
+      # independent of the DSN, so this check needs no database.
+      - name: Assert the PostgreSQL parameterisation still exists
+        run: |
+          count=$(python -m pytest -q --collect-only 2>/dev/null \
+                  | grep -c '\[postgresql\]' || true)
+          echo "collected $count PostgreSQL-parameterised tests"
+          test "$count" -gt 0
+
+      # Setting the DSN is what un-skips the PostgreSQL parameterisation, so
+      # the whole suite runs and tests/test_db.py runs twice — once per
+      # backend.
+      - name: Run tests
+        env:
+          BMNEWS_TEST_PG_DSN: postgresql://bmnews:bmnews@localhost:5432/bmnews_test
         run: python -m pytest -q

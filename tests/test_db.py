@@ -6,7 +6,16 @@ import json
 import logging
 from datetime import date, timedelta
 
-from bmlib.db import connect_sqlite, fetch_all, fetch_scalar, run_migrations, table_exists
+import pytest
+from bmlib.db import (
+    execute,
+    fetch_all,
+    fetch_one,
+    fetch_scalar,
+    placeholder,
+    run_migrations,
+    table_exists,
+)
 
 from bmnews.db import migrations
 from bmnews.db.migrations import MIGRATIONS
@@ -32,10 +41,17 @@ from bmnews.db.operations import (
     store_paper,
 )
 from bmnews.db.schema import init_db
+from tests.backends import new_db
+
+# Every test in this module runs once per supported backend. bmnews's SQL is
+# backend-specific in several places (JSON array unnesting, LIKE vs ILIKE, the
+# per-migration DDL pairs), so a suite that only ever saw SQLite could not
+# catch a PostgreSQL-only regression.
+pytestmark = pytest.mark.usefixtures("db_backend")
 
 
 def _db():
-    conn = connect_sqlite(":memory:")
+    conn = new_db()
     init_db(conn)
     return conn
 
@@ -88,13 +104,15 @@ class TestSchema:
         save_paper_tags(conn, paper_id=pid, tags=["onc"])
         record_digest(conn, [pid], delivery_method="stdout")
 
-        conn.execute("DELETE FROM publications WHERE id = ?", (pid,))
+        ph = placeholder(conn)
+        execute(conn, f"DELETE FROM publications WHERE id = {ph}", (pid,))
         conn.commit()
 
         for table in ("scores", "paper_tags", "digest_papers", "paper_extras"):
             column = "publication_id" if table == "paper_extras" else "paper_id"
             assert (
-                fetch_scalar(conn, f"SELECT COUNT(*) FROM {table} WHERE {column} = ?", (pid,)) == 0
+                fetch_scalar(conn, f"SELECT COUNT(*) FROM {table} WHERE {column} = {ph}", (pid,))
+                == 0
             ), f"{table} kept a row pointing at a deleted publication"
 
 
@@ -773,18 +791,24 @@ class TestCountUnscoredPapers:
 
 def _v3_db():
     """A database at schema version 3 — the last one with a ``papers`` table."""
-    conn = connect_sqlite(":memory:")
+    conn = new_db()
     run_migrations(conn, MIGRATIONS[:3])
     return conn
 
 
 def _insert_v3_paper(conn, doi, title, **kwargs):
-    """Insert a row into the pre-migration ``papers`` table."""
-    cur = conn.execute(
+    """Insert a row into the pre-migration ``papers`` table.
+
+    ``RETURNING`` rather than ``cursor.lastrowid``: psycopg2 has no such
+    attribute, and both backends have supported the clause for years.
+    """
+    ph = placeholder(conn)
+    row = fetch_one(
+        conn,
         "INSERT INTO papers (doi, title, authors, abstract, url, source,"
         " published_date, categories, metadata_json, pmid, pmcid,"
         " fulltext_html, fulltext_source)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        f" VALUES ({', '.join([ph] * 13)}) RETURNING id",
         (
             doi,
             title,
@@ -802,15 +826,17 @@ def _insert_v3_paper(conn, doi, title, **kwargs):
         ),
     )
     conn.commit()
-    return cur.lastrowid
+    return row["id"]
 
 
 def _insert_v3_score(conn, paper_id, **kwargs):
     """Insert a row into the pre-migration ``scores`` table."""
-    conn.execute(
+    ph = placeholder(conn)
+    execute(
+        conn,
         "INSERT INTO scores (paper_id, relevance_score, quality_score,"
         " combined_score, summary, study_design, quality_tier)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+        f" VALUES ({', '.join([ph] * 7)})",
         (
             paper_id,
             kwargs.get("relevance_score", 0.0),
@@ -861,13 +887,19 @@ class TestMigrationToPublications:
         _insert_v3_score(conn, self.p2, combined_score=0.9, summary="higher")
         _insert_v3_score(conn, self.p3, combined_score=0.3, summary="b")
 
-        conn.execute("INSERT INTO paper_tags (paper_id, tag) VALUES (?, ?)", (self.p1, "onc"))
-        conn.execute("INSERT INTO paper_tags (paper_id, tag) VALUES (?, ?)", (self.p2, "onc"))
-        conn.execute("INSERT INTO digests (paper_count, delivery_method) VALUES (2, 'stdout')")
-        digest_id = conn.execute("SELECT id FROM digests").fetchone()["id"]
+        ph = placeholder(conn)
         for pid in (self.p1, self.p2):
-            conn.execute(
-                "INSERT INTO digest_papers (digest_id, paper_id) VALUES (?, ?)",
+            execute(
+                conn,
+                f"INSERT INTO paper_tags (paper_id, tag) VALUES ({ph}, {ph})",
+                (pid, "onc"),
+            )
+        execute(conn, "INSERT INTO digests (paper_count, delivery_method) VALUES (2, 'stdout')")
+        digest_id = fetch_scalar(conn, "SELECT id FROM digests")
+        for pid in (self.p1, self.p2):
+            execute(
+                conn,
+                f"INSERT INTO digest_papers (digest_id, paper_id) VALUES ({ph}, {ph})",
                 (digest_id, pid),
             )
         conn.commit()

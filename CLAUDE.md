@@ -23,6 +23,13 @@ pytest                                              # all tests
 pytest tests/test_db.py                             # single file
 pytest tests/test_db.py::TestPapers::test_upsert    # single test
 
+# The DB tests run once per backend. Without a DSN the PostgreSQL half skips;
+# point BMNEWS_TEST_PG_DSN at a live server to run it (CI does this from a
+# `services: postgres` container). The tests create and drop their own schemas,
+# so give them a scratch database, not one with anything in it.
+BMNEWS_TEST_PG_DSN=postgresql://bmnews:bmnews@localhost:5432/bmnews_test pytest
+pytest -k postgresql                                # just the PostgreSQL runs
+
 # Lint and format
 ruff check bmnews/ tests/                           # lint
 ruff format --check bmnews/ tests/                  # format check
@@ -258,7 +265,8 @@ Desktop app: pywebview (native window) + Flask (HTTP backend) + HTMX (frontend i
 
 ## Testing Patterns
 
-- **In-memory SQLite** for all DB tests — `connect_sqlite(":memory:")` + `init_db(conn)`.
+- **Both backends for DB tests** — `tests/test_db.py` sets `pytestmark = pytest.mark.usefixtures("db_backend")`, so every test in it runs once per backend. Build databases with `tests.backends.new_db()`, never `connect_sqlite(":memory:")` directly, and use `placeholder(conn)` / `bmlib.db.execute` in test helpers rather than raw `conn.execute("… ?")`. SQLite is in-memory; PostgreSQL runs only when `BMNEWS_TEST_PG_DSN` names a live server (CI's `test-postgresql` job), each connection isolated in a schema of its own, and is skipped otherwise.
+- **In-memory SQLite** for the non-DB suites (pipeline, GUI, fulltext) — the backend-specific SQL all lives in `db/operations.py` and `db/migrations.py`, which `test_db.py` covers.
 - **Mocked HTTP** (httpx) for fetcher tests, **mocked `open_db`** for pipeline/CLI tests.
 - **Click's `CliRunner`** for CLI command tests.
 - **Flask test client** for GUI route tests (`create_app()` with test config, `client.get()`/`client.post()`).
@@ -269,7 +277,8 @@ Test files:
 | File | Coverage |
 |---|---|
 | `test_config.py` | Config loading, TOML parsing, backward-compat defaults |
-| `test_db.py` | All database operations, migrations, storing/dedup, filtering, tagging, digests, paper extras, digest selection filters, and the v3 → v4 data migration |
+| `test_db.py` | All database operations, migrations, storing/dedup, filtering, tagging, digests, paper extras, digest selection filters, and the v3 → v4 data migration — **run against SQLite and PostgreSQL** |
+| `backends.py` / `conftest.py` | Not tests: the per-backend parameterisation `test_db.py` opts into |
 | `test_digest.py` | HTML/text digest rendering |
 | `test_fetchers.py` | Europe PMC fetcher + its registration in bmlib's source registry |
 | `test_fulltext_integration.py` | Fulltext service integration (Europe PMC/Unpaywall/DOI) |
