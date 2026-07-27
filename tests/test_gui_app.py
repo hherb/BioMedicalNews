@@ -207,6 +207,62 @@ class TestFullTextRoute:
         assert resp.status_code == 404
 
 
+class TestFullTextPDFLink:
+    """The PDF stays on offer beside text extracted from it.
+
+    Extraction recovers an article's prose but not its figures, tables or
+    layout, so a reader who needs those must be able to reach the original.
+    """
+
+    def test_pdf_link_shown_beside_extracted_text(self, seeded_client):
+        conn = seeded_client.application.config["BMNEWS_DB"]
+        paper = get_paper_by_doi(conn, "10.1101/g1")
+        with patch("bmnews.gui.routes.papers.FullTextService") as mock_svc:
+            mock_svc.return_value.fetch_fulltext.return_value = FullTextResult(
+                source="medrxiv",
+                html="<p>Extracted body text.</p>",
+                pdf_url="https://medrxiv.org/paper.full.pdf",
+            )
+            resp = seeded_client.post(f"/papers/{paper['id']}/fulltext")
+
+        assert resp.status_code == 200
+        assert b"Extracted body text." in resp.data
+        assert b"https://medrxiv.org/paper.full.pdf" in resp.data
+        assert b"View PDF" in resp.data
+
+    def test_no_pdf_link_without_a_pdf(self, seeded_client):
+        """JATS-derived text has no PDF behind it, so no button is offered."""
+        conn = seeded_client.application.config["BMNEWS_DB"]
+        paper = get_paper_by_doi(conn, "10.1101/g1")
+        with patch("bmnews.gui.routes.papers.FullTextService") as mock_svc:
+            mock_svc.return_value.fetch_fulltext.return_value = FullTextResult(
+                source="europepmc", html="<p>Parsed from JATS.</p>",
+            )
+            resp = seeded_client.post(f"/papers/{paper['id']}/fulltext")
+
+        assert resp.status_code == 200
+        assert b"View PDF" not in resp.data
+
+    def test_pdf_link_survives_caching(self, seeded_client):
+        """A second request is served from the DB and must still offer the PDF."""
+        conn = seeded_client.application.config["BMNEWS_DB"]
+        paper = get_paper_by_doi(conn, "10.1101/g1")
+        with patch("bmnews.gui.routes.papers.FullTextService") as mock_svc:
+            mock_svc.return_value.fetch_fulltext.return_value = FullTextResult(
+                source="medrxiv",
+                html="<p>Extracted body text.</p>",
+                pdf_url="https://medrxiv.org/paper.full.pdf",
+            )
+            seeded_client.post(f"/papers/{paper['id']}/fulltext")
+            # The service must not be consulted again for the cached paper.
+            mock_svc.return_value.fetch_fulltext.reset_mock()
+            resp = seeded_client.post(f"/papers/{paper['id']}/fulltext")
+            mock_svc.return_value.fetch_fulltext.assert_not_called()
+
+        assert b"https://medrxiv.org/paper.full.pdf" in resp.data
+        assert b"View PDF" in resp.data
+
+
 class TestLauncher:
     def test_find_free_port(self):
         from bmnews.gui.launcher import _find_free_port

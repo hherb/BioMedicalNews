@@ -198,7 +198,11 @@ def paper_fulltext(paper_id: int) -> str:
         source = paper.get("fulltext_source", "")
         if source in _LINK_SOURCES:
             return _link_fragment(source, paper["fulltext_html"])
-        return render_template("fragments/fulltext_content.html", paper=paper)
+        return render_template(
+            "fragments/fulltext_content.html",
+            paper=paper,
+            pdf_url=paper.get("fulltext_pdf_url") or "",
+        )
 
     pmc_id = paper.get("pmcid") or ""
     doi = paper.get("doi") or ""
@@ -221,14 +225,21 @@ def paper_fulltext(paper_id: int) -> str:
         logger.exception("Unexpected error retrieving fulltext for paper %s", paper_id)
         return _UNAVAILABLE_HTML
 
-    # Inline HTML (JATS-parsed or cached HTML)
+    # Inline HTML (JATS-parsed, PDF-extracted, or cached HTML). A PDF the
+    # text came from is kept alongside it: extraction recovers the prose but
+    # not the figures, tables or layout, so the original stays on offer.
     if result.html:
+        pdf_url = result.pdf_url or ""
         save_fulltext(
             conn, paper_id=paper_id, html=result.html, source=result.source,
+            pdf_url=pdf_url,
         )
         paper["fulltext_html"] = result.html
         paper["fulltext_source"] = result.source
-        return render_template("fragments/fulltext_content.html", paper=paper)
+        paper["fulltext_pdf_url"] = pdf_url
+        return render_template(
+            "fragments/fulltext_content.html", paper=paper, pdf_url=pdf_url,
+        )
 
     # Otherwise store whichever link we resolved and render it.
     for value, source in (

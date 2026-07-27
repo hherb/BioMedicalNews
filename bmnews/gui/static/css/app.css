@@ -350,6 +350,16 @@ body {
     letter-spacing: 0;
     vertical-align: middle;
 }
+/* Offered beside the heading whenever the text came from a PDF, since
+   extraction recovers the prose but not figures, tables or layout. */
+.fulltext-pdf-link {
+    float: right;
+    font-size: 0.75rem;
+    padding: 0.2rem 0.6rem;
+    text-transform: none;
+    letter-spacing: 0;
+    text-decoration: none;
+}
 
 .fulltext-content h1 { font-size: 1.3rem; margin: 1.5rem 0 0.75rem; }
 .fulltext-content h2 { font-size: 1.15rem; margin: 1.25rem 0 0.5rem; color: var(--text); }

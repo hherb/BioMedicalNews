@@ -509,6 +509,35 @@ class TestPaperExtras:
         assert paper["fulltext_html"] == "http://x/p.pdf"
         assert paper["fulltext_source"] == "unpaywall_pdf"
 
+    def test_pdf_url_is_kept_beside_the_text(self):
+        """Text extracted from a PDF keeps a pointer back to the original."""
+        conn = _db()
+        pid = store_paper(conn, doi="10.1/pdf", title="PDF Paper")
+        save_fulltext(
+            conn, paper_id=pid, html="<p>Extracted.</p>", source="medrxiv",
+            pdf_url="https://medrxiv.org/paper.full.pdf",
+        )
+        paper = get_paper_with_score(conn, pid)
+        assert paper["fulltext_html"] == "<p>Extracted.</p>"
+        assert paper["fulltext_pdf_url"] == "https://medrxiv.org/paper.full.pdf"
+
+    def test_pdf_url_defaults_to_empty(self):
+        conn = _db()
+        pid = store_paper(conn, doi="10.1/nopdf", title="No PDF")
+        save_fulltext(conn, paper_id=pid, html="<p>JATS.</p>", source="europepmc")
+        assert get_paper_with_score(conn, pid)["fulltext_pdf_url"] == ""
+
+    def test_replacing_the_text_clears_a_stale_pdf_url(self):
+        """A later retrieval without a PDF must not leave the old link behind."""
+        conn = _db()
+        pid = store_paper(conn, doi="10.1/stale", title="Stale")
+        save_fulltext(
+            conn, paper_id=pid, html="<p>From PDF.</p>", source="medrxiv",
+            pdf_url="https://medrxiv.org/old.pdf",
+        )
+        save_fulltext(conn, paper_id=pid, html="<p>From JATS.</p>", source="europepmc")
+        assert get_paper_with_score(conn, pid)["fulltext_pdf_url"] == ""
+
     def test_metadata_and_fulltext_do_not_clobber_each_other(self):
         conn = _db()
         pid = store_paper(conn, doi="10.1/both", title="Both", metadata={"cited_by": 4})
@@ -936,3 +965,142 @@ class TestMigrationStrandedPapers:
         run_migrations(conn, MIGRATIONS)
 
         assert fetch_scalar(conn, "SELECT COUNT(*) FROM publications") == 1
+
+
+class TestMigrationFulltextPdfUrl:
+    """Migration 5 adds the PDF column and drops abstract-only full texts.
+
+    Before it, a body-less JATS document from a preprint server was stored as
+    though it were full text. Those rows must be cleared so the next request
+    fetches the real article, without disturbing anything else.
+    """
+
+    def _v4_db(self):
+        """A database at schema version 4 — before the PDF column existed."""
+        conn = connect_sqlite(":memory:")
+        run_migrations(conn, MIGRATIONS[:4])
+        return conn
+
+    def _seed(self, conn, doi, source, html="<p>cached</p>", metadata="{}"):
+        """Store a publication with cached full text, returning its id."""
+        publication_id = store_paper(conn, doi=doi, title=f"Paper {doi}")
+        conn.execute(
+            "INSERT INTO paper_extras (publication_id, metadata_json,"
+            " fulltext_html, fulltext_source) VALUES (?, ?, ?, ?)",
+            (publication_id, metadata, html, source),
+        )
+        conn.commit()
+        return publication_id
+
+    def _fulltext(self, conn, publication_id):
+        row = conn.execute(
+            "SELECT fulltext_html, fulltext_source FROM paper_extras"
+            " WHERE publication_id = ?",
+            (publication_id,),
+        ).fetchone()
+        return row["fulltext_html"], row["fulltext_source"]
+
+    def test_adds_the_column(self):
+        conn = self._v4_db()
+        run_migrations(conn, MIGRATIONS[4:5])
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(paper_extras)")}
+        assert "fulltext_pdf_url" in columns
+
+    def test_clears_preprint_server_full_text(self):
+        conn = self._v4_db()
+        med = self._seed(conn, "10.1/med", "medrxiv")
+        bio = self._seed(conn, "10.1/bio", "biorxiv")
+        run_migrations(conn, MIGRATIONS[4:5])
+
+        assert self._fulltext(conn, med) == (None, "")
+        assert self._fulltext(conn, bio) == (None, "")
+
+    def test_leaves_other_sources_alone(self):
+        """Europe PMC full text and link markers were never affected."""
+        conn = self._v4_db()
+        epmc = self._seed(conn, "10.1/epmc", "europepmc")
+        pdf = self._seed(conn, "10.1/pdf", "unpaywall_pdf", html="http://x/p.pdf")
+        pub = self._seed(conn, "10.1/pub", "publisher_url", html="http://x/paper")
+        run_migrations(conn, MIGRATIONS[4:5])
+
+        assert self._fulltext(conn, epmc) == ("<p>cached</p>", "europepmc")
+        assert self._fulltext(conn, pdf) == ("http://x/p.pdf", "unpaywall_pdf")
+        assert self._fulltext(conn, pub) == ("http://x/paper", "publisher_url")
+
+    def test_keeps_the_rest_of_the_row(self):
+        """Clearing the text must not disturb the metadata beside it."""
+        conn = self._v4_db()
+        pid = self._seed(conn, "10.1/meta", "medrxiv", metadata='{"cited_by": 9}')
+        run_migrations(conn, MIGRATIONS[4:5])
+
+        row = conn.execute(
+            "SELECT metadata_json FROM paper_extras WHERE publication_id = ?", (pid,)
+        ).fetchone()
+        assert json.loads(row["metadata_json"]) == {"cited_by": 9}
+
+    def test_is_a_no_op_on_an_empty_database(self):
+        conn = self._v4_db()
+        run_migrations(conn, MIGRATIONS[4:5])
+        assert conn.execute("SELECT COUNT(*) FROM paper_extras").fetchone()[0] == 0
+
+
+class TestNullTextColumns:
+    """A NULL text column must reach callers as a string, not ``None``.
+
+    ``publications`` leaves most text columns nullable, and sources do omit
+    them — an abstract-less record is common enough. Callers ask for these
+    with ``paper.get("abstract", "")``, which does *not* protect them: the
+    key is present with a ``None`` value, so the default never applies and
+    the ``None`` travels on until something subscripts it.
+    """
+
+    def _paper_without_abstract(self, conn):
+        """Store a publication whose abstract column is SQL NULL."""
+        pid = store_paper(conn, doi="10.1/noabs", title="No Abstract Paper")
+        conn.execute("UPDATE publications SET abstract = NULL WHERE id = ?", (pid,))
+        conn.commit()
+        return pid
+
+    def test_null_abstract_reads_back_as_empty_string(self):
+        conn = _db()
+        pid = self._paper_without_abstract(conn)
+        save_score(conn, paper_id=pid, combined_score=0.5)
+
+        assert get_paper_with_score(conn, pid)["abstract"] == ""
+
+    def test_unscored_papers_carry_a_string_abstract(self):
+        """The scorer reads papers through this query, so it must be safe too."""
+        conn = _db()
+        self._paper_without_abstract(conn)
+
+        papers = get_unscored_papers(conn)
+        assert len(papers) == 1
+        assert papers[0]["abstract"] == ""
+        # The value must survive the idiom callers actually use.
+        assert papers[0].get("abstract", "")[:10] == ""
+
+    def test_other_nullable_text_columns_are_also_strings(self):
+        conn = _db()
+        pid = self._paper_without_abstract(conn)
+        save_score(conn, paper_id=pid, combined_score=0.5)
+
+        paper = get_paper_with_score(conn, pid)
+        for column in ("abstract", "journal", "license"):
+            assert paper[column] == "", f"{column} came back as {paper[column]!r}"
+
+    def test_absent_identifiers_stay_none(self):
+        """For identifiers, "not present" is distinct from "empty"."""
+        conn = _db()
+        pid = store_paper(conn, pmid="12345678", title="PMID only", source="pubmed")
+        save_score(conn, paper_id=pid, combined_score=0.5)
+
+        paper = get_paper_with_score(conn, pid)
+        assert paper["doi"] is None
+        assert paper["pmcid"] is None
+
+    def test_a_real_abstract_is_untouched(self):
+        conn = _db()
+        pid = store_paper(conn, doi="10.1/abs", title="Has One", abstract="Real text.")
+        save_score(conn, paper_id=pid, combined_score=0.5)
+
+        assert get_paper_with_score(conn, pid)["abstract"] == "Real text."

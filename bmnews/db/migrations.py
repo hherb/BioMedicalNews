@@ -602,6 +602,57 @@ def _m004_migrate_to_publications(conn: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Migration 5: record the PDF behind a retrieved full text
+# ---------------------------------------------------------------------------
+
+
+def _m005_add_fulltext_pdf_url(conn: Any) -> None:
+    """Add ``paper_extras.fulltext_pdf_url``.
+
+    Text extracted from a PDF recovers the prose but not figures, tables or
+    layout, so the reading pane offers the original alongside it. That needs
+    the PDF's URL kept next to the HTML rather than instead of it, which the
+    single ``fulltext_html`` column could not express.
+
+    Also clears full text previously stored under a preprint-server source.
+    Those rows hold an abstract-only rendering of a body-less JATS document
+    that was mistaken for full text; dropping them lets the next request
+    fetch the real article. Only the cached text is removed — no paper,
+    score or digest row is touched.
+    """
+    if _is_sqlite(conn):
+        existing = {r[1] for r in conn.execute("PRAGMA table_info(paper_extras)").fetchall()}
+        if "fulltext_pdf_url" not in existing:
+            conn.execute(
+                "ALTER TABLE paper_extras ADD COLUMN fulltext_pdf_url TEXT NOT NULL DEFAULT ''"
+            )
+        conn.commit()
+    else:
+        create_tables(
+            conn,
+            "ALTER TABLE paper_extras ADD COLUMN IF NOT EXISTS"
+            " fulltext_pdf_url TEXT NOT NULL DEFAULT '';\n",
+        )
+
+    # The affected rows are exactly those whose full text was stored under a
+    # preprint server's own name — the path that returned a body-less JATS
+    # rendering. Link markers ("unpaywall_pdf", "publisher_url", …) and
+    # Europe PMC full texts are left alone.
+    ph = placeholder(conn)
+    stale = ("medrxiv", "biorxiv")
+    placeholders = ", ".join([ph] * len(stale))
+    result = execute(
+        conn,
+        f"UPDATE paper_extras SET fulltext_html = NULL, fulltext_source = ''"
+        f" WHERE fulltext_source IN ({placeholders})",
+        stale,
+    )
+    cleared = getattr(result, "rowcount", 0) or 0
+    if cleared > 0:
+        logger.info("Cleared %d abstract-only full text(s) for re-fetching", cleared)
+
+
+# ---------------------------------------------------------------------------
 # Migration registry
 # ---------------------------------------------------------------------------
 
@@ -610,4 +661,5 @@ MIGRATIONS: list[Migration] = [
     Migration(2, "add_paper_tags", _m002_add_paper_tags),
     Migration(3, "add_fulltext_columns", _m003_add_fulltext_columns),
     Migration(4, "migrate_to_publications", _m004_migrate_to_publications),
+    Migration(5, "add_fulltext_pdf_url", _m005_add_fulltext_pdf_url),
 ]

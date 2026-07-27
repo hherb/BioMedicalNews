@@ -40,7 +40,7 @@ _placeholder = placeholder
 # Every paper query selects the same three-way join, so the SELECT list and the
 # FROM clause live here rather than being retyped (and drifting) per query.
 _PAPER_COLUMNS = """
-    p.*, e.metadata_json, e.fulltext_html, e.fulltext_source
+    p.*, e.metadata_json, e.fulltext_html, e.fulltext_source, e.fulltext_pdf_url
 """
 
 _SCORE_COLUMNS = """
@@ -588,13 +588,27 @@ def _upsert_extras(conn: Any, *, paper_id: int, columns: dict[str, Any]) -> None
 
 
 def save_fulltext(
-    conn: Any, *, paper_id: int, html: str, source: str,
+    conn: Any, *, paper_id: int, html: str, source: str, pdf_url: str = "",
 ) -> None:
-    """Store full-text HTML (or a link) and its source for a paper."""
+    """Store full-text HTML (or a link) and its source for a paper.
+
+    Args:
+        conn: Open database connection.
+        paper_id: Id of the publication the full text belongs to.
+        html: The full-text HTML, or a link when *source* is a link marker.
+        source: Where the text came from, or a link marker.
+        pdf_url: The PDF the text was extracted from, when there is one.
+            Kept alongside the HTML rather than instead of it — extracted
+            text loses figures and layout, so the reading pane offers both.
+    """
     _upsert_extras(
         conn,
         paper_id=paper_id,
-        columns={"fulltext_html": html, "fulltext_source": source},
+        columns={
+            "fulltext_html": html,
+            "fulltext_source": source,
+            "fulltext_pdf_url": pdf_url,
+        },
     )
 
 
@@ -720,6 +734,17 @@ def get_papers_by_tag(conn: Any, tag: str) -> list[dict]:
 
 _JSON_LIST_COLUMNS = ("authors", "keywords", "publication_types", "sources")
 
+# Descriptive text columns that sources routinely omit, leaving SQL NULL.
+# Callers reach for these with ``paper.get(col, "")`` — an idiom that does
+# *not* guard against NULL, since the key is present and the default
+# therefore never applies. Normalising here, at the one place a row is
+# decoded, keeps the ``None`` from travelling on to whatever finally slices
+# or concatenates it.
+#
+# The identifiers (doi, pmid, pmcid) are deliberately absent: for those,
+# "not present" is a distinct state from "empty", and dedupe relies on it.
+_NULLABLE_TEXT_COLUMNS = ("abstract", "journal", "license")
+
 
 def paper_url(paper: dict) -> str:
     """Build the canonical outbound URL for a paper.
@@ -766,6 +791,10 @@ def _row_to_paper(row: Any) -> dict:
     for column in _JSON_LIST_COLUMNS:
         if column in paper:
             paper[column] = _decode_json_list(paper[column])
+
+    for column in _NULLABLE_TEXT_COLUMNS:
+        if paper.get(column) is None:
+            paper[column] = ""
 
     paper["metadata"] = parse_metadata(paper.get("metadata_json"))
     paper["is_open_access"] = bool(paper.get("is_open_access"))

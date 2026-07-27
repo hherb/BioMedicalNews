@@ -287,3 +287,59 @@ class TestScorePapersGenerationSettings:
         params = inspect.signature(BaseAgent.__init__).parameters
         assert params["temperature"].default == DEFAULT_TEMPERATURE
         assert params["max_tokens"].default == DEFAULT_MAX_TOKENS
+
+
+class TestScoringWithoutAbstract:
+    """A paper with no abstract must not abort the scoring run.
+
+    ``publications.abstract`` is nullable and sources do leave it empty. The
+    value reached the quality tiers as ``None`` and was sliced there, raising
+    ``TypeError`` — which propagated out of ``score_papers`` and killed the
+    whole pass, leaving every later paper unscored.
+    """
+
+    def _paper(self, abstract):
+        return {"id": 1, "title": "A Title", "abstract": abstract, "keywords": []}
+
+    def _agent(self):
+        from unittest.mock import MagicMock
+
+        agent = MagicMock()
+        agent.score.return_value = {
+            "relevance_score": 0.7, "summary": "s", "matched_tags": [],
+        }
+        return agent
+
+    def _quality_manager(self):
+        """A real manager over a stubbed LLM, so the tiers really run."""
+        from unittest.mock import MagicMock
+
+        from bmlib.quality.manager import QualityManager
+
+        llm = MagicMock()
+        llm.chat.return_value = MagicMock(
+            content='{"study_design": "rct", "confidence": 0.9}', stop_reason="stop"
+        )
+        return QualityManager(llm=llm, classifier_model="ollama:x", assessor_model="ollama:y")
+
+    def test_none_abstract_is_scored_not_raised(self):
+        from bmlib.quality.data_models import QualityFilter
+
+        from bmnews.scoring.scorer import _score_single
+
+        result = _score_single(
+            self._paper(None), self._agent(), self._quality_manager(),
+            QualityFilter(use_llm_classification=True), "oncology",
+        )
+
+        assert result["paper_id"] == 1
+        assert result["relevance_score"] == 0.7
+
+    def test_none_abstract_reaches_the_relevance_agent_as_given(self):
+        """The scorer passes the paper through; normalising is the DB's job."""
+        from bmnews.scoring.scorer import _score_single
+
+        agent = self._agent()
+        _score_single(self._paper(""), agent, None, None, "oncology")
+
+        assert agent.score.call_args.kwargs["abstract"] == ""
