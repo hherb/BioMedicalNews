@@ -1223,8 +1223,7 @@ class TestMigrationFulltextPdfUrl:
         ph = placeholder(conn)
         row = fetch_one(
             conn,
-            "SELECT fulltext_html, fulltext_source FROM paper_extras"
-            f" WHERE publication_id = {ph}",
+            f"SELECT fulltext_html, fulltext_source FROM paper_extras WHERE publication_id = {ph}",
             (publication_id,),
         )
         return row["fulltext_html"], row["fulltext_source"]
