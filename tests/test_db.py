@@ -6,7 +6,10 @@ import json
 import logging
 from datetime import date, timedelta
 
+import pytest
 from bmlib.db import connect_sqlite, fetch_all, fetch_scalar, run_migrations, table_exists
+from bmlib.fulltext import FullTextCache
+from bmlib.fulltext.cache import sanitize_identifier
 
 from bmnews.db import migrations
 from bmnews.db.migrations import MIGRATIONS
@@ -975,6 +978,17 @@ class TestMigrationFulltextPdfUrl:
     fetches the real article, without disturbing anything else.
     """
 
+    @pytest.fixture(autouse=True)
+    def cache(self, tmp_path, monkeypatch):
+        """Point the migration's cache purge at a throwaway directory.
+
+        Autouse because the purge runs for every seeded medrxiv row, and the
+        default cache directory is the developer's real one.
+        """
+        cache = FullTextCache(tmp_path / "fulltext_cache")
+        monkeypatch.setattr(migrations, "FullTextCache", lambda: cache)
+        return cache
+
     def _v4_db(self):
         """A database at schema version 4 — before the PDF column existed."""
         conn = connect_sqlite(":memory:")
@@ -1042,6 +1056,56 @@ class TestMigrationFulltextPdfUrl:
         conn = self._v4_db()
         run_migrations(conn, MIGRATIONS[4:5])
         assert conn.execute("SELECT COUNT(*) FROM paper_extras").fetchone()[0] == 0
+
+    def test_clearing_a_row_also_purges_the_disk_cache(self, cache):
+        """Clearing the row alone would change nothing a reader can see.
+
+        bmlib consults its disk cache *before* the database, so the next
+        request would be served the same abstract-only file — and bmnews would
+        store it again under the ``cached`` source name, out of reach of this
+        migration's filter. The file has to go with the row.
+        """
+        conn = self._v4_db()
+        self._seed(conn, "10.1/med", "medrxiv")
+        self._seed(conn, "10.1/epmc", "europepmc")
+        cache.save_html("<p>abstract only</p>", sanitize_identifier("10.1/med"))
+        cache.save_html("<p>real body</p>", sanitize_identifier("10.1/epmc"))
+
+        run_migrations(conn, MIGRATIONS[4:5])
+
+        assert cache.get_html(sanitize_identifier("10.1/med")) is None
+        assert cache.get_html(sanitize_identifier("10.1/epmc")) == "<p>real body</p>"
+
+    def test_an_unusable_cache_does_not_abort_the_migration(self, monkeypatch):
+        """A cache that cannot be opened must not cost the schema change."""
+        conn = self._v4_db()
+        pid = self._seed(conn, "10.1/med", "medrxiv")
+
+        def unusable():
+            raise OSError("cache directory is not writable")
+
+        monkeypatch.setattr(migrations, "FullTextCache", unusable)
+
+        run_migrations(conn, MIGRATIONS[4:5])
+
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(paper_extras)")}
+        assert "fulltext_pdf_url" in columns
+        assert self._fulltext(conn, pid) == (None, "")
+
+    def test_a_paper_without_a_doi_is_skipped(self):
+        """Nothing was ever cached for it — the cache is keyed on the DOI."""
+        conn = self._v4_db()
+        pid = store_paper(conn, pmid="12345678", title="PMID only", source="medrxiv")
+        conn.execute(
+            "INSERT INTO paper_extras (publication_id, metadata_json,"
+            " fulltext_html, fulltext_source) VALUES (?, '{}', '<p>x</p>', 'medrxiv')",
+            (pid,),
+        )
+        conn.commit()
+
+        run_migrations(conn, MIGRATIONS[4:5])
+
+        assert self._fulltext(conn, pid) == (None, "")
 
 
 class TestNullTextColumns:

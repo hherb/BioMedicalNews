@@ -272,7 +272,7 @@ def _toml_value(value: Any) -> str | None:
     """Render a scalar or list config value as TOML, or None if unsupported."""
     if isinstance(value, bool):
         return "true" if value else "false"
-    if isinstance(value, (int, float)):
+    if isinstance(value, int | float):
         return str(value)
     if isinstance(value, str):
         return _toml_str(value)

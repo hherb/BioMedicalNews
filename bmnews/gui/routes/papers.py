@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from urllib.parse import urlparse
 
 from bmlib.fulltext import FullTextError, FullTextService
 from flask import Blueprint, abort, current_app, render_template, request
@@ -149,6 +150,32 @@ _UNAVAILABLE_HTML = (
     "<p>Full text is not available for this paper.</p></div>"
 )
 
+# Schemes allowed in an outbound href. Everything the reading pane links to
+# arrives from an upstream service — Unpaywall, a preprint server's API, a
+# publisher redirect — and escaping only stops a URL breaking *out* of the
+# attribute, not a "javascript:" payload sitting inside it.
+_ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
+
+
+def _safe_url(url: str | None) -> str:
+    """Return *url* if it is a link we are willing to render, else ``""``.
+
+    Args:
+        url: A URL from an upstream service, or None.
+
+    Returns:
+        The URL when its scheme is http(s), otherwise an empty string.
+    """
+    if not url:
+        return ""
+    try:
+        scheme = urlparse(url).scheme.lower()
+    except ValueError:
+        # urlparse rejects a malformed IPv6 literal rather than returning a
+        # partial result; an address we cannot parse is one we will not link.
+        return ""
+    return url if scheme in _ALLOWED_URL_SCHEMES else ""
+
 
 def _link_fragment(source: str, target: str) -> str:
     """Build the HTML fragment linking out to a PDF or publisher page.
@@ -201,7 +228,7 @@ def paper_fulltext(paper_id: int) -> str:
         return render_template(
             "fragments/fulltext_content.html",
             paper=paper,
-            pdf_url=paper.get("fulltext_pdf_url") or "",
+            pdf_url=_safe_url(paper.get("fulltext_pdf_url")),
         )
 
     pmc_id = paper.get("pmcid") or ""
@@ -229,7 +256,7 @@ def paper_fulltext(paper_id: int) -> str:
     # text came from is kept alongside it: extraction recovers the prose but
     # not the figures, tables or layout, so the original stays on offer.
     if result.html:
-        pdf_url = result.pdf_url or ""
+        pdf_url = _safe_url(result.pdf_url)
         save_fulltext(
             conn, paper_id=paper_id, html=result.html, source=result.source,
             pdf_url=pdf_url,
@@ -247,8 +274,20 @@ def paper_fulltext(paper_id: int) -> str:
         (result.pdf_url, "unpaywall_pdf"),
         (result.web_url, "publisher_url"),
     ):
-        if value:
-            save_fulltext(conn, paper_id=paper_id, html=str(value), source=source)
-            return _link_fragment(source, str(value))
+        if not value:
+            continue
+        target = str(value)
+        # ``pdf_cached`` is a local path this app wrote; the other two are
+        # URLs an upstream service handed us, so their scheme is checked. An
+        # unusable link is dropped rather than stored — storing it would put
+        # it straight into an href on the next request.
+        *_, is_path = _LINK_SOURCES[source]
+        if not is_path and not _safe_url(target):
+            logger.warning(
+                "Discarding %s link with unsupported scheme for paper %s", source, paper_id
+            )
+            continue
+        save_fulltext(conn, paper_id=paper_id, html=target, source=source)
+        return _link_fragment(source, target)
 
     return _UNAVAILABLE_HTML

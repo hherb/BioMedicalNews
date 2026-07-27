@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from bmlib.db import Migration, create_tables, execute, fetch_all, is_sqlite, placeholder
+from bmlib.fulltext import FullTextCache
+from bmlib.fulltext.cache import sanitize_identifier
 from bmlib.publications import ensure_schema, store_publication
 from bmlib.publications.models import FullTextSource, Publication
 
@@ -605,6 +607,50 @@ def _m004_migrate_to_publications(conn: Any) -> None:
 # Migration 5: record the PDF behind a retrieved full text
 # ---------------------------------------------------------------------------
 
+# Full text stored under one of these names is a preprint server's own JATS
+# rendering — the path that returned a body-less document and stored the
+# abstract as though it were the article. Link markers ("unpaywall_pdf",
+# "publisher_url", …) and Europe PMC full texts never had that problem.
+_STALE_FULLTEXT_SOURCES = ("medrxiv", "biorxiv")
+
+
+def _purge_cached_fulltext(dois: list[str]) -> None:
+    """Drop bmlib's disk-cached copy of each full text being cleared.
+
+    Clearing the database row alone changes nothing a reader can see: bmlib
+    consults its disk cache *before* the database, so the next request is
+    served the same abstract-only file — and bmnews then stores it again,
+    this time under the ``cached`` source name, where no filter keyed on the
+    preprint server's name can reach it. The file has to go with the row.
+
+    Args:
+        dois: DOIs of the papers whose cached text is being cleared. The
+            cache is keyed on the DOI bmnews passes as the retrieval
+            identifier, so papers without one were never cached.
+    """
+    if not dois:
+        return
+    try:
+        cache = FullTextCache()
+    except OSError:
+        logger.warning(
+            "Could not open bmlib's full-text cache; %d stale file(s) remain and"
+            " will keep being served until removed by hand",
+            len(dois),
+            exc_info=True,
+        )
+        return
+
+    purged = 0
+    for doi in dois:
+        try:
+            cache.delete(sanitize_identifier(doi))
+        except OSError:
+            logger.warning("Could not purge cached full text for %s", doi, exc_info=True)
+        else:
+            purged += 1
+    logger.info("Purged %d cached full text file(s) from %s", purged, cache.cache_dir)
+
 
 def _m005_add_fulltext_pdf_url(conn: Any) -> None:
     """Add ``paper_extras.fulltext_pdf_url``.
@@ -614,19 +660,24 @@ def _m005_add_fulltext_pdf_url(conn: Any) -> None:
     the PDF's URL kept next to the HTML rather than instead of it, which the
     single ``fulltext_html`` column could not express.
 
-    Also clears full text previously stored under a preprint-server source.
-    Those rows hold an abstract-only rendering of a body-less JATS document
-    that was mistaken for full text; dropping them lets the next request
-    fetch the real article. Only the cached text is removed — no paper,
-    score or digest row is touched.
+    Also clears full text previously stored under a preprint-server source,
+    both from the database and from bmlib's disk cache. Those rows hold an
+    abstract-only rendering of a body-less JATS document that was mistaken
+    for full text; dropping them lets the next request fetch the real
+    article. Only the retrieved text is removed — no paper, score or digest
+    row is touched.
     """
     if _is_sqlite(conn):
+        # SQLite has no ADD COLUMN IF NOT EXISTS, so the guard is explicit.
+        # No commit here: the migration runner owns the transaction, and
+        # committing inside it would leave a half-applied migration behind if
+        # the update below failed.
         existing = {r[1] for r in conn.execute("PRAGMA table_info(paper_extras)").fetchall()}
         if "fulltext_pdf_url" not in existing:
-            conn.execute(
-                "ALTER TABLE paper_extras ADD COLUMN fulltext_pdf_url TEXT NOT NULL DEFAULT ''"
+            execute(
+                conn,
+                "ALTER TABLE paper_extras ADD COLUMN fulltext_pdf_url TEXT NOT NULL DEFAULT ''",
             )
-        conn.commit()
     else:
         create_tables(
             conn,
@@ -634,22 +685,31 @@ def _m005_add_fulltext_pdf_url(conn: Any) -> None:
             " fulltext_pdf_url TEXT NOT NULL DEFAULT '';\n",
         )
 
-    # The affected rows are exactly those whose full text was stored under a
-    # preprint server's own name — the path that returned a body-less JATS
-    # rendering. Link markers ("unpaywall_pdf", "publisher_url", …) and
-    # Europe PMC full texts are left alone.
     ph = placeholder(conn)
-    stale = ("medrxiv", "biorxiv")
-    placeholders = ", ".join([ph] * len(stale))
+    placeholders = ", ".join([ph] * len(_STALE_FULLTEXT_SOURCES))
+
+    # Read the DOIs before the update erases the evidence of which rows they were.
+    stale_dois = [
+        row["doi"]
+        for row in fetch_all(
+            conn,
+            "SELECT p.doi FROM paper_extras e"
+            " JOIN publications p ON p.id = e.publication_id"
+            f" WHERE e.fulltext_source IN ({placeholders}) AND p.doi IS NOT NULL",
+            _STALE_FULLTEXT_SOURCES,
+        )
+    ]
+
     result = execute(
         conn,
-        f"UPDATE paper_extras SET fulltext_html = NULL, fulltext_source = ''"
+        "UPDATE paper_extras SET fulltext_html = NULL, fulltext_source = ''"
         f" WHERE fulltext_source IN ({placeholders})",
-        stale,
+        _STALE_FULLTEXT_SOURCES,
     )
     cleared = getattr(result, "rowcount", 0) or 0
     if cleared > 0:
         logger.info("Cleared %d abstract-only full text(s) for re-fetching", cleared)
+    _purge_cached_fulltext(stale_dois)
 
 
 # ---------------------------------------------------------------------------

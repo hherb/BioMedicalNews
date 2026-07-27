@@ -290,12 +290,15 @@ class TestScorePapersGenerationSettings:
 
 
 class TestScoringWithoutAbstract:
-    """A paper with no abstract must not abort the scoring run.
+    """A paper with no abstract must still score.
 
-    ``publications.abstract`` is nullable and sources do leave it empty. The
-    value reached the quality tiers as ``None`` and was sliced there, raising
-    ``TypeError`` — which propagated out of ``score_papers`` and killed the
-    whole pass, leaving every later paper unscored.
+    ``publications.abstract`` is nullable and sources do leave it empty.
+    ``paper.get("abstract", "")`` looks like a guard but is not — the key is
+    present with a ``None`` value, so the default never applies and the
+    ``None`` travelled on to be sliced by the quality tiers.
+
+    ``_row_to_paper`` normalises the column, but ``_score_single`` takes a
+    plain dict from any caller, so it does not get to assume that happened.
     """
 
     def _paper(self, abstract):
@@ -311,35 +314,112 @@ class TestScoringWithoutAbstract:
         return agent
 
     def _quality_manager(self):
-        """A real manager over a stubbed LLM, so the tiers really run."""
         from unittest.mock import MagicMock
 
-        from bmlib.quality.manager import QualityManager
+        mgr = MagicMock()
+        mgr.assess.return_value = QualityAssessment.unclassified()
+        return mgr
 
-        llm = MagicMock()
-        llm.chat.return_value = MagicMock(
-            content='{"study_design": "rct", "confidence": 0.9}', stop_reason="stop"
-        )
-        return QualityManager(llm=llm, classifier_model="ollama:x", assessor_model="ollama:y")
+    def test_none_abstract_reaches_the_relevance_agent_as_a_string(self):
+        from bmnews.scoring.scorer import _score_single
 
-    def test_none_abstract_is_scored_not_raised(self):
+        agent = self._agent()
+        _score_single(self._paper(None), agent, None, None, "oncology")
+
+        assert agent.score.call_args.kwargs["abstract"] == ""
+
+    def test_none_abstract_reaches_the_quality_manager_as_a_string(self):
+        """The tiers slice the abstract, which is where the crash surfaced."""
         from bmlib.quality.data_models import QualityFilter
 
         from bmnews.scoring.scorer import _score_single
 
+        quality_mgr = self._quality_manager()
         result = _score_single(
-            self._paper(None), self._agent(), self._quality_manager(),
+            self._paper(None), self._agent(), quality_mgr,
             QualityFilter(use_llm_classification=True), "oncology",
         )
 
+        assert quality_mgr.assess.call_args.kwargs["abstract"] == ""
         assert result["paper_id"] == 1
         assert result["relevance_score"] == 0.7
 
-    def test_none_abstract_reaches_the_relevance_agent_as_given(self):
-        """The scorer passes the paper through; normalising is the DB's job."""
+    def test_a_real_abstract_is_passed_through_unchanged(self):
         from bmnews.scoring.scorer import _score_single
 
         agent = self._agent()
-        _score_single(self._paper(""), agent, None, None, "oncology")
+        _score_single(self._paper("Real text."), agent, None, None, "oncology")
 
-        assert agent.score.call_args.kwargs["abstract"] == ""
+        assert agent.score.call_args.kwargs["abstract"] == "Real text."
+
+
+class TestOnePaperCannotAbortTheRun:
+    """One unscoreable paper must not cost every paper behind it.
+
+    Twelve NULL abstracts blocked 1,035 papers because the ``TypeError``
+    escaped ``score_papers`` entirely. The concurrent branch already logged
+    and carried on; the sequential branch — the one Ollama users run — did
+    not, so the two disagreed about what a single failure costs.
+    """
+
+    def _papers(self):
+        return [
+            {"id": 1, "title": "First", "abstract": "a"},
+            {"id": 2, "title": "boom", "abstract": "b"},
+            {"id": 3, "title": "Third", "abstract": "c"},
+        ]
+
+    def _run(self, concurrency):
+        from unittest.mock import MagicMock, patch
+
+        from bmnews.scoring.scorer import score_papers
+
+        def score(*, title, abstract, interests, categories):
+            if title == "boom":
+                raise TypeError("'NoneType' object is not subscriptable")
+            return {"relevance_score": 0.5, "summary": "s", "matched_tags": []}
+
+        agent = MagicMock()
+        agent.score.side_effect = score
+        with patch("bmnews.scoring.scorer.RelevanceAgent", return_value=agent):
+            return score_papers(
+                papers=self._papers(), llm=None, model="ollama:x",
+                template_engine=None, interests="oncology",
+                concurrency=concurrency, quality_enabled=False,
+            )
+
+    def test_a_failing_paper_is_skipped_sequentially(self):
+        results = self._run(concurrency=1)
+
+        assert sorted(r["paper_id"] for r in results) == [1, 3]
+
+    def test_a_failing_paper_is_skipped_concurrently(self):
+        results = self._run(concurrency=3)
+
+        assert sorted(r["paper_id"] for r in results) == [1, 3]
+
+    def test_progress_still_reaches_the_total(self):
+        """A skipped paper must not strand the GUI's progress bar."""
+        from unittest.mock import MagicMock, patch
+
+        from bmnews.scoring.scorer import score_papers
+
+        def score(*, title, abstract, interests, categories):
+            if title == "boom":
+                raise TypeError("boom")
+            return {"relevance_score": 0.5, "summary": "s", "matched_tags": []}
+
+        agent = MagicMock()
+        agent.score.side_effect = score
+        seen = []
+        with patch("bmnews.scoring.scorer.RelevanceAgent", return_value=agent):
+            score_papers(
+                papers=self._papers(), llm=None, model="ollama:x",
+                template_engine=None, interests="oncology",
+                concurrency=1, quality_enabled=False,
+                progress_callback=lambda current, total, result: seen.append(
+                    (current, total)
+                ),
+            )
+
+        assert seen[-1] == (3, 3)
