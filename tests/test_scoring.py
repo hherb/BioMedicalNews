@@ -25,7 +25,8 @@ class TestQualityTierToScore:
 
     def test_explicit_quality_score(self):
         a = QualityAssessment(
-            assessment_tier=3, quality_score=7.5,
+            assessment_tier=3,
+            quality_score=7.5,
             study_design=StudyDesign.COHORT_PROSPECTIVE,
             quality_tier=QualityTier.TIER_3_CONTROLLED,
         )
@@ -74,6 +75,7 @@ class TestExtractPubTypes:
 class TestCombinedScoreWeights:
     def test_weights_sum_to_one(self):
         from bmnews.constants import QUALITY_WEIGHT, RELEVANCE_WEIGHT
+
         assert RELEVANCE_WEIGHT + QUALITY_WEIGHT == 1.0
 
 
@@ -82,6 +84,7 @@ class TestResolveModelString:
 
     def _config(self, provider, model):
         from bmnews.config import AppConfig
+
         cfg = AppConfig()
         cfg.llm.provider = provider
         cfg.llm.model = model
@@ -89,21 +92,25 @@ class TestResolveModelString:
 
     def test_provider_prefixed_model_is_left_alone(self):
         from bmnews.pipeline import _resolve_model_string
+
         cfg = self._config("ollama", "anthropic:claude-sonnet-4-5")
         assert _resolve_model_string(cfg) == "anthropic:claude-sonnet-4-5"
 
     def test_bare_model_with_tag_gets_provider_prefix(self):
         from bmnews.pipeline import _resolve_model_string
+
         cfg = self._config("ollama", "llama3.1:latest")
         assert _resolve_model_string(cfg) == "ollama:llama3.1:latest"
 
     def test_bare_model_gets_provider_prefix(self):
         from bmnews.pipeline import _resolve_model_string
+
         cfg = self._config("openai", "gpt-4o")
         assert _resolve_model_string(cfg) == "openai:gpt-4o"
 
     def test_empty_model(self):
         from bmnews.pipeline import _resolve_model_string
+
         assert _resolve_model_string(self._config("ollama", "")) == "ollama:"
 
 
@@ -127,10 +134,8 @@ class TestRelevanceScoreClamping:
         assert result["relevance_score"] == 0.0
 
     def test_out_of_range_score_is_clamped(self):
-        assert self._agent({"relevance_score": 7.5}).score("T", "A", "I")[
-            "relevance_score"] == 1.0
-        assert self._agent({"relevance_score": -3}).score("T", "A", "I")[
-            "relevance_score"] == 0.0
+        assert self._agent({"relevance_score": 7.5}).score("T", "A", "I")["relevance_score"] == 1.0
+        assert self._agent({"relevance_score": -3}).score("T", "A", "I")["relevance_score"] == 0.0
 
     def test_non_dict_response_yields_fallback(self):
         result = self._agent(["unexpected"]).score("T", "A", "I")
@@ -139,15 +144,20 @@ class TestRelevanceScoreClamping:
 
     def test_missing_list_fields_are_normalised(self):
         result = self._agent({"relevance_score": 0.5, "matched_tags": "oncology"}).score(
-            "T", "A", "I")
+            "T", "A", "I"
+        )
         assert result["matched_tags"] == []
         assert result["key_findings"] == []
 
     def test_valid_response_passes_through(self):
-        result = self._agent({
-            "relevance_score": 0.8, "summary": "Good",
-            "matched_tags": ["oncology"], "key_findings": ["f1"],
-        }).score("T", "A", "I")
+        result = self._agent(
+            {
+                "relevance_score": 0.8,
+                "summary": "Good",
+                "matched_tags": ["oncology"],
+                "key_findings": ["f1"],
+            }
+        ).score("T", "A", "I")
         assert result["relevance_score"] == 0.8
         assert result["matched_tags"] == ["oncology"]
 
@@ -157,10 +167,12 @@ class TestTiersBelow:
 
     def test_default_floor_excludes_nothing(self):
         from bmnews.scoring.scorer import tiers_below
+
         assert tiers_below("TIER_1_ANECDOTAL") == []
 
     def test_excludes_weaker_tiers(self):
         from bmnews.scoring.scorer import tiers_below
+
         excluded = tiers_below("TIER_4_EXPERIMENTAL")
         assert "TIER_1_ANECDOTAL" in excluded
         assert "TIER_3_CONTROLLED" in excluded
@@ -170,16 +182,19 @@ class TestTiersBelow:
     def test_unclassified_is_never_excluded(self):
         """Unjudged is not the same as judged-and-rejected."""
         from bmnews.scoring.scorer import tiers_below
+
         assert "UNCLASSIFIED" not in tiers_below("TIER_5_SYNTHESIS")
 
     def test_blank_and_unknown_names_filter_nothing(self):
         from bmnews.scoring.scorer import tiers_below
+
         assert tiers_below("") == []
         assert tiers_below("   ") == []
         assert tiers_below("TIER_9_IMAGINARY") == []
 
     def test_name_is_case_insensitive(self):
         from bmnews.scoring.scorer import tiers_below
+
         assert tiers_below("tier_4_experimental") == tiers_below("TIER_4_EXPERIMENTAL")
 
 
@@ -233,13 +248,18 @@ class TestScorePapersQualityToggle:
 
         agent = _StubAgent()
         assessment = QualityAssessment.from_metadata(StudyDesign.RCT)
-        with patch("bmnews.scoring.scorer.RelevanceAgent", return_value=agent), \
-                patch("bmnews.scoring.scorer.QualityManager") as mgr:
+        with (
+            patch("bmnews.scoring.scorer.RelevanceAgent", return_value=agent),
+            patch("bmnews.scoring.scorer.QualityManager") as mgr,
+        ):
             mgr.return_value.assess.return_value = assessment
             results = score_papers(
                 papers=[{"id": 1, "title": "T", "abstract": "A"}],
-                llm=None, model="ollama:x", template_engine=None,
-                interests="oncology", **kwargs,
+                llm=None,
+                model="ollama:x",
+                template_engine=None,
+                interests="oncology",
+                **kwargs,
             )
         return results, mgr
 
@@ -265,12 +285,19 @@ class TestScorePapersGenerationSettings:
 
         from bmnews.scoring.scorer import score_papers
 
-        with patch("bmnews.scoring.scorer.RelevanceAgent") as agent_cls, \
-                patch("bmnews.scoring.scorer.QualityManager"):
+        with (
+            patch("bmnews.scoring.scorer.RelevanceAgent") as agent_cls,
+            patch("bmnews.scoring.scorer.QualityManager"),
+        ):
             agent_cls.return_value = _StubAgent()
             score_papers(
-                papers=[], llm=None, model="ollama:x", template_engine=None,
-                interests="", temperature=0.9, max_tokens=1234,
+                papers=[],
+                llm=None,
+                model="ollama:x",
+                template_engine=None,
+                interests="",
+                temperature=0.9,
+                max_tokens=1234,
             )
 
         kwargs = agent_cls.call_args.kwargs
@@ -309,7 +336,9 @@ class TestScoringWithoutAbstract:
 
         agent = MagicMock()
         agent.score.return_value = {
-            "relevance_score": 0.7, "summary": "s", "matched_tags": [],
+            "relevance_score": 0.7,
+            "summary": "s",
+            "matched_tags": [],
         }
         return agent
 
@@ -336,8 +365,11 @@ class TestScoringWithoutAbstract:
 
         quality_mgr = self._quality_manager()
         result = _score_single(
-            self._paper(None), self._agent(), quality_mgr,
-            QualityFilter(use_llm_classification=True), "oncology",
+            self._paper(None),
+            self._agent(),
+            quality_mgr,
+            QualityFilter(use_llm_classification=True),
+            "oncology",
         )
 
         assert quality_mgr.assess.call_args.kwargs["abstract"] == ""
@@ -383,9 +415,13 @@ class TestOnePaperCannotAbortTheRun:
         agent.score.side_effect = score
         with patch("bmnews.scoring.scorer.RelevanceAgent", return_value=agent):
             return score_papers(
-                papers=self._papers(), llm=None, model="ollama:x",
-                template_engine=None, interests="oncology",
-                concurrency=concurrency, quality_enabled=False,
+                papers=self._papers(),
+                llm=None,
+                model="ollama:x",
+                template_engine=None,
+                interests="oncology",
+                concurrency=concurrency,
+                quality_enabled=False,
             )
 
     def test_a_failing_paper_is_skipped_sequentially(self):
@@ -414,12 +450,14 @@ class TestOnePaperCannotAbortTheRun:
         seen = []
         with patch("bmnews.scoring.scorer.RelevanceAgent", return_value=agent):
             score_papers(
-                papers=self._papers(), llm=None, model="ollama:x",
-                template_engine=None, interests="oncology",
-                concurrency=1, quality_enabled=False,
-                progress_callback=lambda current, total, result: seen.append(
-                    (current, total)
-                ),
+                papers=self._papers(),
+                llm=None,
+                model="ollama:x",
+                template_engine=None,
+                interests="oncology",
+                concurrency=1,
+                quality_enabled=False,
+                progress_callback=lambda current, total, result: seen.append((current, total)),
             )
 
         assert seen[-1] == (3, 3)

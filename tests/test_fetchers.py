@@ -98,7 +98,10 @@ class TestFetchEuropePMC:
         client = _FakeClient(responses)
         records: list[FetchedRecord] = []
         result = fetch_europepmc(
-            client, date(2026, 2, 10), on_record=records.append, **kwargs,
+            client,
+            date(2026, 2, 10),
+            on_record=records.append,
+            **kwargs,
         )
         return records, result, client
 
@@ -121,9 +124,22 @@ class TestFetchEuropePMC:
 
     def test_absent_fields_are_none_not_empty_string(self):
         """bmlib's storage merge uses COALESCE — "" would block a later fill-in."""
-        records, _, _ = self._fetch([_FakeResponse(_page([_hit(
-            abstractText="", journalTitle="", pmcid="", license="",
-        )]))])
+        records, _, _ = self._fetch(
+            [
+                _FakeResponse(
+                    _page(
+                        [
+                            _hit(
+                                abstractText="",
+                                journalTitle="",
+                                pmcid="",
+                                license="",
+                            )
+                        ]
+                    )
+                )
+            ]
+        )
 
         record = records[0]
         assert record.abstract is None
@@ -156,10 +172,12 @@ class TestFetchEuropePMC:
         assert records[0].extras["url"] == "https://europepmc.org/article/med/111"
 
     def test_follows_the_cursor_across_pages(self):
-        records, result, client = self._fetch([
-            _FakeResponse(_page([_hit(doi="10.1/a")], next_cursor="NEXT")),
-            _FakeResponse(_page([_hit(doi="10.1/b")], next_cursor="NEXT")),
-        ])
+        records, result, client = self._fetch(
+            [
+                _FakeResponse(_page([_hit(doi="10.1/a")], next_cursor="NEXT")),
+                _FakeResponse(_page([_hit(doi="10.1/b")], next_cursor="NEXT")),
+            ]
+        )
 
         # Second page repeats the cursor, which ends pagination.
         assert result.record_count == 2
@@ -167,10 +185,12 @@ class TestFetchEuropePMC:
         assert client.calls[1]["cursorMark"] == "NEXT"
 
     def test_http_failure_keeps_records_already_emitted(self):
-        records, result, _ = self._fetch([
-            _FakeResponse(_page([_hit()], next_cursor="NEXT")),
-            _FakeResponse({}, error=RuntimeError("boom")),
-        ])
+        records, result, _ = self._fetch(
+            [
+                _FakeResponse(_page([_hit()], next_cursor="NEXT")),
+                _FakeResponse({}, error=RuntimeError("boom")),
+            ]
+        )
 
         assert result.status == "failed"
         assert result.error == "boom"
@@ -178,11 +198,15 @@ class TestFetchEuropePMC:
         assert len(records) == 1
 
     def test_free_fulltext_sources_are_extracted(self):
-        hit = _hit(fullTextUrlList={"fullTextUrl": [
-            {"availability": "Free", "documentStyle": "pdf", "url": "http://x/p.pdf"},
-            {"availability": "Subscription", "documentStyle": "pdf", "url": "http://y"},
-            {"availability": "Free", "documentStyle": "unknown", "url": "http://z"},
-        ]})
+        hit = _hit(
+            fullTextUrlList={
+                "fullTextUrl": [
+                    {"availability": "Free", "documentStyle": "pdf", "url": "http://x/p.pdf"},
+                    {"availability": "Subscription", "documentStyle": "pdf", "url": "http://y"},
+                    {"availability": "Free", "documentStyle": "unknown", "url": "http://z"},
+                ]
+            }
+        )
         records, _, _ = self._fetch([_FakeResponse(_page([hit]))])
 
         sources = records[0].fulltext_sources
@@ -194,7 +218,8 @@ class TestFetchEuropePMC:
         client = _FakeClient([_FakeResponse(_page([_hit()]))])
         progress = []
         fetch_europepmc(
-            client, date(2026, 2, 10),
+            client,
+            date(2026, 2, 10),
             on_record=lambda _r: None,
             on_progress=progress.append,
         )
@@ -208,7 +233,8 @@ class TestFetcherSignature:
     """Every source must be callable the same way, bmnews-supplied or not."""
 
     @pytest.mark.parametrize(
-        "name", ["europepmc", "pubmed", "medrxiv", "biorxiv", "openalex"],
+        "name",
+        ["europepmc", "pubmed", "medrxiv", "biorxiv", "openalex"],
     )
     def test_accepts_the_registry_calling_convention(self, name):
         import inspect

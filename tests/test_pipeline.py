@@ -55,11 +55,22 @@ def _seeded_db():
     """Return a conn with papers, scores, and a digest recorded."""
     conn = connect_sqlite(":memory:")
     init_db(conn)
-    pid = store_paper(conn, doi="10.1101/cached1", title="Cached Paper",
-                      abstract="Abs", published_date=_days_ago(2),
-                      source="medrxiv")
-    save_score(conn, paper_id=pid, combined_score=0.8, relevance_score=0.9,
-               quality_score=0.7, summary="Great paper.")
+    pid = store_paper(
+        conn,
+        doi="10.1101/cached1",
+        title="Cached Paper",
+        abstract="Abs",
+        published_date=_days_ago(2),
+        source="medrxiv",
+    )
+    save_score(
+        conn,
+        paper_id=pid,
+        combined_score=0.8,
+        relevance_score=0.9,
+        quality_score=0.7,
+        summary="Great paper.",
+    )
     record_digest(conn, [pid], delivery_method="stdout")
     return conn
 
@@ -93,7 +104,9 @@ def _register_stub_source(records: list[FetchedRecord], status: str = "completed
 
     register_source(
         SourceDescriptor(
-            name=STUB_SOURCE, display_name="Test stub", description="test fixture",
+            name=STUB_SOURCE,
+            display_name="Test stub",
+            description="test fixture",
         ),
         fetcher,
     )
@@ -256,7 +269,9 @@ class TestRunSync:
                     doi="10.1234/ft",
                     fulltext_sources=[
                         FullTextSourceEntry(
-                            url="http://x/p.pdf", format="pdf", source=STUB_SOURCE,
+                            url="http://x/p.pdf",
+                            format="pdf",
+                            source=STUB_SOURCE,
                         )
                     ],
                 )
@@ -292,6 +307,7 @@ class TestRunSync:
         conn = self._run([record, record], tmp_path)
 
         from bmlib.db import fetch_scalar
+
         assert fetch_scalar(conn, "SELECT COUNT(*) FROM publications") == 1
 
     def test_progress_is_reported_as_strings(self, tmp_path):
@@ -315,11 +331,16 @@ class TestRunSync:
         conn = self._run(
             [
                 FetchedRecord(
-                    title="Merged", source=STUB_SOURCE, doi="10.1234/merge",
+                    title="Merged",
+                    source=STUB_SOURCE,
+                    doi="10.1234/merge",
                     extras={"cited_by": 3},
                 ),
                 FetchedRecord(
-                    title="Merged", source=STUB_SOURCE, doi="10.1234/merge", pmid="77",
+                    title="Merged",
+                    source=STUB_SOURCE,
+                    doi="10.1234/merge",
+                    pmid="77",
                     extras={"altmetric": 12},
                 ),
             ],
@@ -346,7 +367,9 @@ class TestRunSyncExtrasDurability:
         conn.close()
 
         record = FetchedRecord(
-            title="Survivor", source=STUB_SOURCE, doi="10.1234/survivor",
+            title="Survivor",
+            source=STUB_SOURCE,
+            doi="10.1234/survivor",
             extras={"cited_by": 5},
         )
 
@@ -384,7 +407,10 @@ class TestRunSyncExtrasDurability:
         # them already stored so every one of them can be resolved.
         records = [
             FetchedRecord(
-                title=f"P{i}", source=STUB_SOURCE, doi=f"10.1234/p{i}", extras={"n": i},
+                title=f"P{i}",
+                source=STUB_SOURCE,
+                doi=f"10.1234/p{i}",
+                extras={"n": i},
             )
             for i in range(5)
         ]
@@ -394,8 +420,11 @@ class TestRunSyncExtrasDurability:
                 store_paper(conn, doi=record.doi, title=record.title)
                 on_record(record)
             return SyncReport(
-                sources_synced=[STUB_SOURCE], days_processed=1,
-                records_added=len(records), records_merged=0, records_failed=0,
+                sources_synced=[STUB_SOURCE],
+                days_processed=1,
+                records_added=len(records),
+                records_merged=0,
+                records_failed=0,
             )
 
         # ``pending`` is run_sync's actual buffer, so its size on the way in is

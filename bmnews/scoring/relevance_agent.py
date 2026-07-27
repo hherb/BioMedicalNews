@@ -64,7 +64,8 @@ class RelevanceAgent(BaseAgent):
         except (TypeError, ValueError):
             logger.warning(
                 "Non-numeric relevance_score %r for: %s",
-                result.get("relevance_score"), title[:80],
+                result.get("relevance_score"),
+                title[:80],
             )
             score = 0.0
         result["relevance_score"] = max(0.0, min(1.0, score))

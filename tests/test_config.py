@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from bmnews.config import AppConfig, load_config, save_config, write_default_config
 
 
@@ -58,7 +60,6 @@ research_interests = ["genomics", "CRISPR"]
         assert config.llm.concurrency == 4
         assert config.user.name == "Dr. Test"
         assert config.user.research_interests == "genomics, CRISPR"
-
 
     def test_load_string_interests(self, tmp_path):
         cfg = tmp_path / "config.toml"
@@ -148,3 +149,99 @@ class TestSaveConfig:
         assert loaded.sources.lookback_days == 3
         assert loaded.scoring.min_combined == 0.55
         assert loaded.email.enabled is True
+
+    def test_preserves_watches_and_channels(self, tmp_path):
+        """The serializer traps that dictated the notifications config shape.
+
+        ``_toml_value`` renders a list by stringifying each element, so an
+        array-of-tables would come back as TOML strings of Python dict reprs;
+        and ``_write_section`` emits three table levels, so anything deeper is
+        dropped on every GUI save. Keying by name avoids both — this asserts it
+        stays that way.
+        """
+        cfg = AppConfig()
+        cfg.notifications.enabled = True
+        cfg.notifications.channels = {
+            "mail": {"kind": "email", "to_address": "me@example.org"},
+            "matrix": {
+                "kind": "matrix",
+                "homeserver": "https://matrix.example.org",
+                "access_token": "syt_secret",
+                "room": "#bmnews-alerts:example.org",
+            },
+        }
+        cfg.notifications.watches = {
+            "melanoma-trials": {
+                "enabled": True,
+                "min_relevance": 0.8,
+                "min_quality_tier": "TIER_4_EXPERIMENTAL",
+                "tags": ["melanoma", "immunotherapy"],
+                "channels": ["matrix", "mail"],
+                "max_per_run": 5,
+            }
+        }
+
+        loaded = load_config(save_config(cfg, tmp_path / "config.toml"))
+
+        assert loaded.notifications.enabled is True
+        assert loaded.notifications.channels == cfg.notifications.channels
+        assert loaded.notifications.watches == cfg.notifications.watches
+
+    def test_a_saved_watch_still_parses(self, tmp_path):
+        """The round-trip has to survive the validating parse, not just tomllib."""
+        from bmnews.notify import parse_channels, parse_watches
+
+        cfg = AppConfig()
+        cfg.notifications.channels = {"mail": {"kind": "email", "to_address": "me@example.org"}}
+        cfg.notifications.watches = {"w": {"min_relevance": 0.8, "channels": ["mail"]}}
+
+        loaded = load_config(save_config(cfg, tmp_path / "config.toml"))
+
+        watches = parse_watches(loaded.notifications.watches)
+        channels = parse_channels(loaded.notifications.channels)
+        assert watches["w"].min_relevance == 0.8
+        assert watches["w"].channels == ("mail",)
+        assert channels["mail"].kind == "email"
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "melanoma-trials",  # a bare key, emitted unquoted
+            "my melanoma watch",  # a space makes the header unparseable
+            "sepsis.trials",  # a dot reads as two nested tables
+            'he said "hi"',  # quotes have to survive escaping
+            "",  # an empty name is not a key at all
+        ],
+    )
+    def test_a_watch_name_survives_the_round_trip_whatever_it_is(self, tmp_path, name):
+        """Watch names are user-authored, so the serializer has to quote them.
+
+        Unquoted, a name carrying a space wrote a header ``tomllib`` refuses,
+        and a name carrying a dot wrote a *valid* one meaning something else —
+        ``a.b`` came back as ``{"a": {"b": ...}}``. Either way saving destroyed
+        the configuration it was asked to preserve.
+        """
+        cfg = AppConfig()
+        cfg.notifications.watches = {name: {"min_relevance": 0.8}}
+
+        loaded = load_config(save_config(cfg, tmp_path / "config.toml"))
+
+        assert loaded.notifications.watches == {name: {"min_relevance": 0.8}}
+
+    def test_an_odd_key_inside_a_watch_survives_too(self, tmp_path):
+        """TOML permits quoted keys, so a watch table can hold one."""
+        cfg = AppConfig()
+        cfg.notifications.watches = {"w": {"odd key": 1, "min_relevance": 0.8}}
+
+        loaded = load_config(save_config(cfg, tmp_path / "config.toml"))
+
+        assert loaded.notifications.watches["w"] == {"odd key": 1, "min_relevance": 0.8}
+
+    def test_bare_names_are_left_unquoted(self, tmp_path):
+        """Quoting only what needs it keeps existing files from churning."""
+        cfg = AppConfig()
+        cfg.notifications.watches = {"melanoma-trials": {"min_relevance": 0.8}}
+
+        text = save_config(cfg, tmp_path / "config.toml").read_text()
+
+        assert "[notifications.watches.melanoma-trials]" in text

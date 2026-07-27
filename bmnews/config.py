@@ -7,6 +7,7 @@ provides typed dataclass access to all configuration sections.
 from __future__ import annotations
 
 import logging
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -156,6 +157,30 @@ class EmailConfig:
 
 
 @dataclass
+class NotificationsConfig:
+    """Watches that alert on a matching paper, and where they deliver.
+
+    Both sub-tables are dicts of dicts — ``{name: {field: value}}``, the same
+    shape as ``SourcesConfig.source_options`` — and that is a constraint, not a
+    preference. :func:`save_config` renders a list by stringifying each
+    element, so an array-of-tables (``[[notifications.watch]]``) would
+    round-trip as TOML strings of Python dict reprs; and it emits at most three
+    table levels, so anything nested deeper is dropped on every GUI save.
+    Keying by name keeps both shapes inside what the serializer handles.
+
+    The values stay raw dicts here because :func:`_apply_section` setattrs
+    whatever the TOML holds without validating it. ``bmnews.notify.watches``
+    parses them into :class:`~bmnews.notify.watches.Watch` and
+    :class:`~bmnews.notify.watches.Channel`, where a typo'd criterion is
+    reported rather than silently ignored.
+    """
+
+    enabled: bool = False
+    channels: dict[str, dict[str, Any]] = field(default_factory=dict)
+    watches: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+
+@dataclass
 class AppConfig:
     """Top-level application configuration, one attribute per TOML section."""
 
@@ -167,6 +192,7 @@ class AppConfig:
     transparency: TransparencyConfig = field(default_factory=TransparencyConfig)
     user: UserConfig = field(default_factory=UserConfig)
     email: EmailConfig = field(default_factory=EmailConfig)
+    notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
     log_level: str = "INFO"
     template_dir: str = ""
 
@@ -215,6 +241,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         "transparency": config.transparency,
         "user": config.user,
         "email": config.email,
+        "notifications": config.notifications,
     }
 
     for section_name, dc in section_map.items():
@@ -266,6 +293,26 @@ def _toml_str(value: str) -> str:
         else:
             out.append(ch)
     return '"' + "".join(out) + '"'
+
+
+#: Characters TOML allows in a bare key. Anything else has to be quoted.
+_BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _toml_key(key: str) -> str:
+    """Render *key* as a TOML key, quoting it when it cannot stand bare.
+
+    Sub-table names come from the user — a watch is named by its config table,
+    and the GUI lets that name be typed. A name carrying a space or a quote
+    would emit an unparseable header and a name carrying a dot would emit a
+    *valid* one that reads as two nested tables, so ``a.b`` would silently come
+    back as ``{"a": {"b": ...}}``. Either way :func:`save_config` destroys the
+    configuration it was asked to preserve.
+
+    Bare keys are left bare so existing files keep their shape rather than
+    churning every table heading on the next save.
+    """
+    return key if _BARE_KEY.match(key) else _toml_str(key)
 
 
 def _toml_value(value: Any) -> str | None:
@@ -326,14 +373,14 @@ def save_config(config: AppConfig, path: str | Path | None = None) -> Path:
                 for key, sub_value in scalars.items():
                     rendered = _toml_value(sub_value)
                     if rendered is not None:
-                        lines.append(f"{key} = {rendered}")
+                        lines.append(f"{_toml_key(key)} = {rendered}")
                 lines.append("")
             for key, sub_table in nested.items():
-                lines.append(f"[{name}.{field_name}.{key}]")
+                lines.append(f"[{name}.{field_name}.{_toml_key(key)}]")
                 for sub_key, leaf in sub_table.items():
                     rendered = _toml_value(leaf)
                     if rendered is not None:
-                        lines.append(f"{sub_key} = {rendered}")
+                        lines.append(f"{_toml_key(sub_key)} = {rendered}")
                 lines.append("")
 
     _write_section("database", config.database)
@@ -344,6 +391,7 @@ def save_config(config: AppConfig, path: str | Path | None = None) -> Path:
     _write_section("transparency", config.transparency)
     _write_section("user", config.user)
     _write_section("email", config.email)
+    _write_section("notifications", config.notifications)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -407,4 +455,35 @@ from_address = ""
 to_address = ""
 subject_prefix = "[BioMedNews]"
 max_papers = 20
+
+[notifications]
+enabled = false
+
+# Watches alert you about a matching paper as it is scored, separately from
+# the periodic digest — a notified paper still appears in the next digest.
+# Each watch AND-combines its criteria; an empty list means "no constraint".
+# Uncomment and adapt:
+#
+# [notifications.channels.mail]
+# kind = "email"                      # reuses the [email] SMTP settings above
+# to_address = "me@example.org"
+#
+# [notifications.channels.matrix]
+# kind = "matrix"
+# homeserver = "https://matrix.example.org"
+# access_token = ""
+# room = "#bmnews-alerts:example.org"
+#
+# [notifications.watches.melanoma-trials]
+# enabled = true
+# min_relevance = 0.8
+# min_combined = 0.0
+# min_quality_tier = "TIER_4_EXPERIMENTAL"
+# tags = ["melanoma", "immunotherapy"]
+# keywords = []
+# sources = []
+# journals = []
+# study_designs = []
+# channels = ["mail", "matrix"]
+# max_per_run = 5
 """

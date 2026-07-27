@@ -38,10 +38,13 @@ def _position_on_screen(x: int | None, y: int | None) -> bool:
         return False
     try:
         from AppKit import NSScreen  # type: ignore[import-untyped]
+
         for screen in NSScreen.screens():
             f = screen.frame()
-            if f.origin.x <= x <= f.origin.x + f.size.width and \
-               f.origin.y <= y <= f.origin.y + f.size.height:
+            if (
+                f.origin.x <= x <= f.origin.x + f.size.width
+                and f.origin.y <= y <= f.origin.y + f.size.height
+            ):
                 return True
     except Exception:
         # AppKit unavailable — skip validation and trust the values
@@ -68,8 +71,7 @@ def _load_window_state() -> dict:
 def _save_window_state(window: Any) -> None:
     """Persist current window geometry to disk."""
     try:
-        state = {"x": window.x, "y": window.y,
-                 "width": window.width, "height": window.height}
+        state = {"x": window.x, "y": window.y, "width": window.width, "height": window.height}
         _WINDOW_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
         _WINDOW_STATE_PATH.write_text(json.dumps(state), encoding="utf-8")
     except Exception:
@@ -142,8 +144,9 @@ def launch(config: AppConfig, port: int | None = None) -> None:
     # nothing about whether the server is actually listening yet.
     if not _wait_for_server(port, SERVER_START_TIMEOUT_SECONDS):
         logger.warning(
-            "Flask server not reachable on port %d after %.1fs — "
-            "opening the window anyway", port, SERVER_START_TIMEOUT_SECONDS,
+            "Flask server not reachable on port %d after %.1fs — opening the window anyway",
+            port,
+            SERVER_START_TIMEOUT_SECONDS,
         )
 
     # Open the native window with saved geometry
