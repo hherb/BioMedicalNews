@@ -90,7 +90,16 @@ def score_papers(
 
     if concurrency <= 1:
         for i, paper in enumerate(papers):
-            result = _score_single(paper, agent, quality_mgr, quality_filter, interests)
+            # A paper that cannot be scored costs only itself. This loop used
+            # to let the exception escape, so a handful of unscoreable papers
+            # stranded every paper queued behind them — and it is the branch
+            # local-Ollama users run. The concurrent branch below already
+            # logged and carried on; the two now agree.
+            try:
+                result = _score_single(paper, agent, quality_mgr, quality_filter, interests)
+            except Exception:
+                logger.exception("Error scoring paper %s", paper.get("doi", "?"))
+                continue
             results.append(result)
             if progress_callback:
                 progress_callback(i + 1, total, result)
@@ -196,7 +205,12 @@ def _score_single(
     """
     paper_id = paper.get("id", 0)
     title = paper.get("title", "")
-    abstract = paper.get("abstract", "")
+    # ``get(key, "")`` is not a guard when the key exists holding None, which
+    # a NULL abstract does: the default never applies and the None reaches the
+    # quality tiers, which slice it. ``db.operations._row_to_paper`` normalises
+    # the column, but this takes a plain dict from any caller, so it cannot
+    # assume the row came through there.
+    abstract = paper.get("abstract") or ""
     # The prompt template renders keywords as one line, so the list is joined
     # here rather than teaching the template to format it.
     categories = "; ".join(paper.get("keywords") or [])

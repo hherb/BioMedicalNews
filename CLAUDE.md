@@ -74,7 +74,7 @@ bmnews/
 ├── db/
 │   ├── schema.py        # Database connection factory (open_db, init_db)
 │   ├── operations.py    # Pure-function CRUD (all SQL lives here)
-│   └── migrations.py    # 4 versioned migrations (the 4th moves storage onto bmlib)
+│   └── migrations.py    # 6 versioned migrations (the 4th moves storage onto bmlib)
 ├── fetchers/
 │   ├── __init__.py      # Registers bmnews-supplied sources with bmlib's registry
 │   └── europepmc.py     # Europe PMC fetcher (bmlib registry calling convention)
@@ -177,7 +177,7 @@ Owned by bmnews:
 - **scores** — scoring results (relevance, quality, combined scores, summary, study_design, quality_tier, assessment JSON)
 - **digests** / **digest_papers** — digest delivery tracking (many-to-many)
 - **paper_tags** — per-paper interest tags matched during scoring
-- **paper_extras** — the leftovers bmlib has no column for: the source `extras` blob (`cited_by`) and the GUI's cached full text. One publication can be fed by several sources, so `save_paper_metadata()` merges key by key rather than replacing the blob (a later value wins; a key it says nothing about survives).
+- **paper_extras** — the leftovers bmlib has no column for: the source `extras` blob (`cited_by`), the GUI's cached full text, and the PDF that text was extracted from (`fulltext_pdf_url`, kept beside the HTML because extraction loses figures and layout). One publication can be fed by several sources, so `save_paper_metadata()` merges key by key rather than replacing the blob (a later value wins; a key it says nothing about survives).
 - **notifications** — one row per *delivered* watch notification, unique on `(watch, paper_id, channel)`. The pending queue is **not** stored: it is derived per run as "papers this watch matches now, minus those already sent", which is what makes paging idempotent and stops an edited watch from leaving orphaned queue rows. A `failed` row stays in the derived queue, so it retries. This table must stay separate from `digest_papers` — `get_papers_for_digest()` excludes papers present there and nothing else, so recording a notification in it would silently suppress that paper's digest entry.
 
 `scores`, `paper_tags`, `digest_papers` and `notifications` keep a column named `paper_id`; it references `publications(id)`. "Paper" stays bmnews's noun for the thing — the GUI routes are `/papers/<id>`.
@@ -188,6 +188,7 @@ Migrations in `db/migrations.py`:
 3. `add_fulltext_columns` — adds pmid, pmcid, fulltext_html, fulltext_source to papers; backfills pmid/pmcid from metadata_json for europepmc papers
 4. `migrate_to_publications` — replays every `papers` row through `store_publication()` so bmlib's dedupe decides identity, repoints the three bmnews-owned tables that reference a paper (`scores`, `paper_tags`, `digest_papers` — `digests` itself carries no paper reference) at the resulting ids, and drops `papers`. Where two rows collapse into one publication, the surviving score is the highest `combined_score` (the one the digest showed); tags and digest links are unioned, and metadata merges key by key with the later row winning. **This migration is destructive and one-way**: a row that can be keyed on neither DOI nor PMID cannot be represented, so it is logged at ERROR and written to `~/.bmnews/stranded-papers.json` (`constants.STRANDED_PAPERS_PATH`) before `papers` is dropped.
 5. `add_notifications` — the `notifications` table above
+6. `add_fulltext_pdf_url` — adds `paper_extras.fulltext_pdf_url`, so a PDF the text was extracted from is kept *beside* the HTML rather than instead of it (extraction loses figures, tables and layout, so the reading pane offers both). Also clears full text stored under a preprint server's own name (`_STALE_FULLTEXT_SOURCES`) — those rows hold an abstract-only rendering of a body-less JATS document — **and deletes the matching file from bmlib's disk cache**. Both halves are needed: bmlib consults its cache before the database, so clearing the row alone would have the next request served the same file and stored again under the `cached` source name, out of reach of any filter keyed on the server's name. A cache that cannot be opened is logged and skipped rather than failing the migration.
 
 Backend-aware SQL: `placeholder(conn)` (from `bmlib.db`) returns `?` (SQLite) or `%s` (PostgreSQL). Schema DDL maintained as separate SQLite and PostgreSQL strings per migration. The `sources` filter in `get_papers_filtered()` unnests a JSON array, so it is backend-specific too — `json_each` on SQLite, `json_array_elements_text` on PostgreSQL.
 
@@ -241,7 +242,7 @@ Desktop app: pywebview (native window) + Flask (HTTP backend) + HTMX (frontend i
 - **HTMX fragment-based updates** — paper list pagination, paper detail, settings, and pipeline status polling (500ms interval) use partial HTML responses
 - **Async pipeline execution** — runs in daemon thread with `on_progress` and `on_scored` callbacks; OOB (out-of-band) HTMX swaps update individual paper cards and refresh the list
 - **Auto-resume** — on app startup, automatically scores any unscored papers
-- **Fulltext retrieval** — on-demand via `bmlib.fulltext.FullTextService`, seeded with the URLs sync recorded in `fulltext_sources` and falling back to Europe PMC → Unpaywall → DOI; JATS XML parsed to HTML; cached in `paper_extras.fulltext_html`
+- **Fulltext retrieval** — on-demand via `bmlib.fulltext.FullTextService`, seeded with the URLs sync recorded in `fulltext_sources` and falling back to Europe PMC → Unpaywall → DOI; JATS XML parsed to HTML; cached in `paper_extras.fulltext_html`. When the text was extracted from a PDF, the reading pane offers **View PDF** alongside it. Every outbound URL passes `_safe_url()` first — these come from upstream services, and escaping stops attribute injection but not a `javascript:` payload
 - **Dynamic model selector** — auto-populated from provider APIs with local caching
 - **Window geometry persistence** — saves/restores position and size in `~/.bmnews/window_state.json`
 - **Sorting/filtering** — by date, score, source, quality tier, study design
@@ -293,16 +294,16 @@ Test files:
 | File | Coverage |
 |---|---|
 | `test_config.py` | Config loading, TOML parsing, backward-compat defaults |
-| `test_db.py` | All database operations, migrations, storing/dedup, filtering, tagging, digests, paper extras, digest selection filters, and the v3 → v4 data migration — **run against SQLite and PostgreSQL** |
+| `test_db.py` | All database operations, migrations, storing/dedup, filtering, tagging, digests, paper extras, digest selection filters, the v3 → v4 data migration, migration 6's cache purge, and NULL text columns decoding to strings — **run against SQLite and PostgreSQL** |
 | `backends.py` / `conftest.py` | Not tests: the per-backend parameterisation `test_db.py` opts into |
 | `test_digest.py` | HTML/text digest rendering |
 | `test_fetchers.py` | Europe PMC fetcher + its registration in bmlib's source registry |
 | `test_fulltext_integration.py` | Fulltext service integration (Europe PMC/Unpaywall/DOI) |
-| `test_gui_app.py` | Flask blueprints, HTMX responses, paper queries, pipeline status |
+| `test_gui_app.py` | Flask blueprints, HTMX responses, paper queries, pipeline status, the View PDF button, and the outbound-URL scheme allowlist |
 | `test_gui_helpers.py` | Abstract HTML formatting |
 | `test_notify.py` | Every watch criterion in isolation against literal paper dicts; watch/channel parsing, validation and unknown-key warnings |
 | `test_pipeline.py` | Show-cached flag, CLI integration, `run_sync` storage via bmlib (identifiers, publication types, full-text sources, extras), source dispatch and per-source config |
-| `test_scoring.py` | Quality tier mapping, publication type extraction, tier floors, quality toggle, generation settings |
+| `test_scoring.py` | Quality tier mapping, publication type extraction, tier floors, quality toggle, generation settings, NULL-abstract normalisation, and one failing paper not aborting the run |
 
 ## Adding New Functionality
 

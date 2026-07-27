@@ -333,7 +333,13 @@ body {
 
 /* Full text content */
 .fulltext-section { margin-top: 1.5rem; }
+/* A flex row rather than a float, so the PDF button cannot be wrapped by the
+   heading text when a long source name pushes the badge along. */
 .fulltext-section > h2 {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem;
     font-size: 1rem;
     color: var(--text-muted);
     margin-bottom: 0.75rem;
@@ -349,6 +355,16 @@ body {
     text-transform: none;
     letter-spacing: 0;
     vertical-align: middle;
+}
+/* Offered beside the heading whenever the text came from a PDF, since
+   extraction recovers the prose but not figures, tables or layout. */
+.fulltext-pdf-link {
+    margin-left: auto;
+    font-size: 0.75rem;
+    padding: 0.2rem 0.6rem;
+    text-transform: none;
+    letter-spacing: 0;
+    text-decoration: none;
 }
 
 .fulltext-content h1 { font-size: 1.3rem; margin: 1.5rem 0 0.75rem; }

@@ -1,5 +1,13 @@
 <section class="fulltext-section">
-    <h2>Full Text <span class="fulltext-source-badge">{{ paper.fulltext_source }}</span></h2>
+    <h2>
+        Full Text <span class="fulltext-source-badge">{{ paper.fulltext_source }}</span>
+        {%- if pdf_url %}
+        {# Text extracted from a PDF loses figures, tables and layout, so the
+           original is always one click away. #}
+        <a href="{{ pdf_url }}" target="_blank" rel="noopener"
+           class="btn btn-primary fulltext-pdf-link">View PDF &#x2197;</a>
+        {%- endif %}
+    </h2>
     <div class="fulltext-content">
         {{ paper.fulltext_html | safe }}
     </div>

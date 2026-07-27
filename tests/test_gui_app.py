@@ -9,7 +9,13 @@ from bmlib.db import connect_sqlite
 from bmlib.fulltext import FullTextResult
 
 from bmnews.config import AppConfig
-from bmnews.db.operations import get_paper_by_doi, save_score, store_paper
+from bmnews.db.operations import (
+    get_paper_by_doi,
+    get_paper_with_score,
+    save_fulltext,
+    save_score,
+    store_paper,
+)
 from bmnews.db.schema import init_db
 
 
@@ -241,6 +247,152 @@ class TestFullTextRoute:
     def test_fulltext_not_found(self, seeded_client):
         resp = seeded_client.post("/papers/99999/fulltext")
         assert resp.status_code == 404
+
+
+class TestFullTextPDFLink:
+    """The PDF stays on offer beside text extracted from it.
+
+    Extraction recovers an article's prose but not its figures, tables or
+    layout, so a reader who needs those must be able to reach the original.
+    """
+
+    def test_pdf_link_shown_beside_extracted_text(self, seeded_client):
+        conn = seeded_client.application.config["BMNEWS_DB"]
+        paper = get_paper_by_doi(conn, "10.1101/g1")
+        with patch("bmnews.gui.routes.papers.FullTextService") as mock_svc:
+            mock_svc.return_value.fetch_fulltext.return_value = FullTextResult(
+                source="medrxiv",
+                html="<p>Extracted body text.</p>",
+                pdf_url="https://medrxiv.org/paper.full.pdf",
+            )
+            resp = seeded_client.post(f"/papers/{paper['id']}/fulltext")
+
+        assert resp.status_code == 200
+        assert b"Extracted body text." in resp.data
+        assert b"https://medrxiv.org/paper.full.pdf" in resp.data
+        assert b"View PDF" in resp.data
+
+    def test_no_pdf_link_without_a_pdf(self, seeded_client):
+        """JATS-derived text has no PDF behind it, so no button is offered."""
+        conn = seeded_client.application.config["BMNEWS_DB"]
+        paper = get_paper_by_doi(conn, "10.1101/g1")
+        with patch("bmnews.gui.routes.papers.FullTextService") as mock_svc:
+            mock_svc.return_value.fetch_fulltext.return_value = FullTextResult(
+                source="europepmc",
+                html="<p>Parsed from JATS.</p>",
+            )
+            resp = seeded_client.post(f"/papers/{paper['id']}/fulltext")
+
+        assert resp.status_code == 200
+        assert b"View PDF" not in resp.data
+
+    def test_pdf_link_survives_caching(self, seeded_client):
+        """A second request is served from the DB and must still offer the PDF."""
+        conn = seeded_client.application.config["BMNEWS_DB"]
+        paper = get_paper_by_doi(conn, "10.1101/g1")
+        with patch("bmnews.gui.routes.papers.FullTextService") as mock_svc:
+            mock_svc.return_value.fetch_fulltext.return_value = FullTextResult(
+                source="medrxiv",
+                html="<p>Extracted body text.</p>",
+                pdf_url="https://medrxiv.org/paper.full.pdf",
+            )
+            seeded_client.post(f"/papers/{paper['id']}/fulltext")
+            # The service must not be consulted again for the cached paper.
+            mock_svc.return_value.fetch_fulltext.reset_mock()
+            resp = seeded_client.post(f"/papers/{paper['id']}/fulltext")
+            mock_svc.return_value.fetch_fulltext.assert_not_called()
+
+        assert b"https://medrxiv.org/paper.full.pdf" in resp.data
+        assert b"View PDF" in resp.data
+
+
+class TestFullTextLinkSafety:
+    """Only http(s) URLs reach an ``href``.
+
+    Escaping stops a URL breaking out of the attribute, but not a
+    ``javascript:`` payload inside it. These URLs come from upstream services
+    — Unpaywall, a preprint server's API, a publisher redirect — so their
+    scheme is checked rather than trusted.
+    """
+
+    def _fetch(self, seeded_client, result):
+        conn = seeded_client.application.config["BMNEWS_DB"]
+        paper = get_paper_by_doi(conn, "10.1101/g1")
+        with patch("bmnews.gui.routes.papers.FullTextService") as mock_svc:
+            mock_svc.return_value.fetch_fulltext.return_value = result
+            return seeded_client.post(f"/papers/{paper['id']}/fulltext")
+
+    def test_a_javascript_pdf_url_is_not_offered_beside_the_text(self, seeded_client):
+        resp = self._fetch(
+            seeded_client,
+            FullTextResult(
+                source="medrxiv",
+                html="<p>Body.</p>",
+                pdf_url="javascript:alert(1)",
+            ),
+        )
+
+        assert resp.status_code == 200
+        assert b"Body." in resp.data
+        assert b"javascript:" not in resp.data
+        assert b"View PDF" not in resp.data
+
+    def test_a_javascript_link_is_not_rendered(self, seeded_client):
+        """With no safe link left, the pane says so rather than linking out."""
+        resp = self._fetch(
+            seeded_client,
+            FullTextResult(
+                source="unpaywall",
+                pdf_url="javascript:alert(1)",
+            ),
+        )
+
+        assert resp.status_code == 200
+        assert b"javascript:" not in resp.data
+        assert b"not available" in resp.data
+
+    def test_an_unsafe_link_is_not_stored(self, seeded_client):
+        """Storing it would render it on the next request, unchecked."""
+        conn = seeded_client.application.config["BMNEWS_DB"]
+        paper = get_paper_by_doi(conn, "10.1101/g1")
+        self._fetch(
+            seeded_client,
+            FullTextResult(
+                source="unpaywall",
+                pdf_url="javascript:alert(1)",
+            ),
+        )
+
+        stored = get_paper_with_score(conn, paper["id"])
+        assert not stored["fulltext_html"]
+
+    def test_an_http_link_still_works(self, seeded_client):
+        resp = self._fetch(
+            seeded_client,
+            FullTextResult(
+                source="unpaywall",
+                pdf_url="https://example.org/paper.pdf",
+            ),
+        )
+
+        assert b"https://example.org/paper.pdf" in resp.data
+
+    def test_a_cached_unsafe_pdf_url_is_not_offered(self, seeded_client):
+        """A row written before this check must not render one either."""
+        conn = seeded_client.application.config["BMNEWS_DB"]
+        paper = get_paper_by_doi(conn, "10.1101/g1")
+        save_fulltext(
+            conn,
+            paper_id=paper["id"],
+            html="<p>Body.</p>",
+            source="medrxiv",
+            pdf_url="javascript:alert(1)",
+        )
+
+        resp = seeded_client.post(f"/papers/{paper['id']}/fulltext")
+
+        assert b"javascript:" not in resp.data
+        assert b"View PDF" not in resp.data
 
 
 class TestLauncher:
