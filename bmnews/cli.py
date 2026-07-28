@@ -113,9 +113,9 @@ def notify(
 ) -> None:
     """Deliver watch notifications for newly matching papers.
 
-    Nothing is ever silently dropped: a watch's ``max_per_run`` bounds one
-    batch, and the rest stay queued. Run the command again to pull the next
-    batch, or ``--all`` to drain it.
+    Nothing is ever silently dropped: a watch's max_per_run bounds one batch
+    and the rest stay queued. Run the command again to pull the next batch,
+    or --all to drain it.
     """
     from bmnews.notify import service
 
