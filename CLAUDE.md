@@ -41,24 +41,27 @@ ruff format bmnews/ tests/                          # auto-format
 
 ### Pipeline
 
-Linear pipeline with three independent stages, each runnable individually via CLI or composed with `bmnews run`:
+Linear pipeline with four independent stages, each runnable individually via CLI or composed with `bmnews run`:
 
 ```
-SYNC (bmlib.publications.sync) → SCORE (bmlib.llm) → DIGEST (Jinja2 + SMTP)
+SYNC (bmlib.publications.sync) → SCORE (bmlib.llm) → NOTIFY (watches) → DIGEST (Jinja2 + SMTP)
 ```
 
-All stages are **incremental**: sync records each fetched day in `download_days` and re-fetches only the days that are missing or failed, score skips already-scored papers, digest only includes papers not yet in a prior digest.
+All stages are **incremental**: sync records each fetched day in `download_days` and re-fetches only the days that are missing or failed, score skips already-scored papers, notify skips papers already delivered for that watch and channel, and digest only includes papers not yet in a prior digest.
+
+`run_pipeline()` gates DIGEST on `scored > 0` but **not** NOTIFY: a run with nothing newly scored still has a failed delivery to retry and a just-loosened watch to honour. NOTIFY is also wrapped so a failure cannot take the run down — the expensive stages have already finished by then.
 
 ### Directory Structure
 
 ```
 bmnews/
 ├── __init__.py          # Package version (0.3.0)
-├── cli.py               # Click CLI commands (run, fetch, score, digest, init, gui, search)
+├── cli.py               # Click CLI commands (run, fetch, score, digest, notify, init, gui, search)
 ├── config.py            # TOML config loading (AppConfig + nested section dataclasses)
 ├── constants.py         # Fixed application constants (scoring weights, page sizes, timeouts)
 ├── metadata.py          # Defensive decoding of the paper_extras.metadata_json blob
-├── pipeline.py          # Orchestration: sync → score → digest (progress callbacks)
+├── pipeline.py          # Orchestration: sync → score → notify → digest (progress callbacks)
+├── templating.py        # TEMPLATES_DIR + build_template_engine (digest, notify and GUI all need them)
 ├── db/
 │   ├── schema.py        # Database connection factory (open_db, init_db)
 │   ├── operations.py    # Pure-function CRUD (all SQL lives here)
@@ -72,9 +75,15 @@ bmnews/
 ├── digest/
 │   ├── renderer.py      # Jinja2 digest rendering (HTML + plain text)
 │   └── sender.py        # SMTP email delivery (TLS, multipart MIME)
-├── notify/              # Watch-based alerts (partial — see the design doc)
+├── notify/              # Watch-based alerts (GUI pane still to come)
 │   ├── watches.py       # Watch/Channel dataclasses, validated from config dicts
-│   └── matcher.py       # Pure `(paper, watch) -> bool`. No I/O, no LLM
+│   ├── matcher.py       # Pure `(paper, watch) -> bool`. No I/O, no LLM
+│   ├── renderer.py      # Renders a batch into the notify_* templates
+│   ├── service.py       # run_notify(): select, page, dispatch, record
+│   └── channels/        # Delivery adapters, dispatched by a channel's `kind`
+│       ├── __init__.py  # ChannelError, Message, build_adapter, transaction_key
+│       ├── email.py     # Wraps digest/sender.py over the [email] SMTP settings
+│       └── matrix.py    # One authenticated HTTP PUT — no SDK, no E2EE
 └── gui/
     ├── app.py           # Flask application factory (registers blueprints)
     ├── launcher.py      # pywebview window launcher (geometry persistence, port auto-detect)
@@ -91,13 +100,15 @@ bmnews/
         ├── base.html    # Main layout (nav tabs, split pane, status footer)
         └── fragments/   # HTMX partial templates (paper_list, reading_pane, settings, etc.)
 
-templates/                     # Email digest + LLM prompt templates (Jinja2)
+templates/                     # Email digest + notification + LLM prompt templates (Jinja2)
 ├── digest_email.html          # HTML email digest
 ├── digest_text.txt            # Plain-text email digest
+├── notify_email.html/.txt     # Watch notification, email (styled like the digest)
+├── notify_matrix.html/.txt    # Watch notification, Matrix (no CSS — see below)
 ├── relevance_system.txt       # LLM system prompt for relevance scoring
 └── relevance_scoring.txt      # LLM user prompt (paper title, abstract, interests)
 
-tests/                         # Test suite (10 files)
+tests/                         # Test suite (12 files)
 docs/plans/                    # Implementation design documents and plans
 bmlib_patch/                   # bmlib source archive and patch files
 ```
@@ -115,6 +126,11 @@ cli.py → pipeline.py → config.py (AppConfig dataclass)
                                           → bmlib.quality.metadata_filter
                       → digest/renderer.py → bmlib.templates.TemplateEngine
                       → digest/sender.py (SMTP)
+                      → notify/service.py (deferred import) → notify/matcher.py (pure)
+                                          → notify/watches.py (parse + validate)
+                                          → notify/renderer.py → templating.py
+                                          → notify/channels/ → email.py → digest/sender.py
+                                                             → matrix.py (httpx PUT)
 
 gui/ → app.py (Flask factory) → routes/ (papers, settings, pipeline blueprints)
      → launcher.py (pywebview wrapper)
@@ -203,9 +219,19 @@ Layered: dataclass defaults → TOML file (`~/.bmnews/config.toml`) → CLI flag
 
 A **watch** is named criteria that alert on a matching paper as it is scored, separately from the periodic digest — a notified paper is still included in the next digest. Design: `docs/plans/2026-07-26-notification-service-design.md`.
 
-Implemented so far: migration 5 (the `notifications` table), `NotificationsConfig`, and the two pure modules — `notify/watches.py` (parse + validate) and `notify/matcher.py` (`matches(paper, watch)`, no I/O). **Not yet implemented**: `notify/channels/` (email + Matrix adapters), `notify/service.py` (`run_notify()`: select, page, dispatch, record), the `bmnews notify` CLI command, the GUI watches pane, and the `notify_*` templates. Nothing calls the matcher yet.
+Surfaces: the `bmnews notify` CLI (`--watch`, `--count`, `--all`, `--dry-run`, `--list`) and the NOTIFY stage of `run_pipeline()`. **Still to come**: the GUI watches pane. Everything else is implemented.
 
-Criteria are AND-combined; an empty list means "no constraint", and within one list criterion the test is `any`. `matcher._tier_ok()` reuses `scoring.scorer.tiers_below()`, so the tier floor exempts `UNCLASSIFIED` exactly as the digest does. The matcher reads `paper["tags"]`, which `_row_to_paper()` does not supply — tags live in `paper_tags`, and the (unwritten) service layer joins them in.
+Criteria are AND-combined; an empty list means "no constraint", and within one list criterion the test is `any`. `matcher._tier_ok()` reuses `scoring.scorer.tiers_below()`, so the tier floor exempts `UNCLASSIFIED` exactly as the digest does. The matcher reads `paper["tags"]`, which `publications` has no column for — `get_notification_candidates()` attaches them from `paper_tags` per chunk.
+
+Three things constrain how this is built, and undoing any of them reintroduces a bug the design set out to avoid:
+
+1. **The pending queue is derived, never stored** — "papers this watch matches now, minus those with a `sent` row for that channel". That is what makes paging idempotent (asking for five more re-runs the identical selection) and what stops an edited watch from leaving orphaned queue rows.
+2. **The delivery cap must not become a SQL `LIMIT`.** SQL narrows on what is indexable (score floors, tier exclusion, the anti-join, the ordering); the matcher applies keywords, tags, sources, journal and study design in Python afterwards. Limiting to five rows before the matcher rejects three of them delivers two while more matches sit further down. `collect_matches()` scans in `NOTIFY_SCAN_CHUNK`-sized chunks until one comes back short and returns *every* pending match; `_deliver()` slices the batch off that. `NOTIFY_SCAN_CHUNK` is a scan window and never a delivery cap. The scan runs to exhaustion because `remaining` has to be exact, which is affordable only because `get_notification_candidates()` selects `_NOTIFY_PAPER_COLUMNS` — deliberately *not* `_PAPER_COLUMNS`, whose `p.*` drags the GUI's cached full text through a query that materialises every candidate.
+3. **`notifications` stays out of `digest_papers`** — see the table description above.
+
+Delivery adapters raise `ChannelError` rather than returning a boolean: `digest.sender.send_email` returns `False` on failure, and a `False` read as success would mark papers sent and drop them out of the derived queue with nobody having been told. `ChannelError` is the **only** exception `run_notify()` treats as "this delivery did not happen", so every transport failure has to be converted to one — `MatrixChannel._request()` wraps each HTTP call for exactly that reason, since an `httpx` connect error escaping raw would skip recording the attempt and abandon every watch still to be delivered in that run. A failed send records `status='failed'`, which keeps the paper queued for the next run — per channel, so Matrix succeeding while email fails retries only the email. The batch is recorded through `record_notifications()` in one transaction: half a batch recorded would send the rest again under a *different* `txnId`.
+
+Matrix delivery is one authenticated HTTP PUT, no SDK. The `txnId` is derived from `(watch, channel, sorted paper_ids)` rather than randomly, because the homeserver treats a repeat as a retransmission — that closes the "message sent, row not yet written, crash" window. Encrypted rooms are **refused**, not deferred: a plain PUT there posts ciphertext nobody can read and reports success, and the content is alerts about public preprints. A non-`https` `homeserver` is refused too (loopback excepted) — the access token is a bearer credential on every request and does not expire on its own. The Matrix templates stay on headings, lists and links — that HTML subset has no CSS at all, which is why the digest's markup is not reused. All four `notify_*` templates escape their interpolations explicitly: bmlib's `TemplateEngine` runs with `autoescape=False` (it was built for plain-text LLM prompts) and the metadata is third-party.
 
 ### Scoring
 
@@ -256,7 +282,7 @@ Test files:
 | File | Coverage |
 |---|---|
 | `test_config.py` | Config loading, TOML parsing, backward-compat defaults |
-| `test_db.py` | All database operations, migrations, storing/dedup, filtering, tagging, digests, paper extras, digest selection filters, the v3 → v4 data migration, migration 6's cache purge, and NULL text columns decoding to strings — **run against SQLite and PostgreSQL** |
+| `test_db.py` | All database operations, migrations, storing/dedup, filtering, tagging, digests, paper extras, digest selection filters, notification candidate selection and batch recording (including its rollback), the v3 → v4 data migration, migration 6's cache purge, and NULL text columns decoding to strings — **run against SQLite and PostgreSQL** |
 | `backends.py` / `conftest.py` | Not tests: the per-backend parameterisation `test_db.py` opts into |
 | `test_digest.py` | HTML/text digest rendering |
 | `test_fetchers.py` | Europe PMC fetcher + its registration in bmlib's source registry |
@@ -264,7 +290,9 @@ Test files:
 | `test_gui_app.py` | Flask blueprints, HTMX responses, paper queries, pipeline status, the View PDF button, and the outbound-URL scheme allowlist |
 | `test_gui_helpers.py` | Abstract HTML formatting |
 | `test_notify.py` | Every watch criterion in isolation against literal paper dicts; watch/channel parsing, validation and unknown-key warnings |
-| `test_pipeline.py` | Show-cached flag, CLI integration, `run_sync` storage via bmlib (identifiers, publication types, full-text sources, extras), source dispatch and per-source config |
+| `test_notify_channels.py` | Channel adapters and the four templates: Matrix endpoint/auth/body shape, deterministic `txnId`, alias resolution, encrypted-room refusal, transport errors arriving as `ChannelError`, non-https homeserver refusal, HTML escaping of third-party metadata; email over mocked SMTP, including a `False` return raising |
+| `test_notify_service.py` | `run_notify` — paging with no gaps or repeats, chunk-boundary exhaustion, dedup, per-channel retry, dry run leaving `sent_total` unmoved, contradictory CLI batch sizes, and the `bmnews notify` CLI. Plus `collect_matches` directly: scanning past the chunk window, and not carrying the full-text cache. File-backed SQLite, since each run opens its own connection |
+| `test_pipeline.py` | Show-cached flag, CLI integration, `run_sync` storage via bmlib (identifiers, publication types, full-text sources, extras), source dispatch, per-source config, and the notify stage's placement (ungated, before the digest, failure-contained) |
 | `test_scoring.py` | Quality tier mapping, publication type extraction, tier floors, quality toggle, generation settings, NULL-abstract normalisation, and one failing paper not aborting the run |
 
 ## Adding New Functionality

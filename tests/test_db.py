@@ -22,9 +22,11 @@ from bmlib.fulltext.cache import sanitize_identifier
 from bmnews.db import migrations
 from bmnews.db.migrations import MIGRATIONS
 from bmnews.db.operations import (
+    count_notifications,
     get_all_tags,
     get_cached_digest_papers,
     get_fulltext_sources,
+    get_notification_candidates,
     get_paper_by_doi,
     get_paper_metadata,
     get_paper_tags,
@@ -36,6 +38,8 @@ from bmnews.db.operations import (
     get_unscored_papers,
     paper_exists,
     record_digest,
+    record_notification,
+    record_notifications,
     save_fulltext,
     save_paper_metadata,
     save_paper_tags,
@@ -1406,3 +1410,220 @@ class TestNullTextColumns:
         save_score(conn, paper_id=pid, combined_score=0.5)
 
         assert get_paper_with_score(conn, pid)["abstract"] == "Real text."
+
+
+class TestNotifications:
+    """Watch delivery recording, and the derived pending queue behind it.
+
+    The queue is *derived*, not stored: candidates are "papers this watch
+    matches now, minus those already sent over this channel". These tests pin
+    the SQL half of that — the score floors, the tier exclusion, the
+    not-already-sent anti-join and the ordering. The Python half lives in
+    ``tests/test_notify.py``.
+    """
+
+    def _scored(
+        self,
+        conn,
+        doi: str,
+        *,
+        combined: float = 0.9,
+        relevance: float = 0.9,
+        tier: str = "TIER_2_STRONG",
+        tags: list[str] | None = None,
+    ) -> int:
+        paper_id = store_paper(conn, doi=doi, title=f"Paper {doi}", source="medrxiv")
+        save_score(
+            conn,
+            paper_id=paper_id,
+            relevance_score=relevance,
+            combined_score=combined,
+            quality_tier=tier,
+        )
+        if tags:
+            save_paper_tags(conn, paper_id=paper_id, tags=tags)
+        return paper_id
+
+    def test_candidates_exclude_already_sent(self):
+        conn = _db()
+        kept = self._scored(conn, "10.1/kept")
+        sent = self._scored(conn, "10.1/sent")
+        record_notification(conn, watch="w", paper_id=sent, channel="c", status="sent")
+
+        got = get_notification_candidates(conn, watch="w", channel="c", limit=10)
+        assert [p["id"] for p in got] == [kept]
+
+    def test_candidates_include_failed(self):
+        """A failed delivery stays in the queue, which is how it gets retried."""
+        conn = _db()
+        failed = self._scored(conn, "10.1/failed")
+        record_notification(
+            conn, watch="w", paper_id=failed, channel="c", status="failed", error="smtp down"
+        )
+
+        got = get_notification_candidates(conn, watch="w", channel="c", limit=10)
+        assert [p["id"] for p in got] == [failed]
+
+    def test_sent_on_another_channel_does_not_exclude(self):
+        """Retry state is per-channel or it is wrong."""
+        conn = _db()
+        paper_id = self._scored(conn, "10.1/split")
+        record_notification(conn, watch="w", paper_id=paper_id, channel="mail", status="sent")
+
+        assert [p["id"] for p in get_notification_candidates(conn, watch="w", channel="mail")] == []
+        assert [p["id"] for p in get_notification_candidates(conn, watch="w", channel="chat")] == [
+            paper_id
+        ]
+
+    def test_sent_for_another_watch_does_not_exclude(self):
+        conn = _db()
+        paper_id = self._scored(conn, "10.1/otherwatch")
+        record_notification(conn, watch="other", paper_id=paper_id, channel="c", status="sent")
+
+        got = get_notification_candidates(conn, watch="w", channel="c")
+        assert [p["id"] for p in got] == [paper_id]
+
+    def test_candidates_respect_score_floors(self):
+        conn = _db()
+        self._scored(conn, "10.1/lowcombined", combined=0.3, relevance=0.9)
+        self._scored(conn, "10.1/lowrelevance", combined=0.9, relevance=0.3)
+        wanted = self._scored(conn, "10.1/high", combined=0.9, relevance=0.9)
+
+        got = get_notification_candidates(
+            conn, watch="w", channel="c", min_combined=0.5, min_relevance=0.5
+        )
+        assert [p["id"] for p in got] == [wanted]
+
+    def test_candidates_exclude_tiers(self):
+        conn = _db()
+        self._scored(conn, "10.1/weak", tier="TIER_5_WEAK")
+        strong = self._scored(conn, "10.1/strong", tier="TIER_2_STRONG")
+
+        got = get_notification_candidates(
+            conn, watch="w", channel="c", exclude_tiers=["TIER_5_WEAK"]
+        )
+        assert [p["id"] for p in got] == [strong]
+
+    def test_candidates_order_by_combined_desc(self):
+        conn = _db()
+        low = self._scored(conn, "10.1/low", combined=0.5)
+        high = self._scored(conn, "10.1/high", combined=0.95)
+        mid = self._scored(conn, "10.1/mid", combined=0.7)
+
+        got = get_notification_candidates(conn, watch="w", channel="c")
+        assert [p["id"] for p in got] == [high, mid, low]
+
+    def test_candidates_carry_tags(self):
+        """The matcher reads paper["tags"], which no publications column holds."""
+        conn = _db()
+        tagged = self._scored(conn, "10.1/tagged", tags=["melanoma", "immunotherapy"])
+        untagged = self._scored(conn, "10.1/untagged", combined=0.4)
+
+        got = {p["id"]: p for p in get_notification_candidates(conn, watch="w", channel="c")}
+        assert sorted(got[tagged]["tags"]) == ["immunotherapy", "melanoma"]
+        assert got[untagged]["tags"] == []
+
+    def test_candidates_paginate_by_offset(self):
+        conn = _db()
+        ids = [self._scored(conn, f"10.1/p{n}", combined=0.9 - n / 100.0) for n in range(5)]
+
+        first = get_notification_candidates(conn, watch="w", channel="c", limit=2)
+        second = get_notification_candidates(conn, watch="w", channel="c", limit=2, offset=2)
+        assert [p["id"] for p in first] == ids[:2]
+        assert [p["id"] for p in second] == ids[2:4]
+
+    def test_candidates_skip_unscored_papers(self):
+        """Watches are evaluated after scoring; an unscored paper is not a candidate."""
+        conn = _db()
+        store_paper(conn, doi="10.1/unscored", title="Not scored yet")
+        scored = self._scored(conn, "10.1/scored")
+
+        got = get_notification_candidates(conn, watch="w", channel="c")
+        assert [p["id"] for p in got] == [scored]
+
+    def test_record_notification_upserts(self):
+        conn = _db()
+        paper_id = self._scored(conn, "10.1/retry")
+        record_notification(
+            conn, watch="w", paper_id=paper_id, channel="c", status="failed", error="boom"
+        )
+        record_notification(conn, watch="w", paper_id=paper_id, channel="c", status="sent")
+
+        ph = placeholder(conn)
+        row = fetch_one(
+            conn,
+            f"SELECT status, attempts, error FROM notifications WHERE paper_id = {ph}",
+            (paper_id,),
+        )
+        assert row["status"] == "sent"
+        assert row["attempts"] == 2
+        assert row["error"] == ""
+        assert fetch_scalar(conn, "SELECT COUNT(*) FROM notifications") == 1
+
+    def test_record_notification_is_per_channel(self):
+        conn = _db()
+        paper_id = self._scored(conn, "10.1/twochannels")
+        record_notification(conn, watch="w", paper_id=paper_id, channel="mail", status="sent")
+        record_notification(
+            conn, watch="w", paper_id=paper_id, channel="chat", status="failed", error="no room"
+        )
+
+        assert fetch_scalar(conn, "SELECT COUNT(*) FROM notifications") == 2
+
+    def test_candidates_leave_the_fulltext_cache_alone(self):
+        """The scan walks the whole queue, so it must not select cached articles.
+
+        `_PAPER_COLUMNS` carries `p.*` plus the GUI's cached full text, which
+        runs to hundreds of kilobytes per paper. That is right for one page of
+        digest results and wrong for a scan that materialises every candidate.
+        """
+        conn = _db()
+        paper_id = self._scored(conn, "10.1/cached")
+        save_fulltext(conn, paper_id=paper_id, html="<p>" + "x" * 5000 + "</p>", source="europepmc")
+
+        paper = get_notification_candidates(conn, watch="w", channel="c")[0]
+
+        assert "fulltext_html" not in paper
+        # Still everything the matcher tests and the templates render.
+        for key in ("id", "doi", "title", "abstract", "journal", "sources", "url"):
+            assert key in paper, f"{key} is needed downstream and was dropped"
+
+    def test_record_notifications_writes_the_batch_atomically(self):
+        conn = _db()
+        ids = [self._scored(conn, f"10.1/batch{n}") for n in range(3)]
+
+        record_notifications(conn, watch="w", paper_ids=ids, channel="c", status="sent")
+
+        assert count_notifications(conn, watch="w", channel="c") == 3
+
+    def test_record_notifications_rolls_back_as_one(self):
+        """A half-written batch would re-deliver under a different transaction key."""
+        conn = _db()
+        ids = [self._scored(conn, f"10.1/rollback{n}") for n in range(3)]
+
+        with pytest.raises(Exception):
+            # The last id references no publication, so the FK rejects it.
+            record_notifications(
+                conn, watch="w", paper_ids=[*ids, 999_999], channel="c", status="sent"
+            )
+
+        assert count_notifications(conn, watch="w", channel="c") == 0
+
+    def test_record_notifications_ignores_an_empty_batch(self):
+        conn = _db()
+        record_notifications(conn, watch="w", paper_ids=[], channel="c", status="sent")
+
+        assert count_notifications(conn, watch="w") == 0
+
+    def test_count_notifications_filters_by_status(self):
+        conn = _db()
+        first = self._scored(conn, "10.1/one")
+        second = self._scored(conn, "10.1/two")
+        record_notification(conn, watch="w", paper_id=first, channel="c", status="sent")
+        record_notification(conn, watch="w", paper_id=second, channel="c", status="failed")
+
+        assert count_notifications(conn, watch="w") == 1
+        assert count_notifications(conn, watch="w", status="failed") == 1
+        assert count_notifications(conn, watch="w", channel="c", status="sent") == 1
+        assert count_notifications(conn, watch="w", channel="elsewhere") == 0
+        assert count_notifications(conn, watch="nobody") == 0

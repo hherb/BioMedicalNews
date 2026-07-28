@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 700px; margin: 0 auto; padding: 20px; color: #333; }
+h1 { color: #7d3c98; border-bottom: 2px solid #7d3c98; padding-bottom: 10px; font-size: 1.3em; }
+.paper { margin-bottom: 20px; padding: 14px; background: #faf7fc; border-left: 4px solid #7d3c98; border-radius: 4px; }
+.paper h3 { margin: 0 0 8px 0; font-size: 1.05em; }
+.paper h3 a { color: #6c3483; text-decoration: none; }
+.paper h3 a:hover { text-decoration: underline; }
+.meta { color: #666; font-size: 0.9em; margin-bottom: 8px; }
+.summary { margin: 8px 0; }
+.scores { font-size: 0.85em; color: #555; }
+.score-badge { background: #f0e6f6; padding: 2px 8px; border-radius: 3px; margin-right: 8px; }
+.remaining { margin-top: 24px; padding: 12px; background: #fff8e1; border-left: 4px solid #f0ad4e; border-radius: 4px; font-size: 0.9em; }
+.footer { margin-top: 32px; padding-top: 16px; border-top: 1px solid #ddd; font-size: 0.85em; color: #888; }
+code { background: #eee; padding: 1px 5px; border-radius: 3px; }
+</style>
+</head>
+<body>
+
+{#
+  Every interpolation is escaped explicitly: bmlib's TemplateEngine runs with
+  autoescape off (its first job was plain-text LLM prompts), and titles,
+  abstracts and author lists arrive from third-party preprint metadata. An
+  unescaped title carrying markup would render as markup in the reader's mail
+  client.
+#}
+<h1>Watch &ldquo;{{ watch_name|e }}&rdquo;</h1>
+<p>{{ paper_count }} new paper{{ "s" if paper_count != 1 else "" }} matched this watch.</p>
+
+{% for paper in papers %}
+<div class="paper">
+    <h3><a href="{{ paper.url|e }}">{{ paper.title|e }}</a></h3>
+    <div class="meta">
+        {% if paper.authors %}{{ paper.authors|join('; ')|e }}{% endif %}
+        {% if paper.publication_date %} &middot; {{ paper.publication_date|e }}{% endif %}
+        {% if paper.sources %} &middot; {{ paper.sources|join(', ')|e }}{% endif %}
+    </div>
+    {% if paper.summary %}<div class="summary">{{ paper.summary|e }}</div>{% endif %}
+    <div class="scores">
+        <span class="score-badge">Relevance {{ "%.0f"|format(paper.relevance_score * 100) }}%</span>
+        {% if paper.quality_tier %}<span class="score-badge">{{ paper.quality_tier|e }}</span>{% endif %}
+        {% if paper.study_design %}<span class="score-badge">{{ paper.study_design|e }}</span>{% endif %}
+    </div>
+</div>
+{% endfor %}
+
+{% if remaining %}
+<div class="remaining">
+    {{ remaining }} further match{{ "es" if remaining != 1 else "" }} remaining for this watch —
+    nothing was dropped. Pull the next batch with
+    <code>bmnews notify --watch {{ watch_name|e }}</code>.
+</div>
+{% endif %}
+
+<div class="footer">
+    BioMedical News Reader &middot; {{ generated_at|e }}
+</div>
+
+</body>
+</html>

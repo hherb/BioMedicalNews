@@ -6,8 +6,9 @@
 |---|---|
 | Storage on `bmlib.publications` | **Done.** No `papers` table; fetch+store is one `sync()` call. Decisions worth keeping are recorded below. |
 | Multi-provider LLM + model selector | **Done.** Six providers via bmlib (`list_providers()` is the authority), settings UI datalist cached in `~/.bmnews/model_cache.json`. Design/plan: `docs/plans/2026-02-15-llm-providers-model-selector-*.md`. |
-| Notification service | **In flight** — see below. |
-| `bmlib.transparency` | **Unused.** Config section and packaging extra declared, analyzer never called. |
+| Notification service | **Done except the GUI watches pane** — see below. |
+| `bmlib.transparency` | **Unused.** Config section and packaging extra declared, analyzer never called. This is now the largest open item. |
+| `docs/dev/` drift | `architecture.md` and `database.md` still describe the removed `papers` table — [issue #11](https://github.com/hherb/BioMedicalNews/issues/11). |
 
 ## Environment gotcha
 
@@ -24,53 +25,66 @@ That is what unblocked the suite this session: the lock sat at bmlib 0.2.1
 (`e227ec14`) while `db/operations.py` had already started importing
 `bmlib.db.is_sqlite`, which only exists from 0.5.x.
 
-## Work in flight: the notification service
+## The notification service
 
 Design: `docs/plans/2026-07-26-notification-service-design.md` (decisions and
-rationale). Plan: `docs/plans/2026-07-28-notification-service-plan.md`
-(task-by-task implementation).
+rationale). Plan and the four deviations from it:
+`docs/plans/2026-07-28-notification-service-plan.md`.
 
 A **watch** is named criteria that alert on a matching paper as it is scored,
 separately from the periodic digest. A notified paper is still included in the
 next digest.
 
-Implemented:
+Shipped: the `notifications` table, `NotificationsConfig`, `notify/watches.py`
+and `notify/matcher.py` (all of which predate this session), plus
+`notify/channels/` (email + Matrix), `notify/renderer.py`, `notify/service.py`,
+the four `notify_*` templates, the `bmnews notify` CLI and the NOTIFY stage in
+`run_pipeline()`.
 
-- Migration 5 — the `notifications` table (one row per *delivered* notification,
-  unique on `(watch, paper_id, channel)`).
-- `NotificationsConfig`, with `channels` and `watches` as dicts-of-dicts —
-  forced by `save_config`'s three-level serializer, which silently drops
-  anything deeper and stringifies list elements.
-- `notify/watches.py` — `Watch` / `Channel` parsed from those dicts, warning on
-  unknown keys rather than ignoring them.
-- `notify/matcher.py` — pure `(paper, watch) -> bool`, no I/O, no LLM.
+**Still to do: the GUI watches pane.** The design sketches it as a pane
+listing each watch with `delivered / matching`, plus "Notify N more" and
+"Notify all remaining" buttons posting to `/notify/<watch>`, delivery running
+in a daemon thread behind the existing `_pipeline_lock` and reporting through
+the same status-bar fragment as the pipeline routes. `service.pending_counts()`
+already returns exactly what the pane needs to render, per `(watch, channel)`.
+Nothing else depends on it.
 
-Not yet implemented:
-
-- `notify/channels/` — email (wraps `digest/sender.py`) and Matrix (plain
-  authenticated HTTP PUT, no SDK).
-- `notify/service.py` — `run_notify()`: select, page, dispatch, record.
-- The `bmnews notify` CLI command and the `run_pipeline()` wiring.
-- `notify_email.*` / `notify_matrix.*` templates.
-- The GUI watches pane (deliberately last; nothing else depends on it).
-
-**Nothing calls the matcher yet.**
-
-Two traps the design calls out and the implementation has to honour:
+Three invariants to preserve if you touch any of this. Each of them is the
+whole reason some piece is shaped the way it is:
 
 1. **The pending queue is derived, never stored** — "papers this watch matches
-   now, minus those already sent". That is what makes paging idempotent and
-   stops an edited watch from leaving orphaned queue rows.
+   now, minus those already sent over this channel". That is what makes paging
+   idempotent and stops an edited watch from leaving orphaned queue rows.
 2. **A bare `LIMIT N` in SQL is wrong.** SQL narrows (score floors, tier
    exclusion, the not-already-sent anti-join, ordering); Python applies the
    rest (keywords, tags, sources, journal, study design). Limiting before the
-   Python filter under-delivers silently. The top-up loop must distinguish
-   "N matches collected" from "a chunk came back short" — only the second means
-   exhaustion, and a batch filling exactly at a chunk boundary is not it.
+   Python filter under-delivers silently. `collect_matches()` scans in
+   `NOTIFY_SCAN_CHUNK`-sized chunks until one comes back short and returns
+   *every* pending match; `_deliver()` slices the batch off that. The chunk is
+   a scan window, never a delivery cap. The scan runs to the end because
+   `remaining` has to be exact — affordable only because
+   `get_notification_candidates()` selects `_NOTIFY_PAPER_COLUMNS` rather than
+   `_PAPER_COLUMNS`, whose `p.*` would drag the GUI's cached full text through
+   a query that materialises every candidate.
 3. **`notifications` must stay separate from `digest_papers`.**
    `get_papers_for_digest()` excludes papers in `digest_papers` and nothing
    else, so recording a notification there would silently suppress that paper's
    digest entry.
+
+Three smaller ones worth not rediscovering. An adapter raises `ChannelError`
+rather than returning a boolean, because `send_email` returns `False` on
+failure and a `False` read as success marks papers sent and drops them out of
+the queue forever — and `ChannelError` is the *only* exception `run_notify()`
+reads as "this delivery did not happen", so a transport failure has to be
+converted into one (`MatrixChannel._request()` does that; without it an `httpx`
+connect error abandons every watch left in the run). Matrix's `txnId` is
+derived from `(watch, channel, sorted paper_ids)`, never randomly, because the
+homeserver treats a repeat as a retransmission — which is the only thing
+closing the "message sent, row not yet written, crash" window; the batch is
+recorded in one transaction for the same reason, since half a recorded batch
+resends the rest under a different `txnId`. And the four `notify_*` templates
+escape their own interpolations, because bmlib's `TemplateEngine` runs with
+`autoescape=False`.
 
 ## Reference: how the `publications` migration was resolved
 

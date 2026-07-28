@@ -44,7 +44,7 @@ def main(ctx: click.Context, config_path: str | None, verbose: bool) -> None:
 )
 @click.pass_context
 def run(ctx: click.Context, days: int | None, show_cached: bool) -> None:
-    """Run the full pipeline: fetch → score → digest."""
+    """Run the full pipeline: fetch → score → notify → digest."""
     from bmnews.pipeline import run_pipeline
 
     run_pipeline(ctx.obj["config"], days=days, show_cached=show_cached)
@@ -94,6 +94,82 @@ def digest(ctx: click.Context, output: str | None) -> None:
     text = run_digest(ctx.obj["config"], output=output)
     if not text:
         click.echo("No papers above threshold for digest.")
+
+
+@main.command()
+@click.option("--watch", default="", help="Only act on this watch.")
+@click.option("--count", default=None, type=int, help="Deliver this many per watch.")
+@click.option("--all", "drain", is_flag=True, help="Deliver every pending match, not one batch.")
+@click.option("--dry-run", is_flag=True, help="Show what would be sent; deliver nothing.")
+@click.option("--list", "list_only", is_flag=True, help="Report each watch and deliver nothing.")
+@click.pass_context
+def notify(
+    ctx: click.Context,
+    watch: str,
+    count: int | None,
+    drain: bool,
+    dry_run: bool,
+    list_only: bool,
+) -> None:
+    """Deliver watch notifications for newly matching papers.
+
+    Nothing is ever silently dropped: a watch's max_per_run bounds one batch
+    and the rest stay queued. Run the command again to pull the next batch,
+    or --all to drain it.
+    """
+    from bmnews.notify import service
+
+    config = ctx.obj["config"]
+
+    # Both mean "how many", and --all wins. Honouring one and discarding the
+    # other without saying so would deliver a number nobody asked for.
+    if drain and count is not None:
+        raise click.UsageError("--all and --count both set the batch size; use one or the other.")
+    if count is not None and count < 1:
+        raise click.UsageError("--count must be at least 1.")
+
+    if list_only:
+        reports = service.pending_counts(config, watch=watch)
+        if not reports:
+            click.echo("No watches configured.")
+            return
+        for report in reports:
+            state = "" if report.enabled else " (disabled)"
+            click.echo(
+                f"{report.watch} → {report.channel}{state}: "
+                f"{report.sent_total} delivered, {report.matching} matching, "
+                f"{report.remaining} remaining"
+            )
+        return
+
+    reports = service.run_notify(config, watch=watch, count=count, drain=drain, dry_run=dry_run)
+
+    delivered = sum(report.delivered for report in reports)
+    failed = sum(report.failed for report in reports)
+
+    if not delivered and not failed:
+        click.echo("Nothing to notify.")
+        return
+
+    prefix = "Would deliver" if dry_run else "Delivered"
+    for report in reports:
+        if report.delivered:
+            remaining = f", {report.remaining} remaining" if report.remaining else ""
+            click.echo(
+                f"{prefix} {report.delivered} paper(s) for {report.watch} "
+                f"→ {report.channel}{remaining}"
+            )
+        if report.failed:
+            click.echo(
+                f"Failed to deliver {report.failed} paper(s) for {report.watch} "
+                f"→ {report.channel} — they stay queued and will be retried",
+                err=True,
+            )
+
+    # A run whose deliveries all failed has done nothing the user asked for,
+    # and a cron job that cannot tell is a cron job that never reports it.
+    if failed and not delivered:
+        ctx.exit(1)
 
 
 @main.command()

@@ -103,6 +103,15 @@ EXTRAS_FLUSH_THRESHOLD: int = 1000
 #: so this bounds a batch rather than discarding anything.
 DEFAULT_NOTIFY_MAX_PER_RUN: int = 5
 
+#: How many candidate rows one scan of the pending queue reads. SQL narrows and
+#: orders; the criteria the matcher applies in Python can still reject rows, so
+#: the queue is assembled by scanning successive chunks until one comes back
+#: short. A scan window, never a delivery cap — see
+#: ``bmnews.notify.service.collect_matches``. Sized so the usual case is one
+#: round trip and a first run over an established corpus is a handful, since
+#: the scan runs to exhaustion either way and the columns it reads are narrow.
+NOTIFY_SCAN_CHUNK: int = 500
+
 # --- GUI --------------------------------------------------------------------
 
 #: Number of papers per page in the GUI list and CLI search results.

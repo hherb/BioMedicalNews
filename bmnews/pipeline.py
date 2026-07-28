@@ -16,7 +16,6 @@ from bmlib.llm import LLMClient
 from bmlib.llm.providers import list_providers
 from bmlib.publications import source_names, sync
 from bmlib.publications.models import FetchedRecord, SyncProgress, SyncReport
-from bmlib.templates import TemplateEngine
 
 # Importing the package registers the bmnews-supplied sources (Europe PMC)
 # into bmlib's registry, so every enabled source resolves through it.
@@ -37,16 +36,9 @@ from bmnews.db.schema import init_db, open_db
 from bmnews.digest.renderer import render_digest
 from bmnews.digest.sender import send_email
 from bmnews.scoring.scorer import score_papers, tiers_below
+from bmnews.templating import TEMPLATES_DIR, build_template_engine  # noqa: F401 — re-exported
 
 logger = logging.getLogger(__name__)
-
-TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
-
-
-def build_template_engine(config: AppConfig) -> TemplateEngine:
-    """Build a TemplateEngine from config, with package defaults as fallback."""
-    user_dir = Path(config.template_dir).expanduser() if config.template_dir else None
-    return TemplateEngine(user_dir=user_dir, default_dir=TEMPLATES_DIR)
 
 
 def build_llm_client(config: AppConfig) -> LLMClient:
@@ -465,7 +457,7 @@ def run_pipeline(
     on_progress: Callable[[str], None] | None = None,
     on_scored: Callable[[int], None] | None = None,
 ) -> None:
-    """Execute the full pipeline: fetch → store → score → digest.
+    """Execute the full pipeline: fetch → store → score → notify → digest.
 
     Args:
         config: Application config.
@@ -487,9 +479,37 @@ def run_pipeline(
     run_sync(config, on_progress=on_progress)
 
     scored = run_score(config, on_progress=on_progress, on_scored=on_scored)
+
+    _run_notify_stage(config, on_progress=on_progress)
+
     if scored > 0:
         if on_progress:
             on_progress("Generating digest...")
         run_digest(config)
 
     logger.info("Pipeline complete")
+
+
+def _run_notify_stage(config: AppConfig, *, on_progress: Callable[[str], None] | None) -> None:
+    """Run the watch notifications, and never let them take the run down.
+
+    Deliberately *not* gated on ``scored > 0``, which is right for the digest
+    and wrong here: a run with nothing newly scored still has a delivery that
+    failed last time to retry, and a watch whose threshold was just loosened
+    now matches papers that are already stored.
+
+    Failures are contained for the same reason they are contained per channel
+    inside the stage — sync and scoring have already done the expensive work,
+    and an unreachable homeserver must not cost the digest that would otherwise
+    have gone out. The stage records its own per-channel failures, so anything
+    escaping to here is unexpected and is logged with a traceback.
+    """
+    # Deferred like the CLI's own stage imports: this pulls in the channel
+    # adapters, and `bmnews fetch` should not pay for an HTTP client and an
+    # SMTP module it will never use.
+    from bmnews.notify.service import run_notify
+
+    try:
+        run_notify(config, on_progress=on_progress)
+    except Exception:
+        logger.exception("Notification stage failed — continuing with the digest")

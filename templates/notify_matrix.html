@@ -1,0 +1,24 @@
+{#
+  Matrix's formatted_body accepts only a suggested tag subset and strips CSS
+  entirely; clients sanitise the rest inconsistently, tables worst of all. So
+  this template stays on headings, lists, links and inline emphasis — anything
+  richer is silently dropped by somebody's client.
+
+  Every interpolation is escaped explicitly, because bmlib's TemplateEngine
+  runs with autoescape off and this metadata comes from third parties. Clients
+  sanitise formatted_body too, but that is their filter to relax, not ours to
+  depend on.
+#}
+<h4>Watch &ldquo;{{ watch_name|e }}&rdquo;: {{ paper_count }} new paper{{ "s" if paper_count != 1 else "" }}</h4>
+<ul>
+{% for paper in papers %}
+<li>
+<a href="{{ paper.url|e }}"><strong>{{ paper.title|e }}</strong></a><br/>
+<em>{% if paper.sources %}{{ paper.sources|join(', ')|e }}{% endif %}{% if paper.publication_date %} &middot; {{ paper.publication_date|e }}{% endif %} &middot; relevance {{ "%.0f"|format(paper.relevance_score * 100) }}%{% if paper.quality_tier %} &middot; {{ paper.quality_tier|e }}{% endif %}</em>
+{% if paper.summary %}<br/>{{ paper.summary|e }}{% endif %}
+</li>
+{% endfor %}
+</ul>
+{% if remaining %}
+<p><em>{{ remaining }} further match{{ "es" if remaining != 1 else "" }} remaining — pull the next batch with <code>bmnews notify --watch {{ watch_name|e }}</code>.</em></p>
+{% endif %}

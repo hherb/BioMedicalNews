@@ -18,7 +18,7 @@ bmnews [OPTIONS] COMMAND [ARGS]...
 
 ### `bmnews run`
 
-Run the full pipeline: fetch, store, score, and deliver a digest.
+Run the full pipeline: fetch, store, score, deliver any watch notifications, and deliver a digest.
 
 ```bash
 bmnews run [--days N] [--show_cached]
@@ -109,6 +109,49 @@ Delivery order:
 2. If `[email]` is enabled and configured, send an email
 3. Otherwise, print plain-text to stdout
 
+### `bmnews notify`
+
+Deliver **watch** notifications — alerts about individual papers matching criteria you named, separate from the periodic digest. A notified paper still appears in the next digest.
+
+Watches are configured under `[notifications]`; see the [configuration reference](configuration.md#notifications).
+
+```bash
+bmnews notify [--watch NAME] [--count N] [--all] [--dry-run] [--list]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--watch NAME` | Only act on this watch. Default: every enabled watch. |
+| `--count N` | Deliver this many papers per watch, overriding its `max_per_run`. Must be at least 1. |
+| `--all` | Deliver every pending match rather than one batch. Cannot be combined with `--count` — both set the batch size. |
+| `--dry-run` | Report what would be sent. Delivers nothing and records nothing. |
+| `--list` | Report each watch's counts. Delivers nothing. |
+
+**Nothing is ever silently dropped.** A watch's `max_per_run` bounds one batch; the rest stay queued and the command tells you how many are left. Run it again to pull the next batch:
+
+```bash
+# What is waiting, per watch and channel — including disabled watches
+bmnews notify --list
+# melanoma-trials → matrix: 12 delivered, 20 matching, 8 remaining
+
+# Send the next batch (max_per_run each)
+bmnews notify
+
+# Send the next 3 only
+bmnews notify --watch melanoma-trials --count 3
+
+# Drain everything still queued
+bmnews notify --all
+```
+
+**Tuning a watch** is what `--dry-run` is for: it replays the criteria against the papers you have already stored, so you can see what a watch would fire on without waiting for a fetch and without sending anything.
+
+```bash
+bmnews notify --watch melanoma-trials --dry-run
+```
+
+A delivery that fails is recorded as failed and stays queued, so the next run retries it — per channel, so a watch that alerts both email and Matrix retries only the one that broke. If every delivery in a run fails, the command exits non-zero, which is what makes a failure visible from cron.
+
 ### `bmnews init`
 
 Initialize the database and create a default config file.
@@ -154,6 +197,20 @@ Make sure:
 - The cron environment has access to your Python installation
 - Your LLM provider is accessible (Ollama must be running, or Anthropic API key must be set)
 - Email settings are configured if you want email delivery
+
+### Being alerted about specific papers
+
+The digest is a periodic roundup. A watch is "if a paper like *this* turns up, tell me now":
+
+```bash
+# Configure a watch under [notifications.watches.<name>], then check it
+# against papers you already have before turning it loose:
+bmnews notify --watch melanoma-trials --dry-run
+
+# `bmnews run` delivers watch notifications as part of the pipeline, so
+# a cron entry needs nothing extra. To alert more often than you fetch:
+0 * * * * /usr/local/bin/bmnews notify
+```
 
 ### Catch up after being away
 

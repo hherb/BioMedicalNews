@@ -16,7 +16,7 @@ from bmnews.config import DEFAULT_CONFIG_DIR, AppConfig
 
 # Importing the pipeline pulls in bmnews.fetchers, which registers the
 # bmnews-supplied sources so they appear in the registry listing below.
-from bmnews.pipeline import TEMPLATES_DIR
+from bmnews.templating import TEMPLATES_DIR
 
 logger = logging.getLogger(__name__)
 

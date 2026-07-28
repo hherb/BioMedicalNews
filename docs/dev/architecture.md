@@ -2,18 +2,20 @@
 
 ## Pipeline overview
 
-bmnews processes papers through a linear pipeline with four stages:
+bmnews processes papers through a linear pipeline:
 
 ```
-┌─────────┐    ┌─────────┐    ┌─────────┐    ┌──────────┐
-│  FETCH  │───▶│  STORE  │───▶│  SCORE  │───▶│  DIGEST  │
-└─────────┘    └─────────┘    └─────────┘    └──────────┘
-     │              │              │               │
- API calls      Database       LLM calls      Rendering
- (httpx)        (bmlib.db)     (bmlib.llm)    + delivery
+┌─────────┐    ┌─────────┐    ┌─────────┐    ┌──────────┐    ┌──────────┐
+│  FETCH  │───▶│  STORE  │───▶│  SCORE  │───▶│  NOTIFY  │───▶│  DIGEST  │
+└─────────┘    └─────────┘    └─────────┘    └──────────┘    └──────────┘
+     │              │              │               │               │
+ API calls      Database       LLM calls      Watch alerts     Rendering
+ (httpx)        (bmlib.db)     (bmlib.llm)    (per paper)      + delivery
 ```
 
-Each stage is an independent function in `pipeline.py` that can be run individually via the CLI or composed into the full pipeline with `bmnews run`.
+Each stage is an independent function that can be run individually via the CLI or composed into the full pipeline with `bmnews run`. FETCH and STORE are one `bmlib.publications.sync()` call; SCORE and DIGEST live in `pipeline.py`; NOTIFY lives in `notify/service.py`.
+
+**NOTIFY is not gated on new scores**, unlike DIGEST. A run with nothing newly scored still has work to do: a delivery that failed last time is retried, and a watch whose threshold was just loosened now matches papers already stored. It is also wrapped so a failure cannot take the run down — sync and scoring have already done the expensive work by then.
 
 ## Data flow
 

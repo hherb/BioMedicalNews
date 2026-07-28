@@ -1,0 +1,20 @@
+Watch "{{ watch_name }}": {{ paper_count }} new paper{{ "s" if paper_count != 1 else "" }}
+{{ "=" * (watch_name|length + 30) }}
+
+{% for paper in papers %}
+{{ loop.index }}. {{ paper.title }}
+   {{ paper.url }}
+   {% if paper.authors %}Authors: {{ paper.authors|join('; ') }}{% endif %}
+   {% if paper.publication_date %}Date: {{ paper.publication_date }}{% endif %}
+   {% if paper.sources %}Source: {{ paper.sources|join(', ') }}{% endif %}
+   Relevance: {{ "%.0f"|format(paper.relevance_score * 100) }}%{% if paper.quality_tier %} | Quality: {{ paper.quality_tier }}{% endif %}{% if paper.study_design %} | Design: {{ paper.study_design }}{% endif %}
+
+   {% if paper.summary %}{{ paper.summary }}{% endif %}
+
+{% endfor %}
+{% if remaining %}
+{{ remaining }} further match{{ "es" if remaining != 1 else "" }} remaining for this watch.
+Pull the next batch with: bmnews notify --watch {{ watch_name }}
+{% endif %}
+---
+BioMedical News Reader | {{ generated_at }}
