@@ -44,7 +44,7 @@ def main(ctx: click.Context, config_path: str | None, verbose: bool) -> None:
 )
 @click.pass_context
 def run(ctx: click.Context, days: int | None, show_cached: bool) -> None:
-    """Run the full pipeline: fetch → score → digest."""
+    """Run the full pipeline: fetch → score → notify → digest."""
     from bmnews.pipeline import run_pipeline
 
     run_pipeline(ctx.obj["config"], days=days, show_cached=show_cached)
@@ -120,6 +120,13 @@ def notify(
     from bmnews.notify import service
 
     config = ctx.obj["config"]
+
+    # Both mean "how many", and --all wins. Honouring one and discarding the
+    # other without saying so would deliver a number nobody asked for.
+    if drain and count is not None:
+        raise click.UsageError("--all and --count both set the batch size; use one or the other.")
+    if count is not None and count < 1:
+        raise click.UsageError("--count must be at least 1.")
 
     if list_only:
         reports = service.pending_counts(config, watch=watch)

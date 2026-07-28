@@ -19,6 +19,13 @@ class EmailChannel:
     is a second thing to keep in step. Only the recipient and the subject
     prefix are per-channel, so one watch can alert a different address than the
     digest goes to.
+
+    ``email.enabled`` is deliberately **not** consulted. It switches the
+    *digest* email on and off, and a watch is a separate decision: "post me the
+    weekly summary" and "tell me the moment an RCT lands" are different
+    subscriptions, and someone who has turned the first off has not thereby
+    asked for the second to stop. ``[notifications] enabled`` and the watch's
+    own ``enabled`` are what govern this.
     """
 
     def __init__(

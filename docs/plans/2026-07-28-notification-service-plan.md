@@ -270,16 +270,31 @@ one adapter per channel *kind*, and every attempt is recorded per channel.
 
 Four, all decided while implementing and none changing what the stage does.
 
-**1. `_deliver()` scans the whole pending set rather than early-exiting at the
-batch.** The plan's top-up loop stops as soon as *N* matches are collected,
+**1. `collect_matches()` always scans the whole pending set; there is no early
+exit.** The plan's top-up loop stops as soon as *N* matches are collected,
 which is the cheaper thing to do — but the run then still owes an exact
 `remaining` count, and computing that means the very scan the early exit just
 skipped. Since `remaining`'s entire job is to promise nothing was dropped,
-approximating it is worse than paying for it. `collect_matches()` keeps the
-early exit (`wanted` is honoured) and `_deliver()` simply does not pass one.
-The distinction the plan cared about — "enough collected" versus "a chunk came
-back short" — still lives in the loop, and
-`test_a_full_batch_at_a_chunk_boundary_is_not_exhaustion` pins it.
+approximating it is worse than paying for it.
+
+The first implementation kept the early exit as an optional `wanted` argument
+and simply never passed one. Code review caught that this made both `wanted`
+and the returned `exhausted` flag dead — with `wanted=None` the loop can only
+leave through the short-chunk break, so `exhausted` was unconditionally `True`
+at every call site, and the boundary case the plan asked for was not being
+exercised by the test named after it. So the parameter and the second return
+value are gone: `collect_matches()` returns every pending match and `_deliver()`
+slices the batch off it. The distinction the plan cared about survives where it
+actually matters — `NOTIFY_SCAN_CHUNK` is a scan window and never a delivery
+cap — and `test_a_batch_filling_at_a_chunk_boundary_is_not_exhaustion` plus the
+direct `TestCollectMatches` cases pin it.
+
+Paying for the full scan is only reasonable because the query is narrow:
+`get_notification_candidates()` selects `_NOTIFY_PAPER_COLUMNS`, not the
+`_PAPER_COLUMNS` the digest and GUI use, whose `p.*` would pull the GUI's
+cached full text for every candidate. `NOTIFY_SCAN_CHUNK` was raised from 100
+to 500 to match — with the scan running to exhaustion either way, a smaller
+chunk buys nothing but round trips.
 
 **2. Tests are split three ways, not folded into `tests/test_notify.py`.**
 That file's whole premise is that it touches no database, no SMTP and no HTTP;
@@ -291,17 +306,31 @@ in-memory one, because each run opens and closes its own connection and an
 in-memory database dies with the connection that made it — which is also a
 more faithful exercise of paging across runs.
 
-**3. `DeliveryReport` reports per `(watch, channel)`, and grew a `sent_total`
-field.** Per channel because that is the grain the queue works at. The extra
-field because "5 went out just now" and "5 have gone out in total" are
+**3. `DeliveryReport` reports per `(watch, channel)`, and grew `sent_total` and
+`dry_run` fields.** Per channel because that is the grain the queue works at.
+`sent_total` because "5 went out just now" and "5 have gone out in total" are
 different answers, and `notify --list` wants the second while a run report
-wants the first — one field would have silently given the wrong one.
+wants the first — one field would have silently given the wrong one. `dry_run`
+because a rehearsal reports `delivered` as what *would* go, and without a flag
+saying so, `sent_total` had been quietly counting a batch that was never sent.
 
 **4. `build_template_engine` and `TEMPLATES_DIR` moved to
 `bmnews/templating.py`.** Task 3 would otherwise have had the notification
 stage import `bmnews.pipeline`, which imports it back. The GUI's template
 editor was already importing the orchestrator just to learn a directory path,
 so a neutral home fixed both.
+
+**5. Hardening added after code review.** Four things the plan did not call
+for, each closing a gap the review found: every Matrix HTTP call is wrapped so
+a transport failure arrives as `ChannelError` rather than escaping raw and
+abandoning the rest of the run; a batch is recorded through
+`record_notifications()` in a single transaction, since half a recorded batch
+resends the rest under a different `txnId`; a non-`https` `homeserver` is
+refused (loopback excepted) because the access token is a non-expiring bearer
+credential; and all four `notify_*` templates escape their interpolations,
+because bmlib's `TemplateEngine` runs with `autoescape=False` and the metadata
+is third-party. The `bmnews notify` CLI also now refuses `--all` together with
+`--count`, and `--count` below 1, rather than silently picking one.
 
 Task 5's config round-trip test turned out to exist already
 (`tests/test_config.py::test_a_watch_name_survives_the_round_trip_whatever_it_is`

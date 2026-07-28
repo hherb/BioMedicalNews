@@ -39,6 +39,7 @@ from bmnews.db.operations import (
     paper_exists,
     record_digest,
     record_notification,
+    record_notifications,
     save_fulltext,
     save_paper_metadata,
     save_paper_tags,
@@ -1568,6 +1569,51 @@ class TestNotifications:
         )
 
         assert fetch_scalar(conn, "SELECT COUNT(*) FROM notifications") == 2
+
+    def test_candidates_leave_the_fulltext_cache_alone(self):
+        """The scan walks the whole queue, so it must not select cached articles.
+
+        `_PAPER_COLUMNS` carries `p.*` plus the GUI's cached full text, which
+        runs to hundreds of kilobytes per paper. That is right for one page of
+        digest results and wrong for a scan that materialises every candidate.
+        """
+        conn = _db()
+        paper_id = self._scored(conn, "10.1/cached")
+        save_fulltext(conn, paper_id=paper_id, html="<p>" + "x" * 5000 + "</p>", source="europepmc")
+
+        paper = get_notification_candidates(conn, watch="w", channel="c")[0]
+
+        assert "fulltext_html" not in paper
+        # Still everything the matcher tests and the templates render.
+        for key in ("id", "doi", "title", "abstract", "journal", "sources", "url"):
+            assert key in paper, f"{key} is needed downstream and was dropped"
+
+    def test_record_notifications_writes_the_batch_atomically(self):
+        conn = _db()
+        ids = [self._scored(conn, f"10.1/batch{n}") for n in range(3)]
+
+        record_notifications(conn, watch="w", paper_ids=ids, channel="c", status="sent")
+
+        assert count_notifications(conn, watch="w", channel="c") == 3
+
+    def test_record_notifications_rolls_back_as_one(self):
+        """A half-written batch would re-deliver under a different transaction key."""
+        conn = _db()
+        ids = [self._scored(conn, f"10.1/rollback{n}") for n in range(3)]
+
+        with pytest.raises(Exception):
+            # The last id references no publication, so the FK rejects it.
+            record_notifications(
+                conn, watch="w", paper_ids=[*ids, 999_999], channel="c", status="sent"
+            )
+
+        assert count_notifications(conn, watch="w", channel="c") == 0
+
+    def test_record_notifications_ignores_an_empty_batch(self):
+        conn = _db()
+        record_notifications(conn, watch="w", paper_ids=[], channel="c", status="sent")
+
+        assert count_notifications(conn, watch="w") == 0
 
     def test_count_notifications_filters_by_status(self):
         conn = _db()

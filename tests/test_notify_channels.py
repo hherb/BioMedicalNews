@@ -55,17 +55,32 @@ class _FakeResponse:
 class _FakeHTTP:
     """Stands in for an ``httpx.Client``, recording what was asked of it."""
 
-    def __init__(self, *, encrypted: bool = False, put_status: int = 200):
+    def __init__(
+        self,
+        *,
+        encrypted: bool = False,
+        put_status: int = 200,
+        get_error: Exception | None = None,
+        put_error: Exception | None = None,
+        encryption_probe_error: Exception | None = None,
+    ):
         self.encrypted = encrypted
         self.put_status = put_status
+        self.get_error = get_error
+        self.put_error = put_error
+        self.encryption_probe_error = encryption_probe_error
         self.gets: list[str] = []
         self.puts: list[tuple[str, dict, dict]] = []
 
     def get(self, url: str, headers: dict | None = None) -> _FakeResponse:
         self.gets.append(url)
+        if self.get_error is not None:
+            raise self.get_error
         if "/directory/room/" in url:
             return _FakeResponse(200, {"room_id": ROOM_ID})
         if url.endswith("/state/m.room.encryption"):
+            if self.encryption_probe_error is not None:
+                raise self.encryption_probe_error
             if self.encrypted:
                 return _FakeResponse(200, {"algorithm": "m.megolm.v1.aes-sha2"})
             return _FakeResponse(404, {"errcode": "M_NOT_FOUND"})
@@ -73,6 +88,8 @@ class _FakeHTTP:
 
     def put(self, url: str, headers: dict | None = None, json: dict | None = None):
         self.puts.append((url, headers or {}, json or {}))
+        if self.put_error is not None:
+            raise self.put_error
         if self.put_status == 200:
             return _FakeResponse(200, {"event_id": "$evt:example.org"})
         return _FakeResponse(self.put_status, {"errcode": "M_FORBIDDEN", "error": "not invited"})
@@ -138,6 +155,29 @@ class TestMatrixDelivery:
         http = _FakeHTTP(put_status=403)
         with pytest.raises(ChannelError, match="403"):
             _matrix(http).send(_message(), txn_key="k")
+
+    def test_an_unreachable_homeserver_raises_channel_error(self):
+        """A transport failure must arrive as ChannelError, not escape raw.
+
+        It is the likeliest way a homeserver fails, and the service only treats
+        ChannelError as "this delivery did not happen". Anything else skips
+        recording the attempt and abandons the watches still to be delivered.
+        """
+        http = _FakeHTTP(put_error=ConnectionError("connection refused"))
+        with pytest.raises(ChannelError, match="could not reach"):
+            _matrix(http).send(_message(), txn_key="k")
+
+    def test_an_unresolvable_alias_raises_channel_error(self):
+        http = _FakeHTTP(get_error=ConnectionError("name or service not known"))
+        with pytest.raises(ChannelError, match="could not reach"):
+            _matrix(http, room=ROOM_ALIAS).send(_message(), txn_key="k")
+
+    def test_an_unreadable_encryption_state_does_not_block_the_send(self):
+        """Refusing on a failed probe would block rooms that are perfectly fine."""
+        http = _FakeHTTP(encryption_probe_error=ConnectionError("reset by peer"))
+        _matrix(http).send(_message(), txn_key="k")
+
+        assert len(http.puts) == 1, "the send should have gone ahead"
 
 
 class TestTransactionKey:
@@ -238,6 +278,31 @@ class TestBuildAdapter:
         with pytest.raises(ChannelError, match="carrier-pigeon"):
             build_adapter(Channel(name="x", kind="carrier-pigeon"), _config())
 
+    @pytest.mark.parametrize(
+        "homeserver,expected",
+        [
+            ("http://matrix.example.org", "access_token in clear"),
+            ("matrix.example.org", "no usable scheme"),
+            ("ftp://matrix.example.org", "no usable scheme"),
+        ],
+    )
+    def test_matrix_refuses_a_homeserver_that_would_leak_the_token(self, homeserver, expected):
+        """The bearer token goes out on every request and does not expire."""
+        settings = {"homeserver": homeserver, "access_token": "t", "room": "!r:s"}
+        with pytest.raises(ChannelError, match=expected):
+            build_adapter(Channel(name="chat", kind="matrix", settings=settings), _config())
+
+    @pytest.mark.parametrize(
+        "homeserver",
+        ["https://matrix.example.org", "http://localhost:8008", "http://127.0.0.1:8008"],
+    )
+    def test_matrix_accepts_https_and_loopback(self, homeserver):
+        """A local homeserver over http never puts the token on a wire."""
+        settings = {"homeserver": homeserver, "access_token": "t", "room": "!r:s"}
+        adapter = build_adapter(Channel(name="chat", kind="matrix", settings=settings), _config())
+
+        assert adapter.name == "chat"
+
 
 # --- Rendering --------------------------------------------------------------
 
@@ -315,3 +380,24 @@ class TestRendering:
         assert "3" in self._render("email", "text", remaining=3)
         assert "remaining" in self._render("email", "text", remaining=3).lower()
         assert "remaining" not in self._render("email", "text", remaining=0).lower()
+
+    @pytest.mark.parametrize("medium", ["email", "matrix"])
+    def test_html_escapes_third_party_metadata(self, medium, monkeypatch):
+        """Titles and abstracts come from strangers; the engine does not autoescape.
+
+        bmlib's TemplateEngine was built for plain-text LLM prompts and runs
+        with ``autoescape=False``, so the templates have to escape themselves.
+        """
+        hostile = dict(self._papers()[0])
+        hostile["title"] = "<script>alert('xss')</script> in melanoma"
+        hostile["summary"] = "Ends with </div><img src=x onerror=alert(1)>"
+        monkeypatch.setattr(type(self), "_papers", lambda _self: [hostile])
+
+        out = self._render(medium, "html")
+
+        # A tag is made by its angle brackets, so those are what must be gone.
+        # The text itself stays — escaped metadata should still be readable.
+        assert "<script>" not in out
+        assert "<img" not in out
+        assert "&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt; in melanoma" in out
+        assert "&lt;img src=x onerror=alert(1)&gt;" in out

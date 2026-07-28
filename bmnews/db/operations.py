@@ -586,6 +586,19 @@ def record_digest(
 # --- Notifications ---
 
 
+# Deliberately not `_PAPER_COLUMNS`. That set is built for one page of results
+# and carries `p.*` plus `e.fulltext_html` — the GUI's cached full text, which
+# can be hundreds of kilobytes per paper. The notification scan walks the whole
+# candidate set rather than one page, so selecting it there would pull every
+# cached article into memory to answer a question that needs none of it. These
+# are exactly the columns the matcher tests, the templates render, and
+# `_row_to_paper` needs to derive the outbound URL.
+_NOTIFY_PAPER_COLUMNS = """
+    p.id, p.doi, p.pmid, p.pmcid, p.title, p.abstract, p.journal,
+    p.publication_date, p.authors, p.sources
+"""
+
+
 def get_notification_candidates(
     conn: Any,
     *,
@@ -628,7 +641,9 @@ def get_notification_candidates(
 
     Returns:
         Paper dicts with their scoring data and a ``tags`` list, best combined
-        score first.
+        score first. A **narrower** set of columns than the digest and GUI
+        queries return — see :data:`_NOTIFY_PAPER_COLUMNS`. Enough for the
+        matcher and the notification templates, and no cached full text.
     """
     ph = _placeholder(conn)
     params: list = [watch, channel, min_combined, min_relevance]
@@ -643,8 +658,8 @@ def get_notification_candidates(
     rows = fetch_all(
         conn,
         f"""
-        SELECT {_PAPER_COLUMNS}, {_SCORE_COLUMNS}
-        {_PAPER_FROM}
+        SELECT {_NOTIFY_PAPER_COLUMNS}, {_SCORE_COLUMNS}
+        FROM publications p
         JOIN scores s ON s.paper_id = p.id
         LEFT JOIN notifications n
                ON n.paper_id = p.id
@@ -735,6 +750,44 @@ def record_notification(
 
     with _transaction(conn):
         execute(conn, sql, (watch, paper_id, channel, status, error))
+
+
+def record_notifications(
+    conn: Any,
+    *,
+    watch: str,
+    paper_ids: Sequence[int],
+    channel: str,
+    status: str,
+    error: str = "",
+) -> None:
+    """Record one delivery attempt for a whole batch, all rows or none.
+
+    The batch went out as a single message, so it has to land as a single
+    fact. A crash partway through a row-at-a-time write would leave the
+    unrecorded papers pending, and they would come back round in a *different*
+    batch with a different transaction key — reintroducing the duplicate that
+    :func:`bmnews.notify.channels.transaction_key` exists to rule out. One
+    transaction also turns N commits into one on a long ``--all`` drain.
+
+    Args:
+        conn: DB-API connection.
+        watch: Name of the watch that matched.
+        paper_ids: The ``publications`` rows that were notified about.
+        channel: Name of the channel they were delivered over.
+        status: ``sent`` or ``failed``.
+        error: Failure detail, empty on success.
+    """
+    if not paper_ids:
+        return
+
+    # bmlib's transaction is depth-tracked, so the per-row block inside
+    # record_notification nests into this one and only this one commits.
+    with _transaction(conn):
+        for paper_id in paper_ids:
+            record_notification(
+                conn, watch=watch, paper_id=paper_id, channel=channel, status=status, error=error
+            )
 
 
 def count_notifications(

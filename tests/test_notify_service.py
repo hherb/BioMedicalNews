@@ -19,7 +19,8 @@ from bmnews.config import AppConfig
 from bmnews.db.operations import save_paper_tags, save_score, store_paper
 from bmnews.db.schema import init_db
 from bmnews.notify.channels import ChannelError
-from bmnews.notify.service import pending_counts, run_notify
+from bmnews.notify.service import collect_matches, pending_counts, run_notify
+from bmnews.notify.watches import parse_watches
 
 
 class _RecordingAdapter:
@@ -118,8 +119,12 @@ class TestPaging:
         assert fourth[0].exhausted is True
         assert fourth[0].remaining == 0
 
-    def test_a_full_batch_at_a_chunk_boundary_is_not_exhaustion(self, env, monkeypatch):
-        """Filling a batch exactly as a chunk runs out is not an empty queue."""
+    def test_a_batch_filling_at_a_chunk_boundary_is_not_exhaustion(self, env, monkeypatch):
+        """Delivering exactly one chunk's worth does not mean the queue is empty.
+
+        The scan window and the delivery cap are different numbers; conflating
+        them would report this queue exhausted with five papers still in it.
+        """
         monkeypatch.setattr("bmnews.notify.service.NOTIFY_SCAN_CHUNK", 5)
         conn, config, adapter = env
         _papers(conn, 10)
@@ -163,6 +168,51 @@ class TestPaging:
 
         report = run_notify(config)[0]
         assert report.delivered == 5, "a full batch was available and was not assembled"
+
+
+class TestCollectMatches:
+    """The scan itself, exercised directly rather than through a delivery."""
+
+    def _watch(self, config):
+        return parse_watches(config.notifications.watches)["melanoma"]
+
+    def test_scans_past_the_chunk_window_to_exhaustion(self, env, monkeypatch):
+        """The chunk is a scan window, so a full one is never the end of the queue."""
+        monkeypatch.setattr("bmnews.notify.service.NOTIFY_SCAN_CHUNK", 3)
+        conn, config, _ = env
+        _papers(conn, 10)
+
+        assert len(collect_matches(conn, self._watch(config), "chat")) == 10
+
+    def test_a_queue_that_ends_exactly_on_a_chunk_boundary(self, env, monkeypatch):
+        """The empty top-up chunk is what ends the scan, not a short one."""
+        monkeypatch.setattr("bmnews.notify.service.NOTIFY_SCAN_CHUNK", 5)
+        conn, config, _ = env
+        _papers(conn, 10)
+
+        assert len(collect_matches(conn, self._watch(config), "chat")) == 10
+
+    def test_an_empty_queue_scans_clean(self, env):
+        conn, config, _ = env
+
+        assert collect_matches(conn, self._watch(config), "chat") == []
+
+    def test_does_not_carry_the_gui_fulltext_cache(self, env):
+        """The scan walks the whole queue, so it must not select cached articles.
+
+        Every candidate is materialised at once; pulling `fulltext_html` along
+        would put the entire cached corpus in memory to answer a question that
+        reads none of it.
+        """
+        conn, config, _ = env
+        _papers(conn, 1)
+
+        paper = collect_matches(conn, self._watch(config), "chat")[0]
+        assert "fulltext_html" not in paper
+
+        # Still everything the matcher tests and the templates render.
+        for key in ("id", "title", "abstract", "journal", "sources", "url", "quality_tier"):
+            assert key in paper, f"{key} is needed downstream and was dropped"
 
 
 class TestDedupAndRetry:
@@ -269,6 +319,17 @@ class TestDryRun:
         # Nothing was recorded, so a real run still has all three to send.
         assert run_notify(config)[0].delivered == 3
 
+    def test_the_running_total_does_not_move(self, env):
+        """`delivered` answers "what would go"; `sent_total` must stay a fact."""
+        conn, config, _ = env
+        _papers(conn, 3)
+
+        report = run_notify(config, dry_run=True)[0]
+
+        assert report.dry_run is True
+        assert report.delivered == 3
+        assert report.sent_total == 0, "a rehearsal must not claim papers were delivered"
+
 
 class TestPendingCounts:
     def test_reports_delivered_matching_and_remaining(self, env):
@@ -290,6 +351,19 @@ class TestPendingCounts:
         report = pending_counts(config)[0]
         assert report.remaining == 4
         assert report.enabled is False
+
+    def test_a_failed_paper_still_counts_as_remaining(self, env, monkeypatch):
+        """Only `sent` dequeues, so a failed row must still read as queued."""
+        conn, config, _ = env
+        _papers(conn, 3)
+        monkeypatch.setattr(
+            "bmnews.notify.service.build_adapter", lambda _c, _cfg: _RecordingAdapter(fail=True)
+        )
+        run_notify(config)
+
+        report = pending_counts(config)[0]
+        assert (report.sent_total, report.remaining) == (0, 3)
+        assert report.exhausted is False
 
 
 class TestCLI:
@@ -353,3 +427,20 @@ class TestCLI:
 
         assert "fail" in result.output.lower()
         assert result.exit_code == 1, "a run whose deliveries all failed must not look successful"
+
+    @pytest.mark.parametrize(
+        "argv,expected",
+        [
+            (["--all", "--count", "3"], "one or the other"),
+            (["--count", "0"], "at least 1"),
+            (["--count", "-2"], "at least 1"),
+        ],
+    )
+    def test_contradictory_batch_sizes_are_refused(self, monkeypatch, argv, expected):
+        """Silently picking one of two conflicting answers delivers a number nobody asked for."""
+        calls = []
+        result = self._run(monkeypatch, argv, calls=calls)
+
+        assert result.exit_code != 0
+        assert expected in result.output
+        assert calls == [], "nothing should have been delivered"

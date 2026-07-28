@@ -122,8 +122,8 @@ bmnews notify [--watch NAME] [--count N] [--all] [--dry-run] [--list]
 | Flag | Description |
 |------|-------------|
 | `--watch NAME` | Only act on this watch. Default: every enabled watch. |
-| `--count N` | Deliver this many papers per watch, overriding its `max_per_run`. |
-| `--all` | Deliver every pending match rather than one batch. |
+| `--count N` | Deliver this many papers per watch, overriding its `max_per_run`. Must be at least 1. |
+| `--all` | Deliver every pending match rather than one batch. Cannot be combined with `--count` — both set the batch size. |
 | `--dry-run` | Report what would be sent. Delivers nothing and records nothing. |
 | `--list` | Report each watch's counts. Delivers nothing. |
 

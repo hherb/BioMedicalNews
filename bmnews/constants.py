@@ -105,10 +105,12 @@ DEFAULT_NOTIFY_MAX_PER_RUN: int = 5
 
 #: How many candidate rows one scan of the pending queue reads. SQL narrows and
 #: orders; the criteria the matcher applies in Python can still reject rows, so
-#: a batch is assembled by scanning successive chunks until enough matches
-#: accumulate. Deliberately larger than a typical ``max_per_run``, so the usual
-#: case is satisfied by one round trip.
-NOTIFY_SCAN_CHUNK: int = 100
+#: the queue is assembled by scanning successive chunks until one comes back
+#: short. A scan window, never a delivery cap — see
+#: ``bmnews.notify.service.collect_matches``. Sized so the usual case is one
+#: round trip and a first run over an established corpus is a handful, since
+#: the scan runs to exhaustion either way and the columns it reads are narrow.
+NOTIFY_SCAN_CHUNK: int = 500
 
 # --- GUI --------------------------------------------------------------------
 

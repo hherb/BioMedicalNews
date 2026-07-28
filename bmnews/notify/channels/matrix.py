@@ -65,15 +65,16 @@ class MatrixChannel:
 
         Raises:
             ChannelError: If the room is encrypted, an alias cannot be
-                resolved, or the homeserver rejects the request.
+                resolved, or the homeserver rejects the request or cannot be
+                reached at all.
         """
         room_id = self._resolve_room()
         self._refuse_if_encrypted(room_id)
 
         url = f"{self._url(room_id)}/send/m.room.message/{quote(txn_key, safe='')}"
-        response = self._http().put(
+        response = self._request(
+            "put",
             url,
-            headers=self._headers(),
             json={
                 "msgtype": "m.text",
                 "body": message.text,
@@ -108,7 +109,7 @@ class MatrixChannel:
             return self._room_id
 
         url = f"{self._homeserver}{_API}/directory/room/{quote(self._room, safe='')}"
-        response = self._http().get(url, headers=self._headers())
+        response = self._request("get", url)
         if response.status_code != 200:
             raise ChannelError(
                 f"channel {self.name!r} could not resolve room alias {self._room!r}: "
@@ -138,11 +139,18 @@ class MatrixChannel:
         an undecryptable message.
 
         A homeserver that will not answer the state query at all is not treated
-        as a refusal: the send that follows reports the real error, and
-        guessing here would block delivery to rooms that are perfectly fine.
+        as a refusal — whether it rejected the query or could not be reached
+        for it: the send that follows reports the real error, and guessing here
+        would block delivery to rooms that are perfectly fine.
         """
         url = f"{self._url(room_id)}/state/m.room.encryption"
-        response = self._http().get(url, headers=self._headers())
+        try:
+            response = self._request("get", url)
+        except ChannelError as exc:
+            logger.debug(
+                "Could not reach %s to read its encryption state (%s); continuing", room_id, exc
+            )
+            return
 
         if response.status_code == 200:
             raise ChannelError(
@@ -157,6 +165,28 @@ class MatrixChannel:
             )
 
     # --- Plumbing -----------------------------------------------------------
+
+    def _request(self, method: str, url: str, **kwargs: Any) -> Any:
+        """Make one authenticated request, or raise :class:`ChannelError`.
+
+        Every transport failure has to arrive at the service as a
+        ``ChannelError``, because that is the only exception
+        :func:`bmnews.notify.service.run_notify` treats as "this delivery did
+        not happen". An ``httpx`` connect error or timeout escaping raw — by
+        far the likeliest way a homeserver fails — would skip recording the
+        attempt, abandon every watch and channel still to be delivered in that
+        run, and surface from ``bmnews notify`` as a traceback.
+
+        The catch is deliberately broad rather than ``httpx.HTTPError``: the
+        client is injectable, so what it raises is not this module's to
+        predict, and the adapter contract is "return, or raise ChannelError".
+        """
+        try:
+            return getattr(self._http(), method)(url, headers=self._headers(), **kwargs)
+        except Exception as exc:  # noqa: BLE001 — the adapter contract is raise-ChannelError
+            raise ChannelError(
+                f"channel {self.name!r} could not reach {self._homeserver}: {exc}"
+            ) from exc
 
     def _url(self, room_id: str) -> str:
         """Base URL for room-scoped endpoints."""

@@ -17,7 +17,8 @@ narrows on what is indexable and imposes the ordering; :mod:`bmnews.notify.match
 applies the rest in Python. So the delivery cap cannot live in the SQL: limiting
 to five rows before the matcher rejects three of them would deliver two while
 further matches sat unread, and the paging above would appear to run dry early.
-:func:`collect_matches` therefore scans in chunks and filters as it goes.
+:func:`collect_matches` therefore scans in chunks and filters as it goes, and
+the cap is applied to what it returns.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from bmnews.config import AppConfig
@@ -33,7 +34,7 @@ from bmnews.constants import NOTIFY_SCAN_CHUNK
 from bmnews.db.operations import (
     count_notifications,
     get_notification_candidates,
-    record_notification,
+    record_notifications,
 )
 from bmnews.db.schema import init_db, open_db
 from bmnews.notify.channels import ChannelError, Message, build_adapter, transaction_key
@@ -64,7 +65,11 @@ class DeliveryReport:
         enabled: Whether the watch is enabled. A disabled watch is never
             delivered but is still counted, so ``notify --list`` can show what
             turning it on would send.
-        delivered: Papers recorded ``sent`` **by this run**. Zero from
+        dry_run: Whether this report describes a rehearsal. Nothing was sent
+            and nothing recorded, so ``delivered`` says what *would* have gone
+            and ``sent_total`` has not moved.
+        delivered: Papers recorded ``sent`` **by this run** — or, under
+            ``dry_run``, the batch that would have been. Zero from
             :func:`pending_counts`, which sends nothing.
         failed: Papers recorded ``failed`` by this run.
         sent_total: Papers this watch has ever had delivered over this channel,
@@ -80,6 +85,7 @@ class DeliveryReport:
     watch: str
     channel: str
     enabled: bool = True
+    dry_run: bool = False
     delivered: int = 0
     failed: int = 0
     sent_total: int = 0
@@ -88,43 +94,35 @@ class DeliveryReport:
     exhausted: bool = True
 
 
-def collect_matches(
-    conn: Any,
-    watch: Watch,
-    channel_name: str,
-    *,
-    wanted: int | None = None,
-) -> tuple[list[dict], bool]:
-    """Walk the derived queue, collecting papers *watch* actually matches.
+def collect_matches(conn: Any, watch: Watch, channel_name: str) -> list[dict]:
+    """Walk the derived queue, collecting every paper *watch* actually matches.
 
-    Chunked because of the SQL/Python split: a chunk is a window on the
-    *narrowed* set, not on the matching set, so the loop tops up from the next
-    offset whenever the matcher has rejected rows. Two ways out, and conflating
-    them is the bug this shape exists to prevent:
+    Chunked, and the chunk is the thing to be careful about: it is a window on
+    the SQL-*narrowed* set, not on the matching set, because the matcher rejects
+    rows afterwards in Python. So :data:`NOTIFY_SCAN_CHUNK` is a scan window and
+    never a delivery cap — capping here would return five rows, have the matcher
+    reject three, and deliver two while further matches sat unread. The loop
+    tops up from the next offset until a chunk comes back short, which is the
+    only thing that means the narrowed set is spent.
 
-    - *wanted* matches collected — a full batch, with more possibly behind it.
-    - a chunk came back short of :data:`NOTIFY_SCAN_CHUNK` — the narrowed set is
-      genuinely spent, which is the only thing that means "nothing remaining".
-
-    A batch that happens to fill exactly as a chunk runs out is the first case,
-    not the second.
+    The scan runs to the end rather than stopping at a batch's worth, because
+    the caller's ``remaining`` count has to be exact for paging to be worth
+    trusting, and this is the scan that can answer it. That is affordable
+    because the columns are narrow (no cached full text) and the score floors
+    have already done the heavy narrowing in SQL.
 
     Args:
         conn: DB-API connection.
         watch: The watch whose criteria are applied.
         channel_name: The channel whose already-sent papers are excluded.
-        wanted: Stop once this many matches are collected; ``None`` scans to
-            exhaustion.
 
     Returns:
-        ``(matches, exhausted)`` — the papers found, best combined score first,
-        and whether the scan reached the end of the narrowed set.
+        Every pending match, best combined score first.
     """
     collected: list[dict] = []
     scanned = 0
-    exhausted = False
 
-    while wanted is None or len(collected) < wanted:
+    while True:
         chunk = get_notification_candidates(
             conn,
             watch=watch.name,
@@ -139,12 +137,7 @@ def collect_matches(
         collected.extend(paper for paper in chunk if matches(paper, watch))
 
         if len(chunk) < NOTIFY_SCAN_CHUNK:
-            exhausted = True
-            break
-
-    if wanted is not None and len(collected) > wanted:
-        collected = collected[:wanted]
-    return collected, exhausted
+            return collected
 
 
 def run_notify(
@@ -195,7 +188,7 @@ def run_notify(
                         channel=channel,
                         config=config,
                         templates=templates,
-                        wanted=None if drain else (count or each.max_per_run),
+                        wanted=None if drain else (each.max_per_run if count is None else count),
                         dry_run=dry_run,
                         on_progress=on_progress,
                     )
@@ -229,7 +222,7 @@ def pending_counts(config: AppConfig, *, watch: str = "") -> list[DeliveryReport
         init_db(conn)
         for each in watches:
             for channel in resolve_channels(each, channels):
-                pending, exhausted = collect_matches(conn, each, channel.name)
+                pending = collect_matches(conn, each, channel.name)
                 sent_total = count_notifications(conn, watch=each.name, channel=channel.name)
                 reports.append(
                     DeliveryReport(
@@ -239,7 +232,7 @@ def pending_counts(config: AppConfig, *, watch: str = "") -> list[DeliveryReport
                         sent_total=sent_total,
                         matching=sent_total + len(pending),
                         remaining=len(pending),
-                        exhausted=exhausted and not pending,
+                        exhausted=not pending,
                     )
                 )
 
@@ -281,10 +274,9 @@ def _deliver(
     """Select, send and record one batch for one watch on one channel."""
     # The whole pending queue, not just this batch: `remaining` has to be exact
     # for paging to be trustworthy, and the scan that answers it is the same
-    # one that assembles the batch. Behind the score floors this is cheap on a
-    # personal corpus; the alternative is approximating a number whose entire
-    # job is to promise nothing was dropped.
-    pending, _ = collect_matches(conn, watch, channel.name)
+    # one that assembles the batch. The alternative is approximating a number
+    # whose entire job is to promise nothing was dropped.
+    pending = collect_matches(conn, watch, channel.name)
     batch = pending if wanted is None else pending[:wanted]
     remaining_after = len(pending) - len(batch)
     sent_before = count_notifications(conn, watch=watch.name, channel=channel.name)
@@ -315,7 +307,9 @@ def _deliver(
         _report_progress(
             on_progress, f"[dry run] {watch.name} → {channel.name}: {len(batch)} paper(s)"
         )
-        return report
+        # `delivered` stays the batch size — that is the question a dry run is
+        # asking — but nothing was recorded, so the running total must not move.
+        return replace(report, dry_run=True, sent_total=sent_before)
 
     try:
         _send(
@@ -328,7 +322,14 @@ def _deliver(
         )
     except ChannelError as exc:
         logger.error("Watch %r could not deliver over %r: %s", watch.name, channel.name, exc)
-        _record(conn, watch.name, channel.name, paper_ids, status="failed", error=str(exc))
+        record_notifications(
+            conn,
+            watch=watch.name,
+            paper_ids=paper_ids,
+            channel=channel.name,
+            status="failed",
+            error=str(exc),
+        )
         _report_progress(on_progress, f"{watch.name} → {channel.name}: delivery failed")
         # A failed send must not mark anything sent: these papers stay in the
         # derived queue, which is what makes the next run a retry.
@@ -342,7 +343,9 @@ def _deliver(
             exhausted=False,
         )
 
-    _record(conn, watch.name, channel.name, paper_ids, status="sent")
+    record_notifications(
+        conn, watch=watch.name, paper_ids=paper_ids, channel=channel.name, status="sent"
+    )
     _report_progress(on_progress, f"{watch.name} → {channel.name}: {len(batch)} paper(s) notified")
     return report
 
@@ -363,8 +366,13 @@ def _send(
     that says nothing looks like the whole answer, when the point of paging is
     that the rest is still there to be pulled.
     """
-    medium = _MEDIUM_FOR_KIND.get(channel.kind, "email")
+    # build_adapter has already refused any kind not in this map, so a missing
+    # entry here would be a new kind whose templates nobody wrote — worth
+    # saying rather than quietly rendering it as email.
     adapter = build_adapter(channel, config)
+    medium = _MEDIUM_FOR_KIND.get(channel.kind)
+    if medium is None:
+        raise ChannelError(f"channel kind {channel.kind!r} has no notification templates")
 
     message = Message(
         subject=notification_subject(watch.name, len(batch)),
@@ -389,22 +397,6 @@ def _send(
     adapter.send(
         message, txn_key=transaction_key(watch.name, channel.name, [p["id"] for p in batch])
     )
-
-
-def _record(
-    conn: Any,
-    watch: str,
-    channel: str,
-    paper_ids: list[int],
-    *,
-    status: str,
-    error: str = "",
-) -> None:
-    """Write one row per paper for this delivery attempt."""
-    for paper_id in paper_ids:
-        record_notification(
-            conn, watch=watch, paper_id=paper_id, channel=channel, status=status, error=error
-        )
 
 
 def _report_progress(on_progress: Callable[[str], None] | None, message: str) -> None:

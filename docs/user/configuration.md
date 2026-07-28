@@ -300,15 +300,15 @@ Channels and watches are named sub-tables. Both are keyed by name (`[notificatio
 | `kind` | — | `"email"` or `"matrix"`. Required. |
 | `to_address` | email | Recipient. Falls back to `email.to_address`, then `user.email`. |
 | `subject_prefix` | email | Overrides `email.subject_prefix` for this channel. |
-| `homeserver` | matrix | Base URL, e.g. `https://matrix.example.org`. Required. |
+| `homeserver` | matrix | Base URL, e.g. `https://matrix.example.org`. Required, and must be `https` — see below. |
 | `access_token` | matrix | Bearer token for the sending account. Required. |
 | `room` | matrix | Room id (`!abc:server`) or alias (`#alerts:server`). Required. |
 
-An `email` channel reuses the SMTP settings from `[email]`, so a working digest already has everything it needs.
+An `email` channel reuses the SMTP settings from `[email]`, so a working digest already has everything it needs. It does **not** consult `email.enabled` — that switches the digest email off, and a watch is a separate subscription. Turn watches off with `[notifications] enabled` or the watch's own `enabled`.
 
 **Matrix rooms must not be encrypted.** A bot posting over the plain HTTP API cannot produce a readable message in an end-to-end encrypted room, so bmnews refuses to post there rather than filling it with ciphertext nobody can read and reporting success. This is a deliberate limitation, not a temporary one: the content is alerts about public preprints, so there is nothing confidential to protect.
 
-The `access_token` sits in `config.toml` next to `smtp_password` — same exposure, same precedent.
+The `access_token` sits in `config.toml` next to `smtp_password` — same exposure, same precedent. It goes to the homeserver as a bearer token on every request and does not expire on its own, so **the `homeserver` URL must be `https`**. A plain `http://` one is refused, except to `localhost` or `127.0.0.1`, where nothing leaves the machine.
 
 ### Watches — what is worth alerting about
 

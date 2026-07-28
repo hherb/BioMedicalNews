@@ -17,9 +17,13 @@ import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
+from urllib.parse import urlparse
 
 from bmnews.config import AppConfig
 from bmnews.notify.watches import Channel
+
+#: Hosts where plain http keeps the access token on the machine it started on.
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
 class ChannelError(RuntimeError):
@@ -132,7 +136,39 @@ def _build_matrix(channel: Channel) -> ChannelAdapter:
             raise ChannelError(f"channel {channel.name!r} is missing {key}")
         values[key] = value
 
+    _check_homeserver_scheme(channel.name, values["homeserver"])
     return MatrixChannel(name=channel.name, **values)
+
+
+def _check_homeserver_scheme(name: str, homeserver: str) -> None:
+    """Refuse to put a long-lived access token on the wire in clear.
+
+    The Matrix token goes out as a ``Bearer`` header on every request and does
+    not expire on its own, so plain ``http`` to a remote host hands it to
+    anything on the path. Loopback is exempt — a local homeserver is the usual
+    way to try this out, and nothing on that interface leaves the machine.
+
+    A missing scheme is refused too. It would otherwise reach ``httpx`` as an
+    unsupported-protocol error per send, which says nothing about the config
+    line that caused it.
+
+    Raises:
+        ChannelError: If the URL is not https, and not http to loopback.
+    """
+    parsed = urlparse(homeserver)
+    if parsed.scheme == "https":
+        return
+    if parsed.scheme == "http":
+        if (parsed.hostname or "") in _LOOPBACK_HOSTS:
+            return
+        raise ChannelError(
+            f"channel {name!r} has an http:// homeserver ({homeserver}) — that sends its "
+            "access_token in clear on every request; use https"
+        )
+    raise ChannelError(
+        f"channel {name!r} has a homeserver with no usable scheme ({homeserver}) — "
+        "it must start with https://"
+    )
 
 
 def _setting(channel: Channel, key: str) -> str:

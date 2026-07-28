@@ -58,21 +58,33 @@ whole reason some piece is shaped the way it is:
 2. **A bare `LIMIT N` in SQL is wrong.** SQL narrows (score floors, tier
    exclusion, the not-already-sent anti-join, ordering); Python applies the
    rest (keywords, tags, sources, journal, study design). Limiting before the
-   Python filter under-delivers silently. `collect_matches()` distinguishes
-   "N matches collected" from "a chunk came back short" — only the second means
-   exhaustion, and a batch filling exactly at a chunk boundary is not it.
+   Python filter under-delivers silently. `collect_matches()` scans in
+   `NOTIFY_SCAN_CHUNK`-sized chunks until one comes back short and returns
+   *every* pending match; `_deliver()` slices the batch off that. The chunk is
+   a scan window, never a delivery cap. The scan runs to the end because
+   `remaining` has to be exact — affordable only because
+   `get_notification_candidates()` selects `_NOTIFY_PAPER_COLUMNS` rather than
+   `_PAPER_COLUMNS`, whose `p.*` would drag the GUI's cached full text through
+   a query that materialises every candidate.
 3. **`notifications` must stay separate from `digest_papers`.**
    `get_papers_for_digest()` excludes papers in `digest_papers` and nothing
    else, so recording a notification there would silently suppress that paper's
    digest entry.
 
-Two smaller ones worth not rediscovering: an adapter raises `ChannelError`
+Three smaller ones worth not rediscovering. An adapter raises `ChannelError`
 rather than returning a boolean, because `send_email` returns `False` on
 failure and a `False` read as success marks papers sent and drops them out of
-the queue forever; and Matrix's `txnId` is derived from
-`(watch, channel, sorted paper_ids)`, never randomly, because the homeserver
-treats a repeat as a retransmission — which is the only thing closing the
-"message sent, row not yet written, crash" window.
+the queue forever — and `ChannelError` is the *only* exception `run_notify()`
+reads as "this delivery did not happen", so a transport failure has to be
+converted into one (`MatrixChannel._request()` does that; without it an `httpx`
+connect error abandons every watch left in the run). Matrix's `txnId` is
+derived from `(watch, channel, sorted paper_ids)`, never randomly, because the
+homeserver treats a repeat as a retransmission — which is the only thing
+closing the "message sent, row not yet written, crash" window; the batch is
+recorded in one transaction for the same reason, since half a recorded batch
+resends the rest under a different `txnId`. And the four `notify_*` templates
+escape their own interpolations, because bmlib's `TemplateEngine` runs with
+`autoescape=False`.
 
 ## Reference: how the `publications` migration was resolved
 
