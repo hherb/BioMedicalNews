@@ -290,3 +290,66 @@ class TestPendingCounts:
         report = pending_counts(config)[0]
         assert report.remaining == 4
         assert report.enabled is False
+
+
+class TestCLI:
+    """The `bmnews notify` command, over a stubbed service layer."""
+
+    def _run(self, monkeypatch, argv, *, reports=None, calls=None):
+        from click.testing import CliRunner
+
+        from bmnews.cli import main
+
+        def _record(name):
+            def _fake(config, **kwargs):
+                if calls is not None:
+                    calls.append((name, kwargs))
+                return reports if reports is not None else []
+
+            return _fake
+
+        monkeypatch.setattr("bmnews.notify.service.run_notify", _record("run"))
+        monkeypatch.setattr("bmnews.notify.service.pending_counts", _record("list"))
+        return CliRunner().invoke(main, ["notify", *argv])
+
+    def test_reports_what_was_delivered(self, monkeypatch):
+        from bmnews.notify.service import DeliveryReport
+
+        report = DeliveryReport(
+            watch="melanoma", channel="chat", delivered=3, remaining=7, matching=10
+        )
+        result = self._run(monkeypatch, [], reports=[report])
+
+        assert result.exit_code == 0
+        assert "melanoma" in result.output
+        assert "3" in result.output and "7" in result.output
+
+    def test_says_so_when_there_is_nothing_to_send(self, monkeypatch):
+        result = self._run(monkeypatch, [], reports=[])
+        assert result.exit_code == 0
+        assert "nothing" in result.output.lower()
+
+    def test_list_does_not_deliver(self, monkeypatch):
+        calls = []
+        result = self._run(monkeypatch, ["--list"], calls=calls)
+
+        assert result.exit_code == 0
+        assert [name for name, _ in calls] == ["list"]
+
+    def test_flags_reach_the_service(self, monkeypatch):
+        calls = []
+        self._run(monkeypatch, ["--watch", "melanoma", "--count", "3"], calls=calls)
+        assert calls[0][1] == {"watch": "melanoma", "count": 3, "drain": False, "dry_run": False}
+
+        calls.clear()
+        self._run(monkeypatch, ["--all", "--dry-run"], calls=calls)
+        assert calls[0][1] == {"watch": "", "count": None, "drain": True, "dry_run": True}
+
+    def test_failures_are_reported_and_exit_nonzero(self, monkeypatch):
+        from bmnews.notify.service import DeliveryReport
+
+        report = DeliveryReport(watch="melanoma", channel="mail", failed=2)
+        result = self._run(monkeypatch, [], reports=[report])
+
+        assert "fail" in result.output.lower()
+        assert result.exit_code == 1, "a run whose deliveries all failed must not look successful"

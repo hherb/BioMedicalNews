@@ -515,3 +515,51 @@ class TestRunSyncSourceDispatch:
         kwargs = mock_sync.call_args.kwargs
         assert kwargs["date_to"] == date.today()
         assert kwargs["date_from"] == date.today() - timedelta(days=3)
+
+
+class TestNotifyStage:
+    """Where the notification stage sits in `run_pipeline`."""
+
+    @patch("bmnews.pipeline.run_digest")
+    @patch("bmnews.pipeline.run_score")
+    @patch("bmnews.pipeline.run_sync")
+    def test_notify_runs_even_when_nothing_was_scored(self, _sync, mock_score, _digest):
+        """Unlike the digest, notify is not gated on new scores.
+
+        A run with nothing newly scored still has work: a delivery that failed
+        last time is retried, and a watch whose threshold was just loosened now
+        matches papers that are already stored.
+        """
+        mock_score.return_value = 0
+
+        with patch("bmnews.notify.service.run_notify") as mock_notify:
+            pipeline.run_pipeline(_test_config())
+
+        assert mock_notify.called, "notify was skipped because nothing was scored"
+
+    @patch("bmnews.pipeline.run_digest")
+    @patch("bmnews.pipeline.run_score")
+    @patch("bmnews.pipeline.run_sync")
+    def test_notify_runs_before_the_digest(self, _sync, mock_score, mock_digest):
+        mock_score.return_value = 3
+        order = []
+        mock_digest.side_effect = lambda *a, **k: order.append("digest")
+
+        with patch("bmnews.notify.service.run_notify") as mock_notify:
+            mock_notify.side_effect = lambda *a, **k: order.append("notify") or []
+            pipeline.run_pipeline(_test_config())
+
+        assert order == ["notify", "digest"]
+
+    @patch("bmnews.pipeline.run_digest")
+    @patch("bmnews.pipeline.run_score")
+    @patch("bmnews.pipeline.run_sync")
+    def test_a_failing_notify_does_not_take_the_digest_down(self, _sync, mock_score, mock_digest):
+        """The expensive stages have already run; one bad channel must not lose them."""
+        mock_score.return_value = 3
+
+        with patch("bmnews.notify.service.run_notify") as mock_notify:
+            mock_notify.side_effect = RuntimeError("homeserver on fire")
+            pipeline.run_pipeline(_test_config())
+
+        assert mock_digest.called
