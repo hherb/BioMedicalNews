@@ -16,7 +16,6 @@ from bmlib.llm import LLMClient
 from bmlib.llm.providers import list_providers
 from bmlib.publications import source_names, sync
 from bmlib.publications.models import FetchedRecord, SyncProgress, SyncReport
-from bmlib.templates import TemplateEngine
 
 # Importing the package registers the bmnews-supplied sources (Europe PMC)
 # into bmlib's registry, so every enabled source resolves through it.
@@ -37,16 +36,9 @@ from bmnews.db.schema import init_db, open_db
 from bmnews.digest.renderer import render_digest
 from bmnews.digest.sender import send_email
 from bmnews.scoring.scorer import score_papers, tiers_below
+from bmnews.templating import TEMPLATES_DIR, build_template_engine  # noqa: F401 — re-exported
 
 logger = logging.getLogger(__name__)
-
-TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
-
-
-def build_template_engine(config: AppConfig) -> TemplateEngine:
-    """Build a TemplateEngine from config, with package defaults as fallback."""
-    user_dir = Path(config.template_dir).expanduser() if config.template_dir else None
-    return TemplateEngine(user_dir=user_dir, default_dir=TEMPLATES_DIR)
 
 
 def build_llm_client(config: AppConfig) -> LLMClient:
