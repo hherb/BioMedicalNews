@@ -103,6 +103,13 @@ EXTRAS_FLUSH_THRESHOLD: int = 1000
 #: so this bounds a batch rather than discarding anything.
 DEFAULT_NOTIFY_MAX_PER_RUN: int = 5
 
+#: How many candidate rows one scan of the pending queue reads. SQL narrows and
+#: orders; the criteria the matcher applies in Python can still reject rows, so
+#: a batch is assembled by scanning successive chunks until enough matches
+#: accumulate. Deliberately larger than a typical ``max_per_run``, so the usual
+#: case is satisfied by one round trip.
+NOTIFY_SCAN_CHUNK: int = 100
+
 # --- GUI --------------------------------------------------------------------
 
 #: Number of papers per page in the GUI list and CLI search results.

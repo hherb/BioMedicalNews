@@ -583,6 +583,199 @@ def record_digest(
     return digest_id
 
 
+# --- Notifications ---
+
+
+def get_notification_candidates(
+    conn: Any,
+    *,
+    watch: str,
+    channel: str,
+    min_relevance: float = 0.0,
+    min_combined: float = 0.0,
+    exclude_tiers: Sequence[str] = (),
+    limit: int = DEFAULT_QUERY_LIMIT,
+    offset: int = 0,
+) -> list[dict]:
+    """Select scored papers this watch could still be notified about.
+
+    This is the SQL half of the derived pending queue: it narrows on the
+    indexable criteria (the score floors, the tier exclusion, and the
+    not-already-sent anti-join) and imposes the ordering. Everything else a
+    watch can say — keywords, tags, sources, journal, study design — is applied
+    afterwards by :func:`bmnews.notify.matcher.matches`.
+
+    That split is why *limit* is a **scan** window rather than a delivery cap.
+    Rows returned here are candidates, not matches; the caller tops up from
+    successive offsets until it has collected enough. Treating this limit as
+    the batch size would deliver fewer papers than asked for whenever the
+    Python filter rejected any, while more matches sat further down.
+
+    A ``failed`` notification row is deliberately *not* excluded, so a delivery
+    that did not get through comes back around and is retried. Exclusion is
+    keyed on ``(watch, channel)``: one watch can deliver over several channels,
+    and one of them succeeding says nothing about the others.
+
+    Args:
+        conn: DB-API connection.
+        watch: Name of the watch selecting these papers.
+        channel: Name of the channel they would be delivered over.
+        min_relevance: Floor on the LLM relevance score.
+        min_combined: Floor on the combined score.
+        exclude_tiers: Quality tier names to leave out entirely.
+        limit: How many rows to scan in this chunk.
+        offset: How many rows to skip, for scanning the next chunk.
+
+    Returns:
+        Paper dicts with their scoring data and a ``tags`` list, best combined
+        score first.
+    """
+    ph = _placeholder(conn)
+    params: list = [watch, channel, min_combined, min_relevance]
+
+    tier_filter = ""
+    if exclude_tiers:
+        placeholders = ", ".join(ph for _ in exclude_tiers)
+        tier_filter = f"AND s.quality_tier NOT IN ({placeholders})"
+        params.extend(exclude_tiers)
+    params.extend([limit, offset])
+
+    rows = fetch_all(
+        conn,
+        f"""
+        SELECT {_PAPER_COLUMNS}, {_SCORE_COLUMNS}
+        {_PAPER_FROM}
+        JOIN scores s ON s.paper_id = p.id
+        LEFT JOIN notifications n
+               ON n.paper_id = p.id
+              AND n.watch = {ph}
+              AND n.channel = {ph}
+              AND n.status = 'sent'
+        WHERE s.combined_score >= {ph}
+          AND s.relevance_score >= {ph}
+          AND n.paper_id IS NULL
+          {tier_filter}
+        ORDER BY s.combined_score DESC, p.id ASC
+        LIMIT {ph} OFFSET {ph}
+        """,
+        tuple(params),
+    )
+
+    papers = [_row_to_paper(r) for r in rows]
+    return _attach_tags(conn, papers)
+
+
+def _attach_tags(conn: Any, papers: list[dict]) -> list[dict]:
+    """Give each paper its ``paper_tags`` entries under a ``tags`` key.
+
+    The matcher reads ``paper["tags"]``, and no ``publications`` column holds
+    them. They are fetched for the whole chunk in one query rather than
+    aggregated in the candidate SELECT, because string aggregation spells
+    differently on each backend (``group_concat`` vs ``string_agg``) and would
+    put a second backend-specific fragment into a query that already has one.
+    """
+    if not papers:
+        return papers
+
+    ids = [paper["id"] for paper in papers]
+    ph = _placeholder(conn)
+    rows = fetch_all(
+        conn,
+        f"SELECT paper_id, tag FROM paper_tags WHERE paper_id IN ({', '.join([ph] * len(ids))})",
+        tuple(ids),
+    )
+
+    tags: dict[int, list[str]] = {paper_id: [] for paper_id in ids}
+    for row in rows:
+        tags[row["paper_id"]].append(row["tag"])
+
+    for paper in papers:
+        paper["tags"] = sorted(tags[paper["id"]])
+    return papers
+
+
+def record_notification(
+    conn: Any,
+    *,
+    watch: str,
+    paper_id: int,
+    channel: str,
+    status: str,
+    error: str = "",
+) -> None:
+    """Record one delivery attempt, or update the attempt already recorded.
+
+    One row per ``(watch, paper_id, channel)``: a retry updates that row and
+    increments ``attempts`` rather than adding a second. Only ``sent`` removes
+    a paper from the derived queue, so recording a ``failed`` attempt leaves it
+    to be picked up again next run.
+
+    Args:
+        conn: DB-API connection.
+        watch: Name of the watch that matched.
+        paper_id: The ``publications`` row that was notified about.
+        channel: Name of the channel it was delivered over.
+        status: ``sent`` or ``failed``.
+        error: Failure detail, empty on success.
+    """
+    ph = _placeholder(conn)
+    sqlite = _is_sqlite(conn)
+    now = "datetime('now')" if sqlite else "NOW()"
+    excluded = "excluded" if sqlite else "EXCLUDED"
+
+    sql = f"""
+        INSERT INTO notifications (watch, paper_id, channel, status, error)
+        VALUES ({ph}, {ph}, {ph}, {ph}, {ph})
+        ON CONFLICT(watch, paper_id, channel) DO UPDATE SET
+            status = {excluded}.status,
+            error = {excluded}.error,
+            attempts = notifications.attempts + 1,
+            sent_at = {now}
+    """
+
+    with _transaction(conn):
+        execute(conn, sql, (watch, paper_id, channel, status, error))
+
+
+def count_notifications(
+    conn: Any,
+    *,
+    watch: str,
+    channel: str = "",
+    status: str = "sent",
+) -> int:
+    """Count recorded notifications for a watch.
+
+    Args:
+        conn: DB-API connection.
+        watch: Name of the watch to count for.
+        channel: Restrict to one channel, or ``""`` for every channel.
+        status: Restrict to one status, or ``""`` for every status.
+
+    Returns:
+        The number of matching ``notifications`` rows.
+    """
+    ph = _placeholder(conn)
+    conditions = [f"watch = {ph}"]
+    params: list = [watch]
+
+    if channel:
+        conditions.append(f"channel = {ph}")
+        params.append(channel)
+    if status:
+        conditions.append(f"status = {ph}")
+        params.append(status)
+
+    return (
+        fetch_scalar(
+            conn,
+            f"SELECT COUNT(*) FROM notifications WHERE {' AND '.join(conditions)}",
+            tuple(params),
+        )
+        or 0
+    )
+
+
 # --- Paper extras (bmnews-only per-publication data) ---
 
 
