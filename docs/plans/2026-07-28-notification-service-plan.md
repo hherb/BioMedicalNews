@@ -3,6 +3,12 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to
 > implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax.
 
+**Status: implemented.** All five tasks are done and on `main` via the
+`feat/notification-service` branch; the GUI watches pane remains out of scope,
+as stated below. Where the implementation diverged from this plan, the reasons
+are recorded in "Deviations" at the bottom — the task bodies are left as
+written, as the record of what was planned.
+
 **Goal:** Deliver the watch-based notification stage designed in
 `2026-07-26-notification-service-design.md` — selection, paging, email and
 Matrix delivery, recording, the `bmnews notify` CLI, and pipeline wiring.
@@ -68,7 +74,7 @@ one adapter per channel *kind*, and every attempt is recorded per channel.
   def count_notifications(conn, *, watch: str, channel: str = "", status: str = "sent") -> int
   ```
 
-- [ ] **Step 1: Write the failing tests** in `tests/test_db.py`:
+- [x] **Step 1: Write the failing tests** in `tests/test_db.py`:
   `test_candidates_exclude_already_sent`, `test_candidates_include_failed`
   (a `failed` row stays in the queue so it retries),
   `test_candidates_respect_score_floors`, `test_candidates_exclude_tiers`,
@@ -78,10 +84,10 @@ one adapter per channel *kind*, and every attempt is recorded per channel.
   `attempts` and overwrites `status`/`error` rather than raising),
   `test_record_notification_is_per_channel` (same watch and paper, two
   channels, two rows), `test_count_notifications_filters_by_status`.
-- [ ] **Step 2: Run them and watch them fail** —
+- [x] **Step 2: Run them and watch them fail** —
   `uv run pytest tests/test_db.py -k Notifications -v`, expect
   `ImportError`/`AttributeError`.
-- [ ] **Step 3: Implement.** The anti-join is
+- [x] **Step 3: Implement.** The anti-join is
   `LEFT JOIN notifications n ON n.paper_id = p.id AND n.watch = ? AND n.channel = ? AND n.status = 'sent'`
   with `n.paper_id IS NULL`. Tags are attached with one follow-up
   `SELECT paper_id, tag FROM paper_tags WHERE paper_id IN (...)` per chunk
@@ -90,9 +96,9 @@ one adapter per channel *kind*, and every attempt is recorded per channel.
   status = excluded.status, error = excluded.error,
   attempts = notifications.attempts + 1` (`EXCLUDED` upper-case on PostgreSQL,
   as `_upsert_extras` already does).
-- [ ] **Step 4: Run both backends** — `uv run pytest tests/test_db.py -v` and
+- [x] **Step 4: Run both backends** — `uv run pytest tests/test_db.py -v` and
   `BMNEWS_TEST_PG_DSN=... uv run pytest tests/test_db.py -v`.
-- [ ] **Step 5: Commit** — `feat(db): notification recording and candidate selection`.
+- [x] **Step 5: Commit** — `feat(db): notification recording and candidate selection`.
 
 ---
 
@@ -126,7 +132,7 @@ one adapter per channel *kind*, and every attempt is recorded per channel.
   def render_notification(papers, watch, templates, *, fmt: str, medium: str) -> str
   ```
 
-- [ ] **Step 1: Write the failing tests.** Email: `send_email` is mocked, and a
+- [x] **Step 1: Write the failing tests.** Email: `send_email` is mocked, and a
   `False` return raises `ChannelError` (delivery failure must not look like
   success); the recipient falls back to `[email].to_address` then
   `[user].email`. Matrix, against a fake httpx client:
@@ -139,18 +145,18 @@ one adapter per channel *kind*, and every attempt is recorded per channel.
   `test_matrix_refuses_encrypted_room` (an `m.room.encryption` state event
   raises `ChannelError` rather than posting ciphertext nobody can read),
   `test_matrix_raises_on_http_error`.
-- [ ] **Step 2: Run them and watch them fail.**
-- [ ] **Step 3: Implement.** `txn_key` is derived by the caller as a stable
+- [x] **Step 2: Run them and watch them fail.**
+- [x] **Step 3: Implement.** `txn_key` is derived by the caller as a stable
   digest of `(watch, channel, sorted paper_ids)` — the homeserver treats a
   repeat PUT with the same `txnId` as a retransmission, which closes the
   "message sent, row not yet written" crash window. Room state check is
   `GET /_matrix/client/v3/rooms/{id}/state/m.room.encryption`; a 404 means
   unencrypted, which is the supported configuration.
-- [ ] **Step 4: Templates.** `notify_email.*` may be CSS-styled like the digest;
+- [x] **Step 4: Templates.** `notify_email.*` may be CSS-styled like the digest;
   `notify_matrix.html` must stay to headings/lists/links — Matrix's HTML subset
   has no CSS at all, and `formatted_body` needs its plain-text `body` twin.
-- [ ] **Step 5: Run** `uv run pytest tests/test_notify.py -v`.
-- [ ] **Step 6: Commit** — `feat(notify): email and Matrix channel adapters`.
+- [x] **Step 5: Run** `uv run pytest tests/test_notify.py -v`.
+- [x] **Step 6: Commit** — `feat(notify): email and Matrix channel adapters`.
 
 ---
 
@@ -183,7 +189,7 @@ one adapter per channel *kind*, and every attempt is recorded per channel.
   def pending_counts(config) -> list[WatchReport]   # for `notify --list`; sends nothing
   ```
 
-- [ ] **Step 1: Write the failing tests.** The paging property is the one that
+- [x] **Step 1: Write the failing tests.** The paging property is the one that
   matters: deliver 5, then 5 more, then confirm exhaustion, asserting **no gaps
   and no repeats** — this is what breaks if `LIMIT` moves into the SQL. Then:
   a second run with no new papers delivers nothing; a `failed` delivery is
@@ -193,8 +199,8 @@ one adapter per channel *kind*, and every attempt is recorded per channel.
   `run_notify` but still counted by `pending_counts`.
   Include the boundary case directly: `NOTIFY_SCAN_CHUNK` matches filled
   exactly at a chunk boundary must **not** report exhaustion.
-- [ ] **Step 2: Run them and watch them fail.**
-- [ ] **Step 3: Implement the top-up loop:**
+- [x] **Step 2: Run them and watch them fail.**
+- [x] **Step 3: Implement the top-up loop:**
   ```
   collected, offset = [], 0
   while len(collected) < wanted:
@@ -208,8 +214,8 @@ one adapter per channel *kind*, and every attempt is recorded per channel.
   Note the offset walks *scanned* rows, not matched ones, and the anti-join
   shifts under it as rows are recorded — so selection happens before dispatch
   for a batch, not interleaved with it.
-- [ ] **Step 4: Run** `uv run pytest tests/test_notify.py -v`.
-- [ ] **Step 5: Commit** — `feat(notify): run_notify with derived queue and paging`.
+- [x] **Step 4: Run** `uv run pytest tests/test_notify.py -v`.
+- [x] **Step 5: Commit** — `feat(notify): run_notify with derived queue and paging`.
 
 ---
 
@@ -224,19 +230,19 @@ one adapter per channel *kind*, and every attempt is recorded per channel.
 - Consumes: `run_notify`, `pending_counts`.
 - Produces: `bmnews notify [--watch NAME] [--count N] [--all] [--dry-run] [--list]`.
 
-- [ ] **Step 1: Write the failing tests.** `--list` prints per-watch
+- [x] **Step 1: Write the failing tests.** `--list` prints per-watch
   delivered/matching/remaining and sends nothing; `--dry-run` prints matches
   and records nothing; `--all` drains; `--watch` restricts. For the pipeline:
   **notify is not gated on `scored > 0`** — unlike the digest — because a run
   with nothing newly scored still has a failed delivery to retry and a
   just-loosened watch to honour. Assert that directly with a mocked
   `run_notify` and `run_score` returning 0.
-- [ ] **Step 2: Run them and watch them fail.**
-- [ ] **Step 3: Implement**, mirroring the existing commands' shape
+- [x] **Step 2: Run them and watch them fail.**
+- [x] **Step 3: Implement**, mirroring the existing commands' shape
   (`ctx.obj["config"]`, `-c/--config`, logging).
-- [ ] **Step 4: Run the full suite** — `uv run pytest tests/ -v`, plus
+- [x] **Step 4: Run the full suite** — `uv run pytest tests/ -v`, plus
   `uv run ruff check bmnews/ tests/` and `uv run ruff format --check`.
-- [ ] **Step 5: Commit** — `feat(cli): bmnews notify, wired into run_pipeline`.
+- [x] **Step 5: Commit** — `feat(cli): bmnews notify, wired into run_pipeline`.
 
 ---
 
@@ -247,13 +253,56 @@ one adapter per channel *kind*, and every attempt is recorded per channel.
 - Modify: `CLAUDE.md`, `HANDOVER.md`, `docs/user/`, `docs/dev/`
 - Test: `tests/test_config.py`
 
-- [ ] **Step 1: Write the failing test** — `save_config` → `load_config`
+- [x] **Step 1: Write the failing test** — `save_config` → `load_config`
   preserves watches and channels intact. This guards the serializer traps
   directly: an array-of-tables shape would fail it today, and so would any
   four-level nesting.
-- [ ] **Step 2: Run, implement, re-run.**
-- [ ] **Step 3: Update the docs** — CLAUDE.md's Notifications section still
+- [x] **Step 2: Run, implement, re-run.**
+- [x] **Step 3: Update the docs** — CLAUDE.md's Notifications section still
   says the service, channels, CLI and templates are unimplemented; the pipeline
   diagram gains `NOTIFY`; user docs gain the `bmnews notify` commands and a
   worked config example.
-- [ ] **Step 4: Commit** — `docs: notification service usage and status`.
+- [x] **Step 4: Commit** — `docs: notification service usage and status`.
+
+---
+
+## Deviations from this plan
+
+Four, all decided while implementing and none changing what the stage does.
+
+**1. `_deliver()` scans the whole pending set rather than early-exiting at the
+batch.** The plan's top-up loop stops as soon as *N* matches are collected,
+which is the cheaper thing to do — but the run then still owes an exact
+`remaining` count, and computing that means the very scan the early exit just
+skipped. Since `remaining`'s entire job is to promise nothing was dropped,
+approximating it is worse than paying for it. `collect_matches()` keeps the
+early exit (`wanted` is honoured) and `_deliver()` simply does not pass one.
+The distinction the plan cared about — "enough collected" versus "a chunk came
+back short" — still lives in the loop, and
+`test_a_full_batch_at_a_chunk_boundary_is_not_exhaustion` pins it.
+
+**2. Tests are split three ways, not folded into `tests/test_notify.py`.**
+That file's whole premise is that it touches no database, no SMTP and no HTTP;
+adding a fake homeserver to it would have cost that property. So
+`test_notify_channels.py` covers the adapters and templates and
+`test_notify_service.py` covers `run_notify` and the CLI.
+`test_notify_service.py` uses a **file-backed** SQLite database rather than an
+in-memory one, because each run opens and closes its own connection and an
+in-memory database dies with the connection that made it — which is also a
+more faithful exercise of paging across runs.
+
+**3. `DeliveryReport` reports per `(watch, channel)`, and grew a `sent_total`
+field.** Per channel because that is the grain the queue works at. The extra
+field because "5 went out just now" and "5 have gone out in total" are
+different answers, and `notify --list` wants the second while a run report
+wants the first — one field would have silently given the wrong one.
+
+**4. `build_template_engine` and `TEMPLATES_DIR` moved to
+`bmnews/templating.py`.** Task 3 would otherwise have had the notification
+stage import `bmnews.pipeline`, which imports it back. The GUI's template
+editor was already importing the orchestrator just to learn a directory path,
+so a neutral home fixed both.
+
+Task 5's config round-trip test turned out to exist already
+(`tests/test_config.py::test_a_watch_name_survives_the_round_trip_whatever_it_is`
+and its neighbours), so that step was verification rather than new work.
