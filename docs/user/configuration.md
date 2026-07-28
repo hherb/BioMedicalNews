@@ -281,6 +281,89 @@ from_address = "jane.doe@university.edu"
 to_address = "jane.doe@university.edu"
 ```
 
+## `[notifications]`
+
+Watches alert you about a matching paper as it is scored, separately from the periodic digest. A notified paper **still appears** in the next digest — a notification is "now", the digest is the record.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | boolean | `false` | Master switch. When false, no watch is evaluated. |
+
+Channels and watches are named sub-tables. Both are keyed by name (`[notifications.watches.melanoma-trials]`) rather than being arrays of tables — that is what survives a round trip through the settings UI.
+
+### Channels — where a notification goes
+
+`[notifications.channels.<name>]` with a `kind` selecting the adapter:
+
+| Key | Kind | Description |
+|-----|------|-------------|
+| `kind` | — | `"email"` or `"matrix"`. Required. |
+| `to_address` | email | Recipient. Falls back to `email.to_address`, then `user.email`. |
+| `subject_prefix` | email | Overrides `email.subject_prefix` for this channel. |
+| `homeserver` | matrix | Base URL, e.g. `https://matrix.example.org`. Required. |
+| `access_token` | matrix | Bearer token for the sending account. Required. |
+| `room` | matrix | Room id (`!abc:server`) or alias (`#alerts:server`). Required. |
+
+An `email` channel reuses the SMTP settings from `[email]`, so a working digest already has everything it needs.
+
+**Matrix rooms must not be encrypted.** A bot posting over the plain HTTP API cannot produce a readable message in an end-to-end encrypted room, so bmnews refuses to post there rather than filling it with ciphertext nobody can read and reporting success. This is a deliberate limitation, not a temporary one: the content is alerts about public preprints, so there is nothing confidential to protect.
+
+The `access_token` sits in `config.toml` next to `smtp_password` — same exposure, same precedent.
+
+### Watches — what is worth alerting about
+
+`[notifications.watches.<name>]`. Every criterion is AND-combined, and an **empty list means "no constraint"**. Within one list criterion the test is "any": two tags mean *either* tag, not both.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | boolean | `true` | Whether the watch is evaluated. |
+| `min_relevance` | float | `0.0` | Floor on the LLM relevance score, 0.0–1.0. |
+| `min_combined` | float | `0.0` | Floor on the combined score, 0.0–1.0. |
+| `min_quality_tier` | string | `""` | Tier floor, e.g. `"TIER_4_EXPERIMENTAL"`. `UNCLASSIFIED` papers are never excluded by it. |
+| `tags` | list | `[]` | Interest tags the scorer matched. |
+| `keywords` | list | `[]` | Case-insensitive substrings of title or abstract. "melanoma" finds "melanomas". |
+| `sources` | list | `[]` | Source names, e.g. `["medrxiv", "pubmed"]`. |
+| `journals` | list | `[]` | Journal names, compared case-insensitively. |
+| `study_designs` | list | `[]` | Study designs, e.g. `["rct", "meta_analysis"]`. |
+| `channels` | list | `[]` | Names of channels above. A watch with none delivers nowhere. |
+| `max_per_run` | integer | `5` | How many papers one run delivers. The rest stay queued. |
+
+A mistyped criterion key is reported in the log rather than silently ignored, and a value that cannot mean anything (an unknown tier, a score above 1.0) makes bmnews skip that watch with an error instead of matching on the rest of it.
+
+### Example
+
+```toml
+[notifications]
+enabled = true
+
+[notifications.channels.mail]
+kind = "email"                       # reuses the [email] SMTP settings
+to_address = "alerts@example.org"
+
+[notifications.channels.chat]
+kind = "matrix"
+homeserver = "https://matrix.example.org"
+access_token = "syt_..."
+room = "#bmnews-alerts:example.org"
+
+[notifications.watches.melanoma-trials]
+enabled = true
+min_relevance = 0.8
+min_quality_tier = "TIER_4_EXPERIMENTAL"
+tags = ["melanoma", "immunotherapy"]
+study_designs = ["rct"]
+channels = ["mail", "chat"]
+max_per_run = 5
+```
+
+Check it against papers you already have before turning it loose:
+
+```bash
+bmnews notify --watch melanoma-trials --dry-run
+```
+
+Loosening a watch's threshold makes it match papers already in the database, so history resurfaces. That is intended — and it is exactly why `max_per_run` pages rather than truncates.
+
 ## Complete example config
 
 ```toml
@@ -338,4 +421,19 @@ from_address = ""
 to_address = ""
 subject_prefix = "[BioMedNews]"
 max_papers = 20
+
+[notifications]
+enabled = false
+
+[notifications.channels.mail]
+kind = "email"
+to_address = "jane.doe@university.edu"
+
+[notifications.watches.tnbc-trials]
+enabled = true
+min_relevance = 0.8
+tags = ["triple-negative breast cancer"]
+study_designs = ["rct"]
+channels = ["mail"]
+max_per_run = 5
 ```

@@ -76,6 +76,28 @@ This table serves two purposes:
 1. Track which papers have been included in digests (so they aren't repeated)
 2. Allow re-rendering of past digests via `get_cached_digest_papers()`
 
+### `notifications`
+
+One row per **delivered** watch notification, unique on `(watch, paper_id, channel)`.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | INTEGER / SERIAL | Primary key |
+| `watch` | TEXT | Watch name from `[notifications.watches.<name>]` |
+| `paper_id` | INTEGER | References `publications(id)`, cascading on delete |
+| `channel` | TEXT | Channel name — one watch can deliver to several |
+| `status` | TEXT | `sent` or `failed` |
+| `attempts` | INTEGER | Incremented on each retry of the same row |
+| `error` | TEXT | Failure detail, empty on success |
+| `sent_at` | TEXT / TIMESTAMP | When the attempt was recorded |
+
+Two properties this table depends on:
+
+- **The pending queue is not stored.** It is derived per run as "papers this watch matches now, minus those with a `sent` row for that channel". That is what makes paging idempotent, and it means editing a watch cannot leave orphaned queue rows behind. A `failed` row stays in the derived queue, so it retries.
+- **It must stay separate from `digest_papers`.** `get_papers_for_digest()` excludes papers present in `digest_papers` and nothing else, so recording a notification there would silently suppress that paper's digest entry.
+
+The unique key includes `channel` because one watch can deliver to both email and Matrix and one can succeed while the other fails — retry state is per-channel or it is wrong.
+
 ## Operations reference
 
 All functions in `db/operations.py` take a DB-API connection as the first argument.
