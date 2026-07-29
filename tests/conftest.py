@@ -32,8 +32,12 @@ def _reset_jobs() -> None:
         return
 
     if not jobs.wait_for_idle(5.0):
-        logger.error("A GUI background job outlived its test — forcing the shared state idle")
+        # ``wait_for_idle()`` is ``not running()``, which also goes False for a
+        # test that poked ``jobs.status()["running"] = True`` by hand — no
+        # thread, no lock, nothing outlived anything. Only the lock actually
+        # being held means a job is still out there.
         if jobs._lock.locked():
+            logger.error("A GUI background job outlived its test — forcing the shared state idle")
             try:
                 jobs._lock.release()
             except RuntimeError:  # Released between the check and the call.
