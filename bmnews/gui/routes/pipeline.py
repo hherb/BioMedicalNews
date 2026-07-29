@@ -3,48 +3,21 @@
 from __future__ import annotations
 
 import logging
-import threading
 from collections import deque
-from collections.abc import Callable
-from typing import Any
 
 from flask import Blueprint, Flask, current_app, render_template
 
 from bmnews.config import AppConfig
 from bmnews.constants import DEFAULT_PAGE_SIZE
 from bmnews.db.operations import count_unscored_papers, get_paper_with_score
+from bmnews.gui import jobs
 
 pipeline_bp = Blueprint("pipeline", __name__)
 logger = logging.getLogger(__name__)
 
-# Guards against two pipeline runs racing on the same database. Acquired in
-# the request thread and released by the worker thread's finally block, which
-# a plain (non-reentrant) Lock permits.
-_pipeline_lock = threading.Lock()
-_pipeline_status: dict[str, Any] = {
-    "running": False,
-    "message": "Ready",
-    "status": "idle",
-    "refresh_list": False,  # Signal the next status poll to reload #paper-list
-}
 # Paper IDs scored since last status poll, consumed on each poll. deque's
 # append/popleft are atomic, so no extra locking is needed here.
 _scored_paper_ids: deque[int] = deque()
-
-
-def _on_progress(message: str) -> None:
-    """Record the latest pipeline progress message for the status poller."""
-    _pipeline_status["message"] = message
-
-
-def _start_pipeline_thread(target_fn: Callable[[], None]) -> None:
-    """Launch *target_fn* in a daemon thread.
-
-    Args:
-        target_fn: Callable that pushes its own app context and is responsible
-            for releasing :data:`_pipeline_lock` when it finishes.
-    """
-    threading.Thread(target=target_fn, daemon=True).start()
 
 
 @pipeline_bp.route("/pipeline/run", methods=["POST"])
@@ -52,72 +25,43 @@ def run() -> str:
     """Start a full fetch → store → score → digest run in the background.
 
     Returns:
-        The ``status_bar`` HTMX fragment. If a run is already in flight the
-        request is a no-op and the busy status is returned instead.
+        The ``status_bar`` HTMX fragment — of the run just started, or of
+        whatever job was already in flight.
     """
     from bmnews.pipeline import run_pipeline
 
     config: AppConfig = current_app.config["BMNEWS_CONFIG"]
     app: Flask = current_app._get_current_object()
 
-    if not _pipeline_lock.acquire(blocking=False):
-        return render_template(
-            "fragments/status_bar.html",
-            message="Pipeline already running...",
-            status="busy",
-            running=True,
-        )
-
-    _pipeline_status.update(running=True, message="Starting pipeline...", status="busy")
-
     def _run() -> None:
         """Run the pipeline, then publish a terminal status."""
 
         def _progress_with_refresh(message: str) -> None:
             """Record progress and flag the list for reload once scoring starts."""
-            _on_progress(message)
+            jobs.progress(message)
             # After storing completes, the paper list needs a full reload
-            if "Scoring" in message and not _pipeline_status.get("refresh_list"):
-                _pipeline_status["refresh_list"] = True
+            if "Scoring" in message and not jobs.status().get("refresh_list"):
+                jobs.status()["refresh_list"] = True
 
-        try:
-            with app.app_context():
-                run_pipeline(
-                    config,
-                    on_progress=_progress_with_refresh,
-                    on_scored=_scored_paper_ids.append,
-                )
-            _pipeline_status.update(
-                running=False,
-                message="Pipeline complete — papers fetched, scored, and digested.",
-                status="success",
-                refresh_list=True,
+        with app.app_context():
+            run_pipeline(
+                config,
+                on_progress=_progress_with_refresh,
+                on_scored=_scored_paper_ids.append,
             )
-        except Exception as e:
-            logger.exception("Pipeline error")
-            _pipeline_status.update(
-                running=False,
-                message=f"Pipeline error: {e}",
-                status="error",
-            )
-        finally:
-            _pipeline_lock.release()
-
-    try:
-        _start_pipeline_thread(_run)
-    except RuntimeError as e:
-        # The worker never ran, so its finally block will not release the lock.
-        _pipeline_status.update(
-            running=False,
-            message=f"Could not start pipeline: {e}",
-            status="error",
+        # `running` is left alone: jobs.start()'s finally block is the one
+        # place that clears it, so it is cleared exactly once whether the
+        # target returned, raised, or forgot. Clearing it here as well would
+        # widen the window in which running() reads False while the lock is
+        # still held from a couple of bytecodes to the whole of this update.
+        jobs.status().update(
+            message="Pipeline complete — papers fetched, scored, and digested.",
+            status="success",
+            refresh_list=True,
         )
-        _pipeline_lock.release()
-        raise
 
-    return render_template(
-        "fragments/status_bar.html", message="Starting pipeline...", status="busy", running=True
-    )
+    jobs.start(message="Starting pipeline...", target=_run, error_label="Pipeline error")
+    return jobs.render_status_bar()
 
 
 @pipeline_bp.route("/pipeline/resume", methods=["POST"])
@@ -135,69 +79,32 @@ def resume() -> str:
     conn = current_app.config["BMNEWS_DB"]
     count = count_unscored_papers(conn)
 
-    if count == 0 or _pipeline_status["running"]:
-        return render_template(
-            "fragments/status_bar.html",
-            message=_pipeline_status["message"],
-            status=_pipeline_status["status"],
-            running=_pipeline_status["running"],
-        )
+    if count == 0 or jobs.running():
+        return jobs.render_status_bar()
 
     config: AppConfig = current_app.config["BMNEWS_CONFIG"]
     app: Flask = current_app._get_current_object()
 
-    if not _pipeline_lock.acquire(blocking=False):
-        return render_template(
-            "fragments/status_bar.html",
-            message="Pipeline already running...",
-            status="busy",
-            running=True,
-        )
-
-    _pipeline_status.update(
-        running=True,
-        message=f"Resuming scoring of {count} papers...",
-        status="busy",
-    )
-
     def _run() -> None:
         """Score the outstanding papers, then publish a terminal status."""
-        try:
-            with app.app_context():
-                scored = run_score(
-                    config,
-                    on_progress=_on_progress,
-                    on_scored=_scored_paper_ids.append,
-                )
-            msg = f"Resumed scoring complete — {scored} papers scored."
-            _pipeline_status.update(running=False, message=msg, status="success")
-        except Exception as e:
-            logger.exception("Resume scoring error")
-            _pipeline_status.update(
-                running=False,
-                message=f"Scoring error: {e}",
-                status="error",
+        with app.app_context():
+            scored = run_score(
+                config,
+                on_progress=jobs.progress,
+                on_scored=_scored_paper_ids.append,
             )
-        finally:
-            _pipeline_lock.release()
-
-    try:
-        _start_pipeline_thread(_run)
-    except RuntimeError as e:
-        _pipeline_status.update(
-            running=False,
-            message=f"Could not start scoring: {e}",
-            status="error",
+        # See the note in run(): jobs.start() clears `running` for us.
+        jobs.status().update(
+            message=f"Resumed scoring complete — {scored} papers scored.",
+            status="success",
         )
-        _pipeline_lock.release()
-        raise
 
-    return render_template(
-        "fragments/status_bar.html",
+    jobs.start(
         message=f"Resuming scoring of {count} papers...",
-        status="busy",
-        running=True,
+        target=_run,
+        error_label="Scoring error",
     )
+    return jobs.render_status_bar()
 
 
 @pipeline_bp.route("/pipeline/status")
@@ -214,9 +121,9 @@ def status() -> str:
     conn = current_app.config["BMNEWS_DB"]
 
     # If the pipeline stored new papers, reload the full paper list via OOB
-    needs_list_refresh = _pipeline_status.get("refresh_list", False)
+    needs_list_refresh = jobs.status().get("refresh_list", False)
     if needs_list_refresh:
-        _pipeline_status["refresh_list"] = False
+        jobs.status()["refresh_list"] = False
 
     # Drain any paper IDs scored since last poll and render OOB card updates
     oob_cards: list[str] = []
@@ -237,12 +144,7 @@ def status() -> str:
     else:
         _scored_paper_ids.clear()
 
-    html = render_template(
-        "fragments/status_bar.html",
-        message=_pipeline_status["message"],
-        status=_pipeline_status["status"],
-        running=_pipeline_status["running"],
-    )
+    html = jobs.render_status_bar()
 
     if needs_list_refresh:
         # Trigger a full paper list reload via OOB swap

@@ -47,10 +47,12 @@ def create_app(config: AppConfig, conn: Any) -> Flask:
     from bmnews.gui.routes.papers import papers_bp
     from bmnews.gui.routes.pipeline import pipeline_bp
     from bmnews.gui.routes.settings import settings_bp
+    from bmnews.gui.routes.watches import watches_bp
 
     app.register_blueprint(papers_bp)
     app.register_blueprint(settings_bp)
     app.register_blueprint(pipeline_bp)
+    app.register_blueprint(watches_bp)
 
     @app.route("/")
     def index() -> str:

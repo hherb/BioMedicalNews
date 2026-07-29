@@ -165,17 +165,13 @@ class TestSettingsRoute:
 
 class TestPipelineRoute:
     def test_run_pipeline_returns_status(self, client):
-        import time
+        from bmnews.gui import jobs
 
         with patch("bmnews.pipeline.run_pipeline") as mock_run:
             resp = client.post("/pipeline/run")
             assert resp.status_code == 200
             assert b"pipeline" in resp.data.lower()
-            # Background thread — give it a moment to start
-            for _ in range(20):
-                if mock_run.called:
-                    break
-                time.sleep(0.05)
+            assert jobs.wait_for_idle(5.0) is True
             mock_run.assert_called_once()
 
     def test_pipeline_status_route(self, client):

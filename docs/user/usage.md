@@ -152,6 +152,35 @@ bmnews notify --watch melanoma-trials --dry-run
 
 A delivery that fails is recorded as failed and stays queued, so the next run retries it — per channel, so a watch that alerts both email and Matrix retries only the one that broke. If every delivery in a run fails, the command exits non-zero, which is what makes a failure visible from cron.
 
+### The Watches tab
+
+The **Watches** tab lists every watch in your config with, per channel:
+
+| Column | Meaning |
+|---|---|
+| Delivered | Papers successfully sent for this watch over this channel, ever |
+| Matching | Papers the watch matches in total, delivered ones included |
+| Remaining | Papers still queued. A failed delivery is counted here — it stays queued and is retried |
+
+**Notify N more** delivers one batch (N is the watch's `max_per_run`); **Notify
+all remaining** drains the queue. Delivery runs in the background and reports in
+the status bar at the bottom of the window; the counts refresh once it finishes.
+
+A watch delivering to more than one channel sends one notification per paper
+*per channel*, which is what the status bar counts when a run ends — five papers
+going to both email and Matrix report as ten notifications, not ten papers.
+
+Working out the counts means scanning every scored paper against every watch, so
+the tab does not do it while a fetch, score or delivery is running: those tables
+read "Counts refresh when the running job finishes" and fill themselves in when
+it does. Everything else — the criteria, and any warning that a watch is
+misconfigured — shows immediately either way.
+
+Watches are created and edited in `~/.bmnews/config.toml` — the tab does not edit
+them. A watch shown as *disabled*, or one reported as naming no configured
+channel, is not delivering anything; a watch listed as unreadable failed
+validation and is being skipped entirely, with the reason in the log.
+
 ### `bmnews init`
 
 Initialize the database and create a default config file.

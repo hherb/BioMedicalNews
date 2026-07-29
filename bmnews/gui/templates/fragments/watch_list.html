@@ -1,0 +1,77 @@
+{% if not rows %}
+<p class="empty-state">
+    {% if unreadable %}
+    No readable watches. See the notice above.
+    {% else %}
+    No watches configured. Add one under <code>[notifications.watches]</code>
+    in <code>~/.bmnews/config.toml</code>.
+    {% endif %}
+</p>
+{% else %}
+{% for row in rows %}
+<section class="watch-card">
+    <header class="watch-header">
+        <span class="watch-name">{{ row.name }}</span>
+        {% if not row.enabled %}<span class="watch-badge">disabled</span>{% endif %}
+    </header>
+
+    <p class="watch-criteria">{{ row.criteria }}</p>
+
+    {# Keyed on channel_names, not on the counts: a render that skipped the
+       scan has no counts and must not therefore claim the channels are
+       misconfigured. #}
+    {% if row.channel_names %}
+    {% if row.channels %}
+    <table class="watch-channels">
+        <thead>
+            <tr><th>Channel</th><th>Delivered</th><th>Matching</th><th>Remaining</th></tr>
+        </thead>
+        <tbody>
+            {% for channel in row.channels %}
+            <tr>
+                <td>{{ channel.name }}</td>
+                <td>{{ channel.delivered }}</td>
+                <td>{{ channel.matching }}</td>
+                <td>{{ channel.remaining }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="watch-notice muted">
+        Counts refresh when the running job finishes.
+    </p>
+    {% endif %}
+    {% if row.unresolved %}
+    <p class="watch-notice error">
+        No configured channel is named {{ row.unresolved | join(', ') }} —
+        nothing will be delivered there.
+    </p>
+    {% endif %}
+    {% else %}
+    <p class="watch-notice error">
+        This watch names no configured channel, so nothing will ever be delivered for it.
+    </p>
+    {% endif %}
+
+    {% if row.deliverable %}
+    <div class="watch-actions">
+        <button class="btn btn-primary"
+                hx-post="/watches/{{ row.name | urlencode }}/notify"
+                hx-target="#status-right" hx-swap="innerHTML">
+            Notify {{ row.max_per_run }} more
+        </button>
+        {# No count on this one. Summing "remaining" across channels counts
+           deliveries, not papers, so a watch on two channels would offer to
+           notify twice the number the table above it shows — and the per-channel
+           figures are right there, two lines up. #}
+        <button class="btn btn-secondary"
+                hx-post="/watches/{{ row.name | urlencode }}/notify-all"
+                hx-target="#status-right" hx-swap="innerHTML">
+            Notify all remaining
+        </button>
+    </div>
+    {% endif %}
+</section>
+{% endfor %}
+{% endif %}
