@@ -18,7 +18,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from flask import Blueprint, current_app, render_template
+from flask import Blueprint, Flask, abort, current_app, render_template
 
 from bmnews.config import AppConfig
 from bmnews.gui import jobs
@@ -95,6 +95,34 @@ def watches_page() -> str:
         # Opening the tab during a run picks up the completion refresh too.
         polling=jobs.running(),
     )
+
+
+@watches_bp.route("/watches/<path:name>/notify", methods=["POST"])
+def notify(name: str) -> str:
+    """Deliver one batch — the watch's ``max_per_run`` — in the background.
+
+    Args:
+        name: The watch's config table name.
+
+    Returns:
+        The ``status_bar`` fragment, plus an OOB swap attaching the completion
+        poller.
+    """
+    return _start_delivery(name, drain=False)
+
+
+@watches_bp.route("/watches/<path:name>/notify-all", methods=["POST"])
+def notify_all(name: str) -> str:
+    """Deliver every pending match for a watch, in the background.
+
+    Args:
+        name: The watch's config table name.
+
+    Returns:
+        The ``status_bar`` fragment, plus an OOB swap attaching the completion
+        poller.
+    """
+    return _start_delivery(name, drain=True)
 
 
 # --- Internals --------------------------------------------------------------
@@ -180,3 +208,71 @@ def _describe(watch: Watch) -> str:
         if values:
             parts.append(f"{label}: {', '.join(values)}")
     return " · ".join(parts) or "no criteria — matches every scored paper"
+
+
+def _start_delivery(name: str, *, drain: bool) -> str:
+    """Start one watch's delivery in the background and report it.
+
+    A ``path`` converter carries *name* because a watch is named by its config
+    table heading, which may contain a slash; ``string`` would 404 on one and
+    the button would look broken for a reason nobody could see.
+    """
+    # Deferred for the reason given in _build_rows.
+    from bmnews.notify.service import run_notify
+    from bmnews.notify.watches import parse_watches
+
+    config: AppConfig = current_app.config["BMNEWS_CONFIG"]
+    app: Flask = current_app._get_current_object()
+
+    if name not in parse_watches(config.notifications.watches or {}):
+        abort(404)
+
+    def _run() -> None:
+        with app.app_context():
+            reports = run_notify(config, watch=name, drain=drain, on_progress=jobs.progress)
+        jobs.status().update(running=False, **_terminal(name, reports))
+
+    jobs.start(
+        message=f"Notifying {name}...",
+        target=_run,
+        error_label=f"Notification error for {name}",
+    )
+    return jobs.render_status_bar() + _oob_poller()
+
+
+def _terminal(name: str, reports: list[DeliveryReport]) -> dict[str, str]:
+    """Turn a run's reports into the status line it ends on.
+
+    A run whose deliveries all failed has done nothing that was asked for, so
+    it reports as an error rather than as a quiet success — the distinction
+    ``bmnews notify`` already makes on the command line. Failed papers stay in
+    the derived queue and retry, which is worth saying in the same breath.
+    """
+    delivered = sum(report.delivered for report in reports)
+    failed = sum(report.failed for report in reports)
+
+    if failed and not delivered:
+        return {
+            "message": f"{name}: delivery failed — {failed} paper(s) stay queued",
+            "status": "error",
+        }
+    if failed:
+        return {
+            "message": (f"{name}: {delivered} paper(s) notified, {failed} failed and stay queued"),
+            "status": "error",
+        }
+    if delivered:
+        return {"message": f"{name}: {delivered} paper(s) notified", "status": "success"}
+    return {"message": f"{name}: nothing to notify", "status": "success"}
+
+
+def _oob_poller() -> str:
+    """An OOB swap putting the completion poller into its slot.
+
+    The poller lives in ``#watch-poller`` rather than inside ``#watch-list``
+    so that starting it costs nothing: re-rendering the rows here would mean a
+    full scan per (watch, channel) pair at the very moment the delivery job
+    starts changing the numbers it would report.
+    """
+    poller = render_template("fragments/watch_poller.html")
+    return f'<div id="watch-poller" hx-swap-oob="innerHTML">{poller}</div>'

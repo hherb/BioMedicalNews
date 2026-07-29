@@ -154,3 +154,122 @@ class TestPane:
     def test_the_tab_is_in_the_shell(self, client):
         body = client.get("/").data.decode()
         assert 'hx-get="/watches"' in body
+
+
+class TestDelivery:
+    def test_notify_starts_a_batch_run(self, client, monkeypatch):
+        calls = []
+
+        def _run_notify(config, **kwargs):
+            calls.append(kwargs)
+            return [DeliveryReport(watch="melanoma", channel="mailbox", delivered=5, remaining=4)]
+
+        monkeypatch.setattr("bmnews.notify.service.run_notify", _run_notify)
+
+        resp = client.post("/watches/melanoma/notify")
+
+        assert resp.status_code == 200
+        assert jobs.wait_for_idle(5.0) is True
+        assert calls == [{"watch": "melanoma", "drain": False, "on_progress": jobs.progress}]
+        assert jobs.status()["status"] == "success"
+        assert "5 paper(s) notified" in jobs.status()["message"]
+
+    def test_notify_all_drains(self, client, monkeypatch):
+        calls = []
+
+        def _run_notify(config, **kwargs):
+            calls.append(kwargs["drain"])
+            return [DeliveryReport(watch="melanoma", channel="mailbox", delivered=9)]
+
+        monkeypatch.setattr("bmnews.notify.service.run_notify", _run_notify)
+
+        client.post("/watches/melanoma/notify-all")
+
+        assert jobs.wait_for_idle(5.0) is True
+        assert calls == [True]
+
+    def test_a_failed_delivery_reports_as_an_error(self, client, monkeypatch):
+        monkeypatch.setattr(
+            "bmnews.notify.service.run_notify",
+            lambda config, **kwargs: [
+                DeliveryReport(watch="melanoma", channel="mailbox", failed=5, remaining=9)
+            ],
+        )
+
+        client.post("/watches/melanoma/notify")
+
+        assert jobs.wait_for_idle(5.0) is True
+        assert jobs.status()["status"] == "error"
+        assert "stay queued" in jobs.status()["message"]
+
+    def test_a_partial_failure_reports_both(self, client, monkeypatch):
+        monkeypatch.setattr(
+            "bmnews.notify.service.run_notify",
+            lambda config, **kwargs: [
+                DeliveryReport(watch="melanoma", channel="mailbox", delivered=5),
+                DeliveryReport(watch="melanoma", channel="chatroom", failed=5),
+            ],
+        )
+
+        client.post("/watches/melanoma/notify")
+
+        assert jobs.wait_for_idle(5.0) is True
+        assert jobs.status()["status"] == "error"
+        assert "5 paper(s) notified" in jobs.status()["message"]
+        assert "5 failed" in jobs.status()["message"]
+
+    def test_a_raising_run_notify_reports_and_frees_the_lock(self, client, monkeypatch):
+        def _boom(config, **kwargs):
+            raise RuntimeError("smtp down")
+
+        monkeypatch.setattr("bmnews.notify.service.run_notify", _boom)
+
+        client.post("/watches/melanoma/notify")
+
+        assert jobs.wait_for_idle(5.0) is True
+        assert jobs.status()["status"] == "error"
+        assert "smtp down" in jobs.status()["message"]
+        assert jobs.running() is False
+
+    def test_a_second_delivery_is_refused_while_one_runs(self, client, monkeypatch):
+        import threading
+
+        release = threading.Event()
+        started = threading.Event()
+        runs = []
+
+        def _slow(config, **kwargs):
+            runs.append(kwargs["watch"])
+            started.set()
+            release.wait(5.0)
+            return []
+
+        monkeypatch.setattr("bmnews.notify.service.run_notify", _slow)
+
+        client.post("/watches/melanoma/notify")
+        started.wait(5.0)
+        resp = client.post("/watches/melanoma/notify")
+
+        assert resp.status_code == 200
+        release.set()
+        assert jobs.wait_for_idle(5.0) is True
+        assert runs == ["melanoma"]
+
+    def test_an_unknown_watch_is_a_404(self, client, monkeypatch):
+        monkeypatch.setattr(
+            "bmnews.notify.service.run_notify",
+            lambda config, **kwargs: pytest.fail("must not be called"),
+        )
+
+        assert client.post("/watches/nosuchwatch/notify").status_code == 404
+        assert client.post("/watches/nosuchwatch/notify-all").status_code == 404
+
+    def test_the_response_attaches_the_completion_poller(self, client, monkeypatch):
+        monkeypatch.setattr("bmnews.notify.service.run_notify", lambda config, **kwargs: [])
+
+        body = client.post("/watches/melanoma/notify").data.decode()
+
+        assert jobs.wait_for_idle(5.0) is True
+        assert 'id="watch-poller"' in body
+        assert 'hx-swap-oob="innerHTML"' in body
+        assert 'hx-get="/watches/rows"' in body
