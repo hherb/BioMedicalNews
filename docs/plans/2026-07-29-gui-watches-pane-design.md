@@ -113,13 +113,19 @@ A notify POST returns two swaps in one response, the technique
 - the busy `status_bar` fragment into `#status-right`, which starts the
   existing 2-second status poller and shows `run_notify`'s per-channel progress
   lines as they arrive;
-- an OOB swap of `#watch-list`, re-rendered with an
-  `hx-get="/watches/rows" hx-trigger="every 2s"` poller attached.
+- an OOB swap putting an `hx-get="/watches/rows" hx-trigger="every 2s"` poller
+  into `#watch-poller`, a slot of its own next to `#watch-list`.
+
+The poller gets its own slot rather than living among the rows so that starting
+it costs nothing: re-rendering the rows on the POST would mean a full scan per
+pair at the moment the delivery job starts changing the numbers it would
+report.
 
 `/watches/rows` returns **204 No Content** while `jobs.running()` — htmx does
-not swap on a 204, so the poller stays alive and no scan is performed. Once the
-job is idle it returns freshly scanned rows *without* the poller, which
-refreshes the counts and stops the polling in the same response.
+not swap on a 204, so the poller stays alive and no scan is performed. The
+first idle answer returns freshly scanned rows into `#watch-list` *and* an OOB
+swap emptying `#watch-poller`, so one response both refreshes the counts and
+retires the poller.
 
 Net cost: no scans during delivery, exactly one when it finishes. Nothing is
 swapped out-of-band into an element that may not be on the page, and the poller
