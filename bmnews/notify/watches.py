@@ -110,7 +110,9 @@ class Watch:
         sources: Registry source names, any of which qualifies.
         journals: Journal names, compared case-insensitively.
         study_designs: :class:`~bmlib.quality.StudyDesign` values, e.g. ``rct``.
-        channels: Names of channels under ``[notifications.channels]``.
+        channels: Names of channels under ``[notifications.channels]``. A name
+            repeated in the config is dropped at parse time, since delivering
+            to the same destination twice in one run is never what it meant.
         max_per_run: How many papers one run delivers for this watch. The rest
             stay in the derived queue rather than being dropped.
     """
@@ -158,7 +160,7 @@ class Watch:
             sources=_strings(data.get("sources")),
             journals=_strings(data.get("journals")),
             study_designs=_designs(data.get("study_designs")),
-            channels=_strings(data.get("channels")),
+            channels=_channels(f"watch {name!r}", data.get("channels")),
             max_per_run=_max_per_run(data.get("max_per_run")),
         )
 
@@ -321,6 +323,32 @@ def _designs(value: Any) -> tuple[str, ...]:
     if unknown:
         raise WatchConfigError(f"unknown study design(s): {', '.join(sorted(unknown))}")
     return tuple(design.lower() for design in designs)
+
+
+def _channels(subject: str, value: Any) -> tuple[str, ...]:
+    """Coerce the channel list, dropping repeats and naming what it dropped.
+
+    A repeated name is always a mistake — ``["mail", "mail"]`` can mean nothing
+    other than ``["mail"]`` — and acting on one delivers twice. Both callers
+    iterate :func:`resolve_channels`, so ``run_notify()`` sends a second batch
+    to the same destination in the same run (the queue is re-derived, so it is
+    the *next* batch, which silently doubles ``max_per_run``) and
+    ``pending_counts()`` reports the pair twice, which the GUI pane renders as
+    two identical rows and sums into its total.
+
+    Corrected here rather than in :func:`resolve_channels` so that every caller
+    sees the corrected list without having to remember to de-duplicate it.
+    """
+    names = _strings(value)
+    unique = tuple(dict.fromkeys(names))
+    if len(unique) != len(names):
+        repeated = sorted(name for name in unique if names.count(name) > 1)
+        logger.warning(
+            "%s repeats channel(s) %s — each is delivered to once",
+            subject,
+            ", ".join(repeated),
+        )
+    return unique
 
 
 def _strings(value: Any) -> tuple[str, ...]:

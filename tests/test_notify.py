@@ -216,6 +216,22 @@ class TestWatchParsing:
     def test_blank_list_entries_are_dropped(self):
         assert Watch.from_config("w", {"tags": ["melanoma", "", "  "]}).tags == ("melanoma",)
 
+    def test_a_repeated_channel_is_dropped_and_named(self, caplog):
+        """Both delivery callers iterate the list, so a repeat sends twice."""
+        with caplog.at_level(logging.WARNING):
+            watch = Watch.from_config("w", {"channels": ["mail", "mail"]})
+        assert watch.channels == ("mail",)
+        assert "mail" in caplog.text
+
+    def test_a_repeated_channel_keeps_its_first_position(self):
+        watch = Watch.from_config("w", {"channels": ["matrix", "mail", "matrix"]})
+        assert watch.channels == ("matrix", "mail")
+
+    def test_distinct_channels_produce_no_warning(self, caplog):
+        with caplog.at_level(logging.WARNING):
+            Watch.from_config("w", {"channels": ["matrix", "mail"]})
+        assert caplog.text == ""
+
     def test_an_unknown_criterion_is_warned_about_by_name(self, caplog):
         """A misspelled criterion is a criterion not applied — say so loudly."""
         with caplog.at_level(logging.WARNING):

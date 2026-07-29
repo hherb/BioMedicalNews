@@ -325,7 +325,7 @@ The `access_token` sits in `config.toml` next to `smtp_password` — same exposu
 | `sources` | list | `[]` | Source names, e.g. `["medrxiv", "pubmed"]`. |
 | `journals` | list | `[]` | Journal names, compared case-insensitively. |
 | `study_designs` | list | `[]` | Study designs, e.g. `["rct", "meta_analysis"]`. |
-| `channels` | list | `[]` | Names of channels above. A watch with none delivers nowhere. |
+| `channels` | list | `[]` | Names of channels above. A watch with none delivers nowhere. A name listed twice is warned about and delivered to once. |
 | `max_per_run` | integer | `5` | How many papers one run delivers. The rest stay queued. |
 
 A mistyped criterion key is reported in the log rather than silently ignored, and a value that cannot mean anything (an unknown tier, a score above 1.0) makes bmnews skip that watch with an error instead of matching on the rest of it.
