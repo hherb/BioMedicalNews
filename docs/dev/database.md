@@ -104,7 +104,7 @@ It serves two purposes: papers already linked to a digest are excluded from the 
 
 ### `notifications`
 
-One row per **delivered** watch notification, unique on `(watch, paper_id, channel)`.
+One row per `(watch, paper_id, channel)` triple, which the table is unique on. The row holds the **latest** delivery attempt for that triple, `sent` or `failed` — a retry updates it in place and increments `attempts` rather than adding a second row.
 
 | Column | Type | Notes |
 |--------|------|-------|

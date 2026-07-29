@@ -8,7 +8,8 @@
 | Multi-provider LLM + model selector | **Done.** Six providers via bmlib (`list_providers()` is the authority), settings UI datalist cached in `~/.bmnews/model_cache.json`. Design/plan: `docs/plans/2026-02-15-llm-providers-model-selector-*.md`. |
 | Notification service | **Done.** CLI, pipeline stage, and the GUI watches pane — see below. |
 | `docs/dev/` drift | **Done.** All six files rewritten against the current code ([issue #11](https://github.com/hherb/BioMedicalNews/issues/11)). |
-| `bmlib.transparency` | **Unused.** Config section and packaging extra declared, analyzer never called. This is now the only open item. |
+| `bmlib.transparency` | **Unused.** Config section and packaging extra declared, analyzer never called. This is now the largest open item. |
+| `docs/dev/` drift detection | **Open.** The rewrite above was verified by hand, and nothing in CI fails when a rename rots it again — [issue #16](https://github.com/hherb/BioMedicalNews/issues/16). |
 
 ## Environment gotcha
 
@@ -75,8 +76,16 @@ It resolved to two identical `Channel` objects, and both `run_notify()` and
 `pending_counts()` iterate that list — so the watch delivered twice in one run
 (the second pass re-derives the queue, so it sent the *next* batch, silently
 doubling `max_per_run`) and the pane rendered two identical rows. The fix is in
-`Watch.from_config()` rather than `resolve_channels()`, so every caller sees the
-corrected list without having to remember to de-duplicate.
+`Watch.from_config()`, so every caller sees the corrected list without having to
+remember to de-duplicate, and again in `resolve_channels()` — silently, since
+the parse has already warned. The second one is not redundant: `Watch` is
+exported and directly constructible, so without it the guarantee rests on every
+instance having come through the config parse, which nothing enforces.
+
+Only an exact repeat of a channel *name* is caught. Two differently named
+channels pointing at one address remain two deliveries, deliberately —
+`notifications` keys retry state on the channel name, so they are separate
+queues, and one failing says nothing about the other.
 
 One thing to keep straight if you touch the pane's numbers: a report is per
 `(watch, channel)`, so anything summed across channels counts **notifications**
