@@ -739,10 +739,18 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from flask import Blueprint, current_app, render_template
 
 from bmnews.config import AppConfig
+from bmnews.gui import jobs
+
+if TYPE_CHECKING:
+    # Imported for annotations only: bmnews.notify pulls in bmlib.quality, and
+    # the routes below defer that cost to the request that needs it.
+    from bmnews.notify.service import DeliveryReport
+    from bmnews.notify.watches import Watch
 
 watches_bp = Blueprint("watches", __name__)
 logger = logging.getLogger(__name__)
@@ -800,8 +808,6 @@ def watches_page() -> str:
     Returns:
         The ``watches_view`` HTMX fragment.
     """
-    from bmnews.gui import jobs
-
     config: AppConfig = current_app.config["BMNEWS_CONFIG"]
     rows, unreadable = _build_rows(config)
     return render_template(
@@ -828,6 +834,8 @@ def _build_rows(config: AppConfig) -> tuple[list[WatchRow], list[str]]:
         could not read — which it logs and skips, so the raw config keys are
         the only place they still exist.
     """
+    # Deferred: bmnews.notify pulls in bmlib.quality, which the GUI should not
+    # pay for at import time.
     from bmnews.notify.service import pending_counts
     from bmnews.notify.watches import parse_watches
 
@@ -835,7 +843,7 @@ def _build_rows(config: AppConfig) -> tuple[list[WatchRow], list[str]]:
     watches = parse_watches(configured)
     unreadable = sorted(set(configured) - set(watches))
 
-    counts: dict[str, list] = {}
+    counts: dict[str, list[DeliveryReport]] = {}
     if watches:
         for report in pending_counts(config):
             counts.setdefault(report.watch, []).append(report)
@@ -871,7 +879,7 @@ def _build_rows(config: AppConfig) -> tuple[list[WatchRow], list[str]]:
     return rows, unreadable
 
 
-def _describe(watch) -> str:
+def _describe(watch: Watch) -> str:
     """Summarise a watch's criteria in one line, in the config's vocabulary.
 
     A watch constraining nothing is a real configuration — it matches every
@@ -1242,7 +1250,14 @@ Expected: FAIL — the POST routes 404
 
 - [ ] **Step 3: Add the routes**
 
-Append to `bmnews/gui/routes/watches.py`, after `watches_page()`:
+First extend the Flask import at the top of `bmnews/gui/routes/watches.py` — the
+delivery routes need `Flask` for the app-context handle and `abort` for the 404:
+
+```python
+from flask import Blueprint, Flask, abort, current_app, render_template
+```
+
+Then append, after `watches_page()`:
 
 ```python
 @watches_bp.route("/watches/<path:name>/notify", methods=["POST"])
@@ -1283,9 +1298,7 @@ def _start_delivery(name: str, *, drain: bool) -> str:
     table heading, which may contain a slash; ``string`` would 404 on one and
     the button would look broken for a reason nobody could see.
     """
-    from flask import Flask, abort
-
-    from bmnews.gui import jobs
+    # Deferred for the reason given in _build_rows.
     from bmnews.notify.service import run_notify
     from bmnews.notify.watches import parse_watches
 
@@ -1308,7 +1321,7 @@ def _start_delivery(name: str, *, drain: bool) -> str:
     return jobs.render_status_bar() + _oob_poller()
 
 
-def _terminal(name: str, reports: list) -> dict[str, str]:
+def _terminal(name: str, reports: list[DeliveryReport]) -> dict[str, str]:
     """Turn a run's reports into the status line it ends on.
 
     A run whose deliveries all failed has done nothing that was asked for, so
@@ -1447,7 +1460,14 @@ Expected: FAIL — `/watches/rows` 404s (the third test may pass already; the fi
 
 - [ ] **Step 3: Add the route**
 
-Append to `bmnews/gui/routes/watches.py`, after `notify_all()`:
+First extend the Flask import at the top of `bmnews/gui/routes/watches.py` to
+bring in `Response`, which this route needs for the 204:
+
+```python
+from flask import Blueprint, Flask, Response, abort, current_app, render_template
+```
+
+Then append, after `notify_all()`:
 
 ```python
 @watches_bp.route("/watches/rows")
@@ -1469,8 +1489,6 @@ def rows() -> Response | str:
         204 while a job runs; otherwise the ``watch_list`` fragment followed by
         an OOB swap emptying the poller's slot, which stops the polling.
     """
-    from bmnews.gui import jobs
-
     if jobs.running():
         return Response(status=204)
 
@@ -1482,11 +1500,8 @@ def rows() -> Response | str:
     )
 ```
 
-Extend the module's Flask import to bring in `Response`:
-
-```python
-from flask import Blueprint, Response, current_app, render_template
-```
+`Response`, `Flask`, `abort` and `jobs` are already imported at module level by
+Task 2's import block — nothing further to add here.
 
 - [ ] **Step 4: Run the test to verify it passes**
 
