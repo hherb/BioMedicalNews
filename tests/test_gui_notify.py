@@ -400,6 +400,21 @@ class TestRefresh:
         assert '<div id="watch-poller" hx-swap-oob="innerHTML"></div>' in body
         assert 'hx-get="/watches/rows"' not in body
 
+    def test_idle_also_clears_the_stale_refusal_notice(self, client, monkeypatch):
+        # #watch-message sits outside #watch-list, so a stale "did not start"
+        # notice from an earlier refused click would otherwise survive this
+        # refresh and keep telling the user to retry a delivery that would now
+        # succeed.
+        monkeypatch.setattr(
+            "bmnews.notify.service.pending_counts", lambda config: [report(remaining=4)]
+        )
+
+        resp = client.get("/watches/rows")
+        body = resp.data.decode()
+
+        assert resp.status_code == 200
+        assert '<div id="watch-message" hx-swap-oob="innerHTML"></div>' in body
+
     def test_the_pane_carries_the_poller_when_opened_during_a_run(self, client, monkeypatch):
         monkeypatch.setattr("bmnews.notify.service.pending_counts", lambda config: [report()])
         jobs.status()["running"] = True

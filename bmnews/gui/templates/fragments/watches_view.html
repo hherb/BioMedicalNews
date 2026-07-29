@@ -19,7 +19,9 @@
         {% include "fragments/watch_list.html" %}
     </div>
 
-    {# Filled by an OOB swap when a delivery click is refused, emptied when it starts. #}
+    {# Filled by an OOB swap when a delivery click is refused, emptied when it
+       starts and again once /watches/rows next goes idle — otherwise the
+       notice would outlive the run that made it stale. #}
     <div id="watch-message"></div>
 
     <div id="watch-poller">

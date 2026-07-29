@@ -151,7 +151,10 @@ def rows() -> Response | str:
 
     Returns:
         204 while a job runs; otherwise the ``watch_list`` fragment followed by
-        an OOB swap emptying the poller's slot, which stops the polling.
+        an OOB swap emptying the poller's slot, which stops the polling, and
+        one emptying the refusal notice's slot, which clears a stale "did not
+        start" message left over from a delivery click refused while the job
+        that just finished was running.
     """
     if jobs.running():
         return Response(status=204)
@@ -164,6 +167,7 @@ def rows() -> Response | str:
     return (
         render_template("fragments/watch_list.html", rows=watch_rows, unreadable=unreadable)
         + '<div id="watch-poller" hx-swap-oob="innerHTML"></div>'
+        + '<div id="watch-message" hx-swap-oob="innerHTML"></div>'
     )
 
 
