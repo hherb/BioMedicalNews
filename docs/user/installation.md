@@ -30,7 +30,11 @@ pip install -e ".[anthropic]"
 # PostgreSQL backend (instead of SQLite)
 pip install -e ".[postgresql]"
 
-# Transparency analysis (multi-API bias detection)
+# Desktop GUI (pywebview + Flask) — needed for `bmnews gui`
+pip install -e ".[gui]"
+
+# Transparency analysis (declared but not yet wired up — installs the
+# bmlib dependency; nothing in bmnews calls it yet)
 pip install -e ".[transparency]"
 
 # Development tools (pytest, ruff)

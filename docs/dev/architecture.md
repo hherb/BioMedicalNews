@@ -20,35 +20,44 @@ Each stage is an independent function that can be run individually via the CLI o
 ## Data flow
 
 ```
-                      medRxiv API ─┐
-                      bioRxiv API ──┼──▶ list[FetchedPaper]
-                      EuropePMC API ┘         │
-                                              ▼
-                                    ┌─────────────────┐
-                                    │   upsert_paper() │ ──▶ papers table
-                                    └─────────────────┘
+        medRxiv ─┐
+        bioRxiv ──┤
+         PubMed ──┼──▶ bmlib.publications.sync()  ──▶ publications  (+ fulltext_sources)
+       OpenAlex ──┤    one FetchedRecord per paper      │            + download_days
+      EuropePMC ─┘    (bmnews's fetcher, same registry) │              (resume state)
+                                                        │
+                                       run_sync() stores the source `extras`
+                                       blob alongside it ──▶ paper_extras
                                               │
                                     get_unscored_papers()
                                               │
                                               ▼
-                               ┌──────────────────────────┐
-                               │   score_papers()          │
-                               │   ├─ RelevanceAgent.score()│ ◀── LLM
-                               │   └─ classify_from_metadata│ ◀── bmlib.quality
-                               └──────────────────────────┘
+                               ┌───────────────────────────┐
+                               │  score_papers()           │
+                               │  ├─ RelevanceAgent.score()│ ◀── LLM
+                               │  └─ QualityManager        │ ◀── bmlib.quality
+                               └───────────────────────────┘
                                               │
-                                    save_score() ──▶ scores table
+                          save_score() ──▶ scores    save_paper_tags() ──▶ paper_tags
                                               │
-                                    get_papers_for_digest()
-                                              │
-                                              ▼
-                               ┌──────────────────────────┐
-                               │   render_digest()         │ ◀── Jinja2 templates
-                               │   send_email() / stdout   │
-                               └──────────────────────────┘
-                                              │
-                                    record_digest() ──▶ digests + digest_papers
+                        ┌─────────────────────┴─────────────────────┐
+                        ▼                                           ▼
+              collect_matches()                          get_papers_for_digest()
+        (derived queue, per watch+channel)          (top papers not yet in a digest)
+                        │                                           │
+                        ▼                                           ▼
+            ┌───────────────────────┐                 ┌──────────────────────────┐
+            │ notify_* templates    │                 │  render_digest()         │ ◀── Jinja2
+            │ email / Matrix adapter│                 │  send_email() / stdout   │
+            └───────────────────────┘                 └──────────────────────────┘
+                        │                                           │
+       record_notifications() ──▶ notifications      record_digest() ──▶ digests
+                                                                      + digest_papers
 ```
+
+Papers live in **bmlib's** `publications` table; bmnews owns only the scoring and delivery tables hanging off it. There is no `papers` table — migration 4 moved storage onto bmlib and dropped it. A paper dict is a join of `publications`, `paper_extras` and (when present) `scores`, assembled in one place by `_row_to_paper()`. See [Database](database.md).
+
+Note that the two delivery paths are independent by design: `notifications` is *not* recorded in `digest_papers`, so a paper alerted on by a watch still appears in the next digest.
 
 ## Module dependency graph
 
@@ -56,39 +65,55 @@ Each stage is an independent function that can be run individually via the CLI o
 cli.py
   └── pipeline.py
         ├── config.py (AppConfig)
-        ├── db/schema.py (open_db, init_db)
-        ├── db/operations.py (upsert, get, save, record)
-        ├── fetchers/ (fetch_medrxiv, fetch_biorxiv, fetch_europepmc)
+        ├── db/schema.py (open_db, init_db → db/migrations.py)
+        ├── db/operations.py (store, get, save, record — all SQL)
+        ├── bmlib.publications.sync (fetch + store in one call; the registry
+        │     holds medrxiv, biorxiv, pubmed, openalex + europepmc, which
+        │     bmnews/fetchers/ registers into it)
         ├── scoring/scorer.py (score_papers)
         │     ├── scoring/relevance_agent.py (RelevanceAgent)
         │     │     └── bmlib.agents.BaseAgent
-        │     └── bmlib.quality.metadata_filter
+        │     └── bmlib.quality (QualityManager, QualityFilter)
+        ├── notify/service.py (deferred import — run_notify)
+        │     ├── notify/watches.py (parse + validate)
+        │     ├── notify/matcher.py (pure paper × watch → bool)
+        │     ├── notify/renderer.py → templating.py
+        │     └── notify/channels/ (email → digest/sender.py; matrix → httpx)
         └── digest/
               ├── renderer.py (render_digest)
               │     └── bmlib.templates.TemplateEngine
               └── sender.py (send_email)
 
+gui/
+  ├── app.py (Flask factory) → routes/ (papers, settings, pipeline, watches)
+  ├── jobs.py (the one background job: lock, status, thread)
+  ├── launcher.py (pywebview window)
+  └── routes/papers.py → bmlib.fulltext.FullTextService
+
 External dependencies:
-  bmlib.llm        ── LLMClient, LLMMessage, LLMResponse
-  bmlib.db         ── connect_*, execute, fetch_*, transaction
-  bmlib.templates  ── TemplateEngine
-  bmlib.agents     ── BaseAgent
-  bmlib.quality    ── classify_from_metadata, QualityAssessment, StudyDesign, QualityTier
+  bmlib.llm           ── LLMClient, list_providers()
+  bmlib.db            ── connect_*, execute, fetch_*, transaction, placeholder,
+                         is_sqlite, Migration, run_migrations, create_tables
+  bmlib.publications  ── sync, store_publication, register_source, FetchedRecord
+  bmlib.templates     ── TemplateEngine
+  bmlib.agents        ── BaseAgent
+  bmlib.quality       ── QualityManager, QualityAssessment, StudyDesign, QualityTier
+  bmlib.fulltext      ── FullTextService
 ```
 
 ## Key design decisions
 
 ### Pure functions for database operations
 
-All database operations in `db/operations.py` are pure functions that take a DB-API connection as the first argument:
+All database operations in `db/operations.py` are pure functions that take a DB-API connection as the first argument, with keyword-only arguments for writes:
 
 ```python
-def upsert_paper(conn, *, doi, title, ...) -> int:
-def get_unscored_papers(conn, limit=100) -> list[dict]:
+def store_paper(conn, *, title, doi=None, pmid=None, ...) -> int:
+def get_unscored_papers(conn, limit=500) -> list[dict]:
 def save_score(conn, *, paper_id, ...) -> None:
 ```
 
-This makes testing trivial (pass an in-memory SQLite connection), avoids global state, and keeps the code composable.
+This makes testing trivial (pass a connection from `tests.backends.new_db()`), avoids global state, and keeps the code composable.
 
 ### Backend-aware SQL
 
@@ -96,9 +121,14 @@ SQLite and PostgreSQL use different SQL syntax in a few places:
 - Parameter placeholders: `?` (SQLite) vs `%s` (PostgreSQL)
 - Auto-increment: `AUTOINCREMENT` vs `SERIAL`
 - Timestamps: `datetime('now')` vs `NOW()`
-- Upsert returning: `lastrowid` vs `RETURNING id`
+- Case-insensitive search: `LIKE` vs `ILIKE`
+- Unnesting a JSON array: `json_each` vs `json_array_elements_text` — which the `sources` filter needs, since `publications.sources` is a JSON array
 
-The `_placeholder(conn)` helper detects the backend by inspecting `type(conn).__module__` and returns the correct placeholder. Schema DDL is maintained as two separate strings (`SCHEMA_SQLITE` and `SCHEMA_POSTGRESQL`) in `db/schema.py`.
+`placeholder(conn)` and `is_sqlite(conn)` come from `bmlib.db` and are the only backend test anywhere in bmnews. Schema DDL is maintained as a pair of strings **per migration** in `db/migrations.py`; `db/schema.py` holds no DDL, only `open_db()` and an `init_db()` that runs the pending migrations.
+
+### Versioned migrations
+
+`init_db()` is called on every connection open and applies whatever migrations are pending, so there is no separate setup step and an old database upgrades itself. Migration 4 is the one to know about: it moved paper storage onto `bmlib.publications` and dropped bmnews's own `papers` table. It is destructive and one-way, and a row keyed on neither DOI nor PMID is written to `~/.bmnews/stranded-papers.json` rather than silently lost. See [Database](database.md).
 
 ### Template-driven prompts
 
@@ -117,8 +147,9 @@ Relevance is weighted higher because users care most about topic match. Quality 
 ### Incremental processing
 
 Each pipeline stage only processes what's needed:
-- **Fetch** — upserts papers, so re-fetching the same date range is safe (idempotent)
+- **Sync** — `download_days` records each fetched day per source, so only missing or failed days are re-fetched. Records are deduplicated by DOI *and* PMID, so a paper arriving from a second source merges rather than duplicating
 - **Score** — only scores papers without an existing score entry
+- **Notify** — skips papers already delivered for that watch and channel; a `failed` row stays in the derived queue and retries
 - **Digest** — only includes papers not yet linked to a digest via `digest_papers`
 
 This means running `bmnews run` multiple times is safe and won't duplicate work.
@@ -136,10 +167,13 @@ The CLI (`cli.py`) uses Click with a group/command pattern:
 ```
 main (group)
   ├── run      → pipeline.run_pipeline()
-  ├── fetch    → pipeline.run_fetch() + run_store()
+  ├── fetch    → pipeline.run_sync()
   ├── score    → pipeline.run_score()
   ├── digest   → pipeline.run_digest()
+  ├── notify   → notify.service.run_notify()  (--watch, --count, --all,
+  │                                            --dry-run, --list)
   ├── init     → config.write_default_config() + schema.init_db()
+  ├── gui      → gui.launcher.launch()
   └── search   → direct SQL via bmlib.db.fetch_all()
 ```
 

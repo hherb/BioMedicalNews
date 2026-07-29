@@ -7,8 +7,9 @@
 | Storage on `bmlib.publications` | **Done.** No `papers` table; fetch+store is one `sync()` call. Decisions worth keeping are recorded below. |
 | Multi-provider LLM + model selector | **Done.** Six providers via bmlib (`list_providers()` is the authority), settings UI datalist cached in `~/.bmnews/model_cache.json`. Design/plan: `docs/plans/2026-02-15-llm-providers-model-selector-*.md`. |
 | Notification service | **Done.** CLI, pipeline stage, and the GUI watches pane — see below. |
+| `docs/dev/` drift | **Done.** All six files rewritten against the current code ([issue #11](https://github.com/hherb/BioMedicalNews/issues/11)). |
 | `bmlib.transparency` | **Unused.** Config section and packaging extra declared, analyzer never called. This is now the largest open item. |
-| `docs/dev/` drift | `architecture.md` and `database.md` still describe the removed `papers` table — [issue #11](https://github.com/hherb/BioMedicalNews/issues/11). |
+| `docs/dev/` drift detection | **Open.** The rewrite above was verified by hand, and nothing in CI fails when a rename rots it again — [issue #16](https://github.com/hherb/BioMedicalNews/issues/16). |
 
 ## Environment gotcha
 
@@ -69,6 +70,23 @@ than from the reports that came back, which is what lets every one of those
 config notices render on a page that gathered no counts at all. Nothing else
 depends on the notification service now; it is fully shipped.
 
+A channel name repeated in one watch (`channels = ["mail", "mail"]`) is now
+dropped at parse time with a warning ([issue #14](https://github.com/hherb/BioMedicalNews/issues/14)).
+It resolved to two identical `Channel` objects, and both `run_notify()` and
+`pending_counts()` iterate that list — so the watch delivered twice in one run
+(the second pass re-derives the queue, so it sent the *next* batch, silently
+doubling `max_per_run`) and the pane rendered two identical rows. The fix is in
+`Watch.from_config()`, so every caller sees the corrected list without having to
+remember to de-duplicate, and again in `resolve_channels()` — silently, since
+the parse has already warned. The second one is not redundant: `Watch` is
+exported and directly constructible, so without it the guarantee rests on every
+instance having come through the config parse, which nothing enforces.
+
+Only an exact repeat of a channel *name* is caught. Two differently named
+channels pointing at one address remain two deliveries, deliberately —
+`notifications` keys retry state on the channel name, so they are separate
+queues, and one failing says nothing about the other.
+
 One thing to keep straight if you touch the pane's numbers: a report is per
 `(watch, channel)`, so anything summed across channels counts **notifications**
 — one paper on one channel — and not papers. Five papers going to email and
@@ -113,6 +131,39 @@ recorded in one transaction for the same reason, since half a recorded batch
 resends the rest under a different `txnId`. And the four `notify_*` templates
 escape their own interpolations, because bmlib's `TemplateEngine` runs with
 `autoescape=False`.
+
+## The developer docs
+
+`docs/dev/` had drifted a long way behind the `publications` migration — it
+still documented a `papers` table, `upsert_paper()`, `SCHEMA_SQLITE` in
+`schema.py`, a `FetchedPaper` dataclass and a `fetchers/base.py`, none of which
+exist. All six files are now written against the code as it stands:
+
+- **`database.md`** — rewritten around the two owners (bmlib: `publications`,
+  `fulltext_sources`, `download_days`; bmnews: `scores`, `paper_tags`,
+  `digests`/`digest_papers`, `paper_extras`, `notifications`), the three-way
+  join a "paper" actually is, the six migrations, the real operations
+  reference, and the per-backend test setup.
+- **`architecture.md`** — data-flow diagram and module graph redrawn; the
+  notify path and the GUI blueprints added; backend-aware SQL corrected to
+  `placeholder()`/`is_sqlite()` and per-migration DDL pairs.
+- **`codebase.md`** — the missing packages (`notify/`, `gui/`, `constants.py`,
+  `metadata.py`, `templating.py`) documented; the removed fetcher modules
+  dropped.
+- **`bmlib-integration.md`** — `bmlib.publications` and `bmlib.fulltext`
+  sections added, the quality section corrected to `QualityManager`, and the
+  transparency section corrected from "available when enabled" to "declared but
+  nothing calls it".
+- **`testing.md`** — the per-backend `new_db()` pattern, the autouse GUI-jobs
+  fixture, and the real test-file list.
+- **`contributing.md`** — the fetcher guide rewritten around bmlib's registry
+  convention (the old one described a dispatch path that no longer exists).
+
+Two things to know if you extend them: the docs are checked by reading, not by
+a test, so a symbol renamed in code will not fail CI here; and `docs/user/`
+still says `pip install` throughout, which is at odds with the project's
+uv-only rule but is not wrong for an end user — worth a decision rather than a
+silent edit.
 
 ## Reference: how the `publications` migration was resolved
 

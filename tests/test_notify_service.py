@@ -262,6 +262,23 @@ class TestDedupAndRetry:
         assert again["mail"].delivered == 0  # still failing
         assert again["mail"].failed == 2
 
+    def test_a_repeated_channel_name_delivers_one_batch(self, env):
+        """A repeat used to send twice — once per resolved copy of the channel.
+
+        The second pass re-derives the queue, so it sent the *next* batch to the
+        same destination rather than the same one, silently doubling
+        ``max_per_run`` for that watch.
+        """
+        conn, config, adapter = env
+        config.notifications.watches["melanoma"]["channels"] = ["chat", "chat"]
+        _papers(conn, 12)
+
+        reports = run_notify(config)
+
+        assert len(reports) == 1
+        assert reports[0].delivered == 5
+        assert len(adapter.batches) == 1
+
 
 class TestCriteria:
     def test_criteria_are_applied(self, env):
@@ -364,6 +381,14 @@ class TestPendingCounts:
         report = pending_counts(config)[0]
         assert (report.sent_total, report.remaining) == (0, 3)
         assert report.exhausted is False
+
+    def test_a_repeated_channel_is_reported_once(self, env):
+        """Two reports for one pair render as two identical rows in the pane."""
+        conn, config, _ = env
+        config.notifications.watches["melanoma"]["channels"] = ["chat", "chat"]
+        _papers(conn, 2)
+
+        assert [(r.watch, r.channel) for r in pending_counts(config)] == [("melanoma", "chat")]
 
 
 class TestCLI:

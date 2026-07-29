@@ -18,11 +18,13 @@ CLI entry point using Click. Defines the `main` group and all subcommands.
 
 **Commands:**
 - `run(days, show_cached)` — full pipeline or cached display
-- `fetch(days)` — fetch and store only
+- `fetch(days)` — sync only (fetch and store are one call)
 - `score()` — score unscored papers
 - `digest(output)` — render and deliver
+- `notify(watch, count, all, dry_run, list)` — deliver watch notifications. `--all` and `--count` both set the batch size, so setting both is a `UsageError` rather than a silent choice
 - `init(config_path)` — first-time setup
-- `search(query)` — keyword search with direct SQL
+- `gui(port)` — launch the desktop GUI; a missing `gui` extra is reported as an install hint, not a traceback
+- `search(query, limit)` — keyword search with direct SQL
 
 ## `bmnews/config.py`
 
@@ -30,79 +32,74 @@ TOML configuration loading with typed dataclass access.
 
 **Key components:**
 - `DEFAULT_CONFIG_DIR` / `DEFAULT_CONFIG_PATH` — `~/.bmnews/config.toml`
-- Section dataclasses: `DatabaseConfig`, `SourcesConfig`, `LLMConfig`, `ScoringConfig`, `QualityConfig`, `TransparencyConfig`, `UserConfig`, `EmailConfig`
+- Section dataclasses: `DatabaseConfig`, `SourcesConfig`, `LLMConfig`, `ScoringConfig`, `QualityConfig`, `TransparencyConfig`, `UserConfig`, `EmailConfig`, `NotificationsConfig`
 - `AppConfig` — top-level dataclass aggregating all sections plus `log_level` and `template_dir`
 - `load_config(path)` — loads TOML, applies values onto dataclass defaults, ignores unknown keys
 - `write_default_config(path)` — writes `DEFAULT_CONFIG_TOML` if file doesn't exist
+- `save_config(config, path)` — writes the config back out (the GUI settings pane uses this)
 - `_apply_section(dc, data)` — maps dict keys to dataclass attributes
 
 **Design notes:**
 - Uses `tomllib` (stdlib since Python 3.11) for TOML parsing
-- Unknown config keys are silently ignored (forward compatibility)
+- Unknown config keys are silently ignored (forward compatibility). That is why `notify/watches.py` re-validates the notification tables and *warns* about keys it does not recognise — a misspelled criterion would otherwise sit in the config doing nothing
+- `sources.source_options`, `notifications.channels` and `notifications.watches` are dicts keyed by name. That shape is forced by `save_config`: `_toml_value` stringifies list elements (an array-of-tables would round-trip as Python dict reprs) and `_write_section` emits three table levels, so anything deeper is dropped on every GUI save
 - All fields have defaults, so the app works even with an empty config
+
+## `bmnews/constants.py`
+
+Fixed behavioural values — scoring weights, page sizes, timeouts, `NOTIFY_SCAN_CHUNK`, `STRANDED_PAPERS_PATH`. Anything a *user* should be able to tune belongs in `config.py` instead. The evidence hierarchy and its scores live in `bmlib.quality`, not here.
+
+## `bmnews/metadata.py`
+
+Defensive decoding of the `paper_extras.metadata_json` blob — it comes from third-party sources and may be absent, empty, or not a dict.
+
+## `bmnews/templating.py`
+
+`TEMPLATES_DIR` and `build_template_engine(config)`. It lives outside `pipeline.py` because the digest, the notification renderer and the GUI all need an engine and none of them should have to import the pipeline to get one.
 
 ## `bmnews/pipeline.py`
 
-Central orchestration module. Contains the main pipeline functions and builder helpers.
+Central orchestration module.
 
 **Builder functions:**
-- `build_template_engine(config)` — creates `TemplateEngine` with user dir and package defaults
 - `build_llm_client(config)` — creates `LLMClient` from provider/host/key settings
+- `_resolve_model_string(config)` — disambiguates a bare model name with a tag (`"llama3.1:latest"`) from a provider-prefixed string, asking `bmlib.llm.providers.list_providers()` which prefixes are real
 
 **Pipeline stages:**
-- `run_fetch(config)` → `list[FetchedPaper]` — calls enabled fetchers
-- `run_store(config, papers)` → `int` — upserts papers into DB
+- `run_sync(config, on_progress)` → `SyncReport` — hands the whole fetch-and-store cycle to `bmlib.publications.sync()`, which walks the lookback window, skips days already recorded complete in `download_days`, and stores each day in one transaction. `_progress_reporter()` renders bmlib's `SyncProgress` down to bmnews's `on_progress(str)` callback so the GUI status bar keeps working; `_record_extras()` / `_store_extras()` keep the source `extras` blob in `paper_extras`
 - `run_score(config)` → `int` — scores unscored papers with LLM + quality
 - `run_digest(config, output)` → `str` — renders and delivers digest
 - `show_cached_digests(config, days)` → `str` — re-renders previous digest papers
 - `run_pipeline(config, days, show_cached)` — orchestrates all stages
+- `_run_notify_stage(config, on_progress)` — the NOTIFY stage, wrapped so a failure cannot take the run down
 
 **Design notes:**
-- Each `run_*` function opens and closes its own DB connection
+- Each `run_*` function opens and closes its own DB connection with `contextlib.closing`
 - `run_pipeline` short-circuits to `show_cached_digests` when `show_cached=True`
 - The `days` parameter overrides `config.sources.lookback_days` at runtime
+- DIGEST is gated on `scored > 0`; **NOTIFY is not**. A run with nothing newly scored still has a failed delivery to retry and a just-loosened watch to honour
 
 ## `bmnews/fetchers/`
 
-Source-specific API clients that return normalized `FetchedPaper` objects.
+Every source resolves through **bmlib's registry** — there is no second dispatch path in bmnews. medRxiv, bioRxiv, PubMed and OpenAlex ship with bmlib; this package holds the one bmnews supplies and registers it into the same registry.
 
-### `base.py`
+### `__init__.py`
 
-Defines the `FetchedPaper` dataclass — the normalized representation shared across all fetchers:
-
-```python
-@dataclass
-class FetchedPaper:
-    doi: str           # DOI or "pmid:12345" identifier
-    title: str
-    authors: str       # Semicolon-separated
-    abstract: str
-    url: str           # DOI link or direct URL
-    source: str        # "medrxiv", "biorxiv", "europepmc"
-    published_date: str
-    categories: str    # Semicolon-separated
-    metadata: dict     # Source-specific metadata
-```
-
-### `medrxiv.py`
-
-Fetches from the medRxiv/bioRxiv public API.
-
-- **API:** `https://api.medrxiv.org/details/{server}/{start_date}/{end_date}/{cursor}`
-- **Pagination:** cursor-based, 100 results per page
-- `fetch_medrxiv(lookback_days)` and `fetch_biorxiv(lookback_days)` are thin wrappers around `_fetch_rxiv(server, ...)`
-- Metadata captured: version, type, category, JATS XML path
+`register_local_sources()` builds a `SourceDescriptor` and calls `bmlib.publications.register_source()`. Once registered, a source is selectable by name in `config.sources.enabled`, appears in the GUI settings list, and takes per-source options from `config.sources.source_options`.
 
 ### `europepmc.py`
 
-Fetches from the Europe PMC REST API.
+Fetches from the Europe PMC REST API, following the registry calling convention exactly:
+
+```python
+def fetch_europepmc(client, target_date, *, on_record, on_progress=None, **config) -> FetchResult:
+```
 
 - **API:** `https://www.ebi.ac.uk/europepmc/webservices/rest/search`
 - **Pagination:** cursor-mark based
-- Default query: `SRC:PPR` (preprints only) filtered by date range
-- Custom query: wraps user query with date filter
-- Falls back to PMID when DOI is unavailable (`doi="pmid:12345"`)
-- Metadata captured: pmid, pmcid, source, pub_type list, journal, cited_by count, open access status
+- Default query: `SRC:PPR` (preprints only), filtered to the target date
+- Emits a `FetchedRecord` per paper, including `publication_types` — dropping that field silently forces every paper onto the LLM quality classifier instead of bmlib's free Tier-1 classification
+- Extras captured: `cited_by`, plus the identifiers and open-access status bmlib has columns for
 
 ## `bmnews/scoring/`
 
@@ -115,7 +112,7 @@ LLM-based relevance scoring and quality assessment.
 - Renders `relevance_system.txt` (system prompt) and `relevance_scoring.txt` (user prompt with paper data)
 - Calls LLM in JSON mode
 - Parses response with `BaseAgent.parse_json()` (handles markdown code blocks)
-- Returns dict with `relevance_score`, `summary`, `relevance_rationale`, `key_findings`
+- Returns dict with `relevance_score`, `summary`, `key_findings`, `matched_tags`
 - Clamps score to 0.0–1.0
 - Falls back to score 0.0 on parse failure
 
@@ -123,16 +120,44 @@ LLM-based relevance scoring and quality assessment.
 
 Orchestrates scoring for a batch of papers.
 
-- `score_papers(papers, llm, model, template_engine, interests, concurrency, quality_tier)` — main entry point
-- `_score_single(paper, agent, interests, quality_tier)` — scores one paper:
-  1. Calls `RelevanceAgent.score()` for relevance + summary
-  2. Calls `_assess_quality()` for quality assessment
-  3. Computes combined score: `0.6 * relevance + 0.4 * quality`
-- `_assess_quality(paper, max_tier)` — runs `classify_from_metadata()` from bmlib
-- `_extract_pub_types(paper)` — extracts publication types from `metadata_json` and `categories`
-- `_quality_tier_to_score(assessment)` — maps `QualityAssessment` to 0.0–1.0 score
+- `score_papers(papers, llm, model, template_engine, interests, concurrency, quality_enabled, quality_tier, temperature, max_tokens, progress_callback)` — main entry point
+- `_score_single(...)` — scores one paper: relevance via `RelevanceAgent.score()`, quality via `bmlib.quality.QualityManager`, then `RELEVANCE_WEIGHT * relevance + QUALITY_WEIGHT * quality`
+- `_build_quality_filter(max_tier)` — clamps the assessment depth (1 = metadata only, 2 = LLM classifier, 3 = deep analysis)
+- `_extract_pub_types(paper)` — reads `publications.publication_types`, which is what feeds Tier-1 classification
+- `_quality_tier_to_score(assessment)` — maps a `QualityAssessment` to 0.0–1.0
+- `tiers_below(min_tier)` — the tier floor, shared with the notification matcher so both exempt `UNCLASSIFIED` the same way
 
-**Concurrency:** Uses `ThreadPoolExecutor` when `concurrency > 1`. Errors in individual papers are logged but don't stop the batch.
+**Quality toggle:** when `config.quality.enabled` is false the quality stage is skipped entirely and the combined score is the relevance score alone.
+
+**Concurrency:** `ThreadPoolExecutor` when `concurrency > 1`. Errors on individual papers are logged but don't stop the batch.
+
+## `bmnews/notify/`
+
+Watch-based alerts: named criteria that fire on a matching paper as it is scored, separately from the periodic digest. A notified paper is still included in the next digest.
+
+### `watches.py`
+
+`Watch` and `Channel` dataclasses parsed from the config dicts, and the validating boundary between TOML and the rest of the stage. An unknown key is warned about by name; a value that cannot mean anything raises `WatchConfigError` and that one watch is skipped rather than taking the run down. A channel name repeated in one watch is dropped with a warning — delivering to the same destination twice in a run is never what it meant.
+
+### `matcher.py`
+
+Pure `(paper, watch) -> bool`. No I/O, no LLM, so the criteria engine tests against literal dicts. Criteria are AND-combined; an empty list means "no constraint"; within one list criterion the test is `any`.
+
+### `service.py`
+
+`run_notify()` — select, page, dispatch, record — plus `collect_matches()` and `pending_counts()`.
+
+The rule that shapes it: **the delivery cap must not become a SQL `LIMIT`.** SQL narrows on what is indexable (score floors, tier exclusion, the not-already-sent anti-join, the ordering); the matcher applies keywords, tags, sources, journal and study design in Python afterwards. `collect_matches()` scans in `NOTIFY_SCAN_CHUNK`-sized chunks until one comes back short and returns *every* pending match; `_deliver()` slices the batch off that.
+
+### `renderer.py`
+
+Renders a batch into the `notify_*` templates.
+
+### `channels/`
+
+Delivery adapters, dispatched by a channel's `kind`. `email.py` wraps `digest/sender.py` over the `[email]` SMTP settings; `matrix.py` is one authenticated HTTP PUT with no SDK.
+
+Adapters raise `ChannelError` rather than returning a boolean — `send_email` returns `False` on failure, and a `False` read as success would mark papers sent and drop them out of the derived queue with nobody having been told. `ChannelError` is the **only** exception `run_notify()` treats as "this delivery did not happen", so every transport failure has to be converted into one.
 
 ## `bmnews/digest/`
 
@@ -157,10 +182,21 @@ Database schema and operations. See [Database](database.md) for full details.
 
 ### `schema.py`
 
-- `SCHEMA_SQLITE` / `SCHEMA_POSTGRESQL` — DDL strings for all tables
-- `init_db(conn)` — creates tables if they don't exist
+- `init_db(conn)` — applies pending migrations via `bmlib.db.run_migrations`; idempotent, called on every connection open
 - `open_db(config)` — returns a DB-API connection based on config
+
+No DDL lives here.
+
+### `migrations.py`
+
+The six versioned migrations, each with a pair of DDL strings (SQLite / PostgreSQL). Migration 4 moved paper storage onto `bmlib.publications` and dropped bmnews's `papers` table; it is destructive and one-way.
 
 ### `operations.py`
 
-Pure-function CRUD operations. Every function takes `conn` as the first argument. See [Database](database.md) for the full operation reference.
+Pure-function CRUD. Every function takes `conn` as the first argument, writes are keyword-only, and `_row_to_paper()` is the single place a row becomes a paper dict. See [Database](database.md) for the full operation reference.
+
+## `bmnews/gui/`
+
+The desktop GUI: pywebview supplies the native window, Flask the HTTP backend, HTMX the partial-page updates. `app.py` is the Flask factory and registers four blueprints (`papers`, `settings`, `pipeline`, `watches`); `jobs.py` owns the single lock, status dict and daemon thread that a pipeline run and a notification delivery both go through, so one is refused rather than raced while the other is busy.
+
+It is documented in `bmnews/gui/CLAUDE.md`, which loads automatically when you work under `bmnews/gui/`, rather than being repeated here.

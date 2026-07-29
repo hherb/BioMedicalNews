@@ -19,6 +19,7 @@ stays a pure function so the criteria engine tests against literal dicts.
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -110,7 +111,12 @@ class Watch:
         sources: Registry source names, any of which qualifies.
         journals: Journal names, compared case-insensitively.
         study_designs: :class:`~bmlib.quality.StudyDesign` values, e.g. ``rct``.
-        channels: Names of channels under ``[notifications.channels]``.
+        channels: Names of channels under ``[notifications.channels]``. A name
+            repeated in the list is dropped at parse time — the same channel
+            twice in one run is never what it meant. Two *different* names
+            that happen to share a destination stay two deliveries: they are
+            separate queues in ``notifications``, and nothing here reads a
+            channel's settings to notice they agree.
         max_per_run: How many papers one run delivers for this watch. The rest
             stay in the derived queue rather than being dropped.
     """
@@ -158,7 +164,7 @@ class Watch:
             sources=_strings(data.get("sources")),
             journals=_strings(data.get("journals")),
             study_designs=_designs(data.get("study_designs")),
-            channels=_strings(data.get("channels")),
+            channels=_channels(f"watch {name!r}", data.get("channels")),
             max_per_run=_max_per_run(data.get("max_per_run")),
         )
 
@@ -209,15 +215,21 @@ def resolve_channels(watch: Watch, channels: dict[str, Channel]) -> list[Channel
     the user believes they are being alerted and they are not, which is worth
     saying loudly even though it cannot be fixed here.
 
+    Repeats are dropped again here, and silently: :func:`_channels` has already
+    done it, with the warning, for every watch that came from a config file —
+    which is all of them in production. This is what makes that a structural
+    guarantee rather than a convention, since :class:`Watch` is exported and a
+    directly constructed one would otherwise have both callers deliver twice.
+
     Args:
         watch: The watch whose ``channels`` list is being resolved.
         channels: Every parsed channel, keyed by name.
 
     Returns:
-        The resolved channels, in the order the watch lists them.
+        The resolved channels, in the order the watch lists them, each once.
     """
     resolved = []
-    for name in watch.channels:
+    for name in dict.fromkeys(watch.channels):
         channel = channels.get(name)
         if channel is None:
             logger.error(
@@ -321,6 +333,36 @@ def _designs(value: Any) -> tuple[str, ...]:
     if unknown:
         raise WatchConfigError(f"unknown study design(s): {', '.join(sorted(unknown))}")
     return tuple(design.lower() for design in designs)
+
+
+def _channels(subject: str, value: Any) -> tuple[str, ...]:
+    """Coerce the channel list, dropping repeats and naming what it dropped.
+
+    A repeated name is always a mistake — ``["mail", "mail"]`` can mean nothing
+    other than ``["mail"]`` — and acting on one delivers twice. Both callers
+    iterate :func:`resolve_channels`, so ``run_notify()`` sends a second batch
+    to the same destination in the same run (the queue is re-derived, so it is
+    the *next* batch, which silently doubles ``max_per_run``) and
+    ``pending_counts()`` reports the pair twice, which the GUI pane renders as
+    two identical rows and sums into its total.
+
+    Corrected here as well as in :func:`resolve_channels` so that every caller
+    sees the corrected list, and so the warning is emitted once, at parse time,
+    rather than on every delivery run. Only an exact repeat of a *name* is
+    caught: two differently named channels pointing at one address are two
+    deliveries by construction, because ``notifications`` keys retry state on
+    the channel name.
+    """
+    names = _strings(value)
+    unique = tuple(dict.fromkeys(names))
+    if len(unique) != len(names):
+        repeated = sorted(name for name, count in Counter(names).items() if count > 1)
+        logger.warning(
+            "%s repeats channel(s) %s — each is delivered to once",
+            subject,
+            ", ".join(repeated),
+        )
+    return unique
 
 
 def _strings(value: Any) -> tuple[str, ...]:

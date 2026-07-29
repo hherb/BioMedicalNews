@@ -216,6 +216,24 @@ class TestWatchParsing:
     def test_blank_list_entries_are_dropped(self):
         assert Watch.from_config("w", {"tags": ["melanoma", "", "  "]}).tags == ("melanoma",)
 
+    def test_a_repeated_channel_is_dropped_and_named(self, caplog):
+        """Both delivery callers iterate the list, so a repeat sends twice."""
+        with caplog.at_level(logging.WARNING):
+            watch = Watch.from_config("w", {"channels": ["mail", "mail"]})
+        assert watch.channels == ("mail",)
+        assert "repeats" in caplog.text
+        assert "mail" in caplog.text
+
+    def test_a_repeated_channel_keeps_its_first_position(self):
+        watch = Watch.from_config("w", {"channels": ["matrix", "mail", "matrix"]})
+        assert watch.channels == ("matrix", "mail")
+
+    def test_distinct_channels_produce_no_warning(self, caplog):
+        """Nothing to correct, so the parse says nothing at all."""
+        with caplog.at_level(logging.WARNING):
+            Watch.from_config("w", {"channels": ["matrix", "mail"]})
+        assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
     def test_an_unknown_criterion_is_warned_about_by_name(self, caplog):
         """A misspelled criterion is a criterion not applied — say so loudly."""
         with caplog.at_level(logging.WARNING):
@@ -334,3 +352,14 @@ class TestParsingCollections:
             resolved = resolve_channels(_watch(channels=("mail", "gone")), channels)
         assert [c.name for c in resolved] == ["mail"]
         assert "gone" in caplog.text
+
+    def test_a_directly_built_watch_resolves_each_channel_once(self):
+        """`_watch()` bypasses the parse, which is where repeats are dropped.
+
+        `Watch` is exported, so the de-duplication cannot rely on every
+        instance having come through `from_config()` — both delivery callers
+        iterate this list, and a repeat here sends the next batch twice.
+        """
+        channels = parse_channels({"mail": {"kind": "email"}})
+        resolved = resolve_channels(_watch(channels=("mail", "mail")), channels)
+        assert [c.name for c in resolved] == ["mail"]

@@ -5,9 +5,11 @@
 ```bash
 git clone https://github.com/hherb/BioMedicalNews.git
 cd BioMedicalNews
-pip install -e ".[dev]"
-pytest
+uv pip install -e ".[all]"
+uv run pytest
 ```
+
+Always use `uv` to install, upgrade or otherwise manipulate packages here — never `pip` directly.
 
 ## Code style
 
@@ -37,7 +39,7 @@ ruff format bmnews/ tests/
 All public functions should have type hints:
 
 ```python
-def upsert_paper(conn: Any, *, doi: str, title: str, ...) -> int:
+def store_paper(conn: Any, *, title: str, doi: str | None = None, ...) -> int:
 ```
 
 Use `from __future__ import annotations` at the top of every module for PEP 604 union syntax (`X | Y`).
@@ -82,6 +84,25 @@ Use keyword-only args (after `*`) for functions that write data. This prevents p
 def save_score(conn: Any, *, paper_id: int, relevance_score: float, ...) -> None:
 ```
 
+### Two database traps worth knowing
+
+**Never rely on `cursor.lastrowid` after an upsert.** SQLite leaves it pointing at the last row actually *inserted* when `ON CONFLICT` takes the UPDATE path, so the id you get back may belong to a different paper. Look the row up by its natural key instead — `store_paper()` re-reads by normalised DOI/PMID for exactly this reason.
+
+**Decode a paper row exactly once.** `_row_to_paper()` is the only place the JSON array columns become lists and the outbound `url` is derived. Callers, templates and the scorer all receive real lists; nothing re-parses JSON downstream.
+
+### Closing connections
+
+Use `contextlib.closing` so a raised exception cannot leak the handle:
+
+```python
+with closing(open_db(config)) as conn:
+    ...
+```
+
+### No magic numbers
+
+Fixed behavioural values live in `bmnews/constants.py`; anything a *user* should be able to tune belongs in `bmnews/config.py`. The evidence hierarchy and its scores live in `bmlib.quality`, not in either.
+
 ### Logging
 
 Use module-level loggers:
@@ -104,11 +125,15 @@ This project is AGPL-3.0. New files should include a brief module docstring but 
 
 ## How to add a new fetcher source
 
-Adding a new paper source (e.g., PubMed, Semantic Scholar):
+**Every** source resolves through bmlib's registry — there is no second dispatch path in `pipeline.run_sync()`, and adding one would bypass the resume tracking, cross-source dedupe and per-day transaction that `sync()` provides.
+
+The preferred home for a new source is **bmlib itself**. Once registered there, bmnews picks it up with no code change at all: add its name to `config.sources.enabled`.
+
+If the source has to live in bmnews, follow the Europe PMC pattern:
 
 ### 1. Create the fetcher module
 
-Create `bmnews/fetchers/newsource.py`:
+Create `bmnews/fetchers/newsource.py` with a function matching the registry calling convention — one target day per call, emitting records through `on_record` rather than returning a list:
 
 ```python
 """Fetcher for NewSource.
@@ -119,11 +144,10 @@ Uses the NewSource API: https://api.newsource.org/
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
+from datetime import date
+from typing import Any, Callable
 
-import httpx
-
-from bmnews.fetchers.base import FetchedPaper
+from bmlib.publications import FetchedRecord, FetchResult
 
 logger = logging.getLogger(__name__)
 
@@ -131,79 +155,55 @@ API_URL = "https://api.newsource.org/search"
 
 
 def fetch_newsource(
-    lookback_days: int = 7,
-    timeout: float = 30.0,
-) -> list[FetchedPaper]:
-    """Fetch recent papers from NewSource."""
-    end = date.today()
-    start = end - timedelta(days=lookback_days)
+    client: Any,
+    target_date: date,
+    *,
+    on_record: Callable[[FetchedRecord], None],
+    on_progress: Callable[..., None] | None = None,
+    **config: Any,
+) -> FetchResult:
+    """Fetch one day of papers from NewSource."""
+    date_str = target_date.isoformat()
+    count = 0
 
-    papers: list[FetchedPaper] = []
-
-    with httpx.Client(timeout=timeout) as client:
-        # Implement API call and pagination
-        resp = client.get(API_URL, params={...})
-        resp.raise_for_status()
-
-        for item in resp.json()["results"]:
-            paper = FetchedPaper(
-                doi=item["doi"],
+    for item in _pages(client, target_date, **config):
+        on_record(
+            FetchedRecord(
                 title=item["title"],
-                authors=item["authors"],
-                abstract=item["abstract"],
-                url=f"https://doi.org/{item['doi']}",
                 source="newsource",
-                published_date=item["date"],
-                categories=item.get("subject", ""),
-                metadata={...},  # Source-specific fields
+                # Empty optionals are None, not "" — so a later merge from
+                # another source can fill them in.
+                doi=item.get("doi") or None,
+                pmid=item.get("pmid") or None,
+                abstract=item.get("abstract", ""),
+                authors=item.get("authors", []),
+                publication_date=item["date"],
+                # Feeds bmlib's free Tier-1 quality classification — dropping
+                # it forces every paper onto the LLM classifier instead.
+                publication_types=item.get("types", []),
+                extras={...},  # Source-specific fields with no column
             )
-            papers.append(paper)
+        )
+        count += 1
 
-    logger.info("Fetched %d papers from NewSource", len(papers))
-    return papers
+    return FetchResult(
+        source="newsource", date=date_str, record_count=count, status="completed"
+    )
 ```
 
-### 2. Register in `__init__.py`
+A day that fails should return `FetchResult(..., status="failed", error=str(exc))` rather than raising: that is what `download_days` records so the day is re-fetched next run instead of being silently lost.
 
-```python
-# bmnews/fetchers/__init__.py
-from bmnews.fetchers.newsource import fetch_newsource
+### 2. Register it
 
-__all__ = [..., "fetch_newsource"]
-```
+In `bmnews/fetchers/__init__.py`, add a `SourceDescriptor` and a `register_source()` call inside `register_local_sources()`. Declare the options the fetcher accepts so they can be set per-source in config.
 
-### 3. Add config toggle
+### 3. That's it for wiring
 
-In `config.py`, add to `SourcesConfig`:
+No `SourcesConfig` field, no pipeline branch. The source is now selectable by name in `config.sources.enabled`, appears in the GUI settings list, and takes keyword options from `config.sources.source_options.<name>`.
 
-```python
-@dataclass
-class SourcesConfig:
-    ...
-    newsource: bool = False
-```
+### 4. Add tests
 
-Add to `DEFAULT_CONFIG_TOML`:
-
-```toml
-[sources]
-...
-newsource = false
-```
-
-### 4. Wire into the pipeline
-
-In `pipeline.py`, add to `run_fetch()`:
-
-```python
-if config.sources.newsource:
-    logger.info("Fetching from NewSource...")
-    papers.extend(fetch_newsource(lookback_days=lookback))
-```
-
-### 5. Add tests
-
-In `tests/test_fetchers.py`, mock the HTTP call and verify `FetchedPaper` output.
+In `tests/test_fetchers.py`, pass a fake HTTP client returning canned responses, verify the emitted `FetchedRecord` fields, and assert the source is present in bmlib's registry.
 
 ## How to add a new LLM provider
 
@@ -239,8 +239,9 @@ refactor: extract shared fetcher pagination logic
 1. Fork the repository
 2. Create a feature branch from `main`
 3. Make your changes
-4. Run tests: `pytest`
-5. Run lint: `ruff check bmnews/ tests/`
+4. Run tests: `uv run pytest`. If you touched `db/operations.py` or `db/migrations.py`, run the PostgreSQL half too — it skips silently without a DSN, and that is where the backend-specific SQL lives:
+   `BMNEWS_TEST_PG_DSN=… uv run pytest tests/test_db.py`
+5. Run lint: `uv run ruff check bmnews/ tests/` and `uv run ruff format --check bmnews/ tests/`
 6. Push and open a PR against `main`
 
 PRs should include:
