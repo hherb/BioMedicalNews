@@ -286,14 +286,14 @@ Test files:
 |---|---|
 | `test_config.py` | Config loading, TOML parsing, backward-compat defaults |
 | `test_db.py` | All database operations, migrations, storing/dedup, filtering, tagging, digests, paper extras, digest selection filters, notification candidate selection and batch recording (including its rollback), the v3 → v4 data migration, migration 6's cache purge, and NULL text columns decoding to strings — **run against SQLite and PostgreSQL** |
-| `backends.py` / `conftest.py` | Not tests: the per-backend parameterisation `test_db.py` opts into |
+| `backends.py` / `conftest.py` | Not tests: the per-backend parameterisation `test_db.py` opts into, plus the suite-wide autouse fixture that returns `bmnews.gui.jobs`' process state to idle around every test — forcing its lock open if a worker outlived the test, since one leaked job would otherwise make every later `jobs.start()` refuse |
 | `test_digest.py` | HTML/text digest rendering |
 | `test_fetchers.py` | Europe PMC fetcher + its registration in bmlib's source registry |
 | `test_fulltext_integration.py` | Fulltext service integration (Europe PMC/Unpaywall/DOI) |
 | `test_gui_app.py` | Flask blueprints, HTMX responses, paper queries, pipeline status, the View PDF button, and the outbound-URL scheme allowlist |
 | `test_gui_helpers.py` | Abstract HTML formatting |
 | `test_gui_jobs.py` | The shared background job — refusal while one runs without clobbering its progress line, a raising target freeing the lock, a target that forgets to clear `running` |
-| `test_gui_notify.py` | The watches pane — the count join, an unresolved channel and an unparseable watch (both produce no counts at all) versus a disabled watch (counts render, buttons don't), delivery and drain, failed-delivery reporting, 404 on an unknown watch, and the 204-while-running refresh |
+| `test_gui_notify.py` | The watches pane — the count join with delivered/matching/remaining pinned in column order, an unresolved channel and an unparseable watch (both produce no counts at all) versus a disabled watch (counts render, buttons don't), a partly-resolved channel list naming what was dropped, watches that all fail to parse not reading as "none configured", the no-criteria summary, delivery and drain, failed-delivery and nothing-to-notify reporting, a delivery refused by a running job saying so, 404 on an unknown watch, and the 204-while-running refresh |
 | `test_notify.py` | Every watch criterion in isolation against literal paper dicts; watch/channel parsing, validation and unknown-key warnings |
 | `test_notify_channels.py` | Channel adapters and the four templates: Matrix endpoint/auth/body shape, deterministic `txnId`, alias resolution, encrypted-room refusal, transport errors arriving as `ChannelError`, non-https homeserver refusal, HTML escaping of third-party metadata; email over mocked SMTP, including a `False` return raising |
 | `test_notify_service.py` | `run_notify` — paging with no gaps or repeats, chunk-boundary exhaustion, dedup, per-channel retry, dry run leaving `sent_total` unmoved, contradictory CLI batch sizes, and the `bmnews notify` CLI. Plus `collect_matches` directly: scanning past the chunk window, and not carrying the full-text cache. File-backed SQLite, since each run opens its own connection |

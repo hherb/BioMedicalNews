@@ -50,7 +50,11 @@ drain it. Rows are built from `parse_watches()` with `service.pending_counts()`
 joined **onto** them, not from the counts alone — a watch naming no configured
 channel produces no reports and would otherwise vanish, and one that fails to
 parse is skipped by `parse_watches()` with only a log line, so the pane diffs
-the configured names against the parsed ones to still list it. A disabled
+the configured names against the parsed ones to still list it. A channel list
+that resolves only *partly* is the same failure at smaller scale —
+`resolve_channels()` drops the unknown name and returns the rest, leaving a
+healthy-looking table — so the row also diffs the names the watch asked for
+against the reports that came back, and names what was dropped. A disabled
 watch is different again: `pending_counts()` reports it deliberately (knowing
 what it would send is the point of being able to look), so its counts render,
 but it earns no delivery buttons. Delivery runs through `gui/jobs.py`,

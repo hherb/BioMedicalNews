@@ -12,7 +12,10 @@ Desktop app: pywebview (native window) + Flask (HTTP backend) + HTMX (frontend i
   `delivered / matching / remaining`, plus buttons to deliver one batch or drain the
   queue. Rows are built from `parse_watches()` with the counts joined onto them, so a
   watch that names no configured channel, or that fails to parse, is still shown rather
-  than silently absent. Creating and editing watches stays in `config.toml`
+  than silently absent. A watch whose channel list resolves only *partly* names the
+  dropped ones beside its table, and a delivery refused because another job holds the
+  lock says so instead of looking like it worked. Creating and editing watches stays in
+  `config.toml`
 - **One background job** — `gui/jobs.py` owns the lock, status and daemon thread that
   the pipeline routes and the watches pane share, so a delivery cannot race a scoring run
 - **Fulltext retrieval** — on-demand via `bmlib.fulltext.FullTextService`, seeded with the URLs sync recorded in `fulltext_sources` and falling back to Europe PMC → Unpaywall → DOI; JATS XML parsed to HTML; cached in `paper_extras.fulltext_html`. When the text was extracted from a PDF, the reading pane offers **View PDF** alongside it. Every outbound URL passes `_safe_url()` first — these come from upstream services, and escaping stops attribute injection but not a `javascript:` payload
