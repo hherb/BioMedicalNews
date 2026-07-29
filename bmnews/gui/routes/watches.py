@@ -66,6 +66,11 @@ class WatchRow:
             "Notify N more".
         channels: Its queues, one per resolved channel. Empty when none of its
             channel names matches a configured channel.
+        unresolved: The channel names it asks for that match no configured
+            channel, and so were dropped with nothing but a log line to say
+            so. Rendered beside the table; when *every* name is unresolved
+            ``channels`` is empty and the whole-watch notice covers it
+            instead, so this is only shown for the partial case.
         remaining: Pending papers summed across channels.
         deliverable: Whether the delivery buttons are offered. False whenever
             pressing one would do nothing: notifications switched off, the
@@ -77,6 +82,7 @@ class WatchRow:
     criteria: str
     max_per_run: int
     channels: tuple[ChannelRow, ...]
+    unresolved: tuple[str, ...]
     remaining: int
     deliverable: bool
 
@@ -151,9 +157,12 @@ def rows() -> Response | str:
         return Response(status=204)
 
     config: AppConfig = current_app.config["BMNEWS_CONFIG"]
-    watch_rows, _ = _build_rows(config)
+    watch_rows, unreadable = _build_rows(config)
+    # ``unreadable`` reaches watches_view.html's include for free, but this
+    # route renders the fragment on its own: without it a page whose every
+    # watch failed to parse would go back to claiming none are configured.
     return (
-        render_template("fragments/watch_list.html", rows=watch_rows)
+        render_template("fragments/watch_list.html", rows=watch_rows, unreadable=unreadable)
         + '<div id="watch-poller" hx-swap-oob="innerHTML"></div>'
     )
 
@@ -197,6 +206,13 @@ def _build_rows(config: AppConfig) -> tuple[list[WatchRow], list[str]]:
             )
             for report in counts.get(watch.name, ())
         )
+        # resolve_channels() logs an unknown channel name and skips it, then
+        # returns the rest — so a watch naming one good channel and one typo
+        # renders a perfectly healthy-looking table. Reports for a watch come
+        # only from that function's output, so the resolved names are always a
+        # subset of the ones asked for and this diff cannot cry wolf.
+        resolved = {channel.name for channel in channels}
+        unresolved = tuple(name for name in watch.channels if name not in resolved)
         remaining = sum(channel.remaining for channel in channels)
         rows.append(
             WatchRow(
@@ -205,6 +221,7 @@ def _build_rows(config: AppConfig) -> tuple[list[WatchRow], list[str]]:
                 criteria=_describe(watch),
                 max_per_run=watch.max_per_run,
                 channels=channels,
+                unresolved=unresolved,
                 remaining=remaining,
                 deliverable=(
                     config.notifications.enabled
@@ -265,12 +282,14 @@ def _start_delivery(name: str, *, drain: bool) -> str:
             reports = run_notify(config, watch=name, drain=drain, on_progress=jobs.progress)
         jobs.status().update(running=False, **_terminal(name, reports))
 
-    jobs.start(
+    started = jobs.start(
         message=f"Notifying {name}...",
         target=_run,
         error_label=f"Notification error for {name}",
     )
-    return jobs.render_status_bar() + _oob_poller()
+    # The poller goes out either way: when the *blocking* job ends, the counts
+    # still need refreshing.
+    return jobs.render_status_bar() + _oob_poller() + _oob_message(started)
 
 
 def _terminal(name: str, reports: list[DeliveryReport]) -> dict[str, str]:
@@ -309,3 +328,38 @@ def _oob_poller() -> str:
     """
     poller = render_template("fragments/watch_poller.html")
     return f'<div id="watch-poller" hx-swap-oob="innerHTML">{poller}</div>'
+
+
+def _oob_message(started: bool) -> str:
+    """An OOB swap saying whether the click actually started anything.
+
+    ``jobs.start`` refuses while another job holds the lock, and — unlike the
+    pipeline's Fetch & Score button, which ``status_bar.html`` stops rendering
+    while a job runs — the delivery buttons stay on screen throughout. Without
+    this slot the refused click returns the *running* job's progress line and
+    nothing anywhere says the delivery never happened.
+
+    The refusal deliberately does not go through :func:`jobs.status`: writing it
+    there would overwrite the running job's live progress line, which
+    ``jobs.start`` avoids on purpose (see its comment).
+
+    Args:
+        started: What ``jobs.start`` returned. That is False for a held lock
+            *or* for a thread that could not be spawned at all; the notice
+            names the first, which is the only one reachable short of the
+            process running out of threads — and that one puts its own error
+            in the status bar rendered beside this.
+
+    Returns:
+        An OOB swap clearing ``#watch-message`` when the job started, or
+        filling it with the refusal notice when it did not.
+    """
+    notice = (
+        ""
+        if started
+        else (
+            '<p class="watch-notice error">A background job is already running — this '
+            "delivery did not start. Try again when it finishes.</p>"
+        )
+    )
+    return f'<div id="watch-message" hx-swap-oob="innerHTML">{notice}</div>'

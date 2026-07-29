@@ -19,6 +19,9 @@
         {% include "fragments/watch_list.html" %}
     </div>
 
+    {# Filled by an OOB swap when a delivery click is refused, emptied when it starts. #}
+    <div id="watch-message"></div>
+
     <div id="watch-poller">
         {% if polling %}{% include "fragments/watch_poller.html" %}{% endif %}
     </div>
