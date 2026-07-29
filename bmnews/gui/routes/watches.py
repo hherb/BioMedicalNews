@@ -280,7 +280,10 @@ def _start_delivery(name: str, *, drain: bool) -> str:
     def _run() -> None:
         with app.app_context():
             reports = run_notify(config, watch=name, drain=drain, on_progress=jobs.progress)
-        jobs.status().update(running=False, **_terminal(name, reports))
+        # `running` is left alone: jobs.start()'s finally block clears it once
+        # the lock is actually released, and clearing it here would open a
+        # window in which running() reads False while the lock is still held.
+        jobs.status().update(**_terminal(name, reports))
 
     started = jobs.start(
         message=f"Notifying {name}...",

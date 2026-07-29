@@ -49,8 +49,10 @@ def run() -> str:
                 on_progress=_progress_with_refresh,
                 on_scored=_scored_paper_ids.append,
             )
+        # `running` is left alone: jobs.start()'s finally block clears it once
+        # the lock is actually released, and clearing it here would open a
+        # window in which running() reads False while the lock is still held.
         jobs.status().update(
-            running=False,
             message="Pipeline complete — papers fetched, scored, and digested.",
             status="success",
             refresh_list=True,
@@ -89,8 +91,8 @@ def resume() -> str:
                 on_progress=jobs.progress,
                 on_scored=_scored_paper_ids.append,
             )
+        # See the note in run(): jobs.start() clears `running` for us.
         jobs.status().update(
-            running=False,
             message=f"Resumed scoring complete — {scored} papers scored.",
             status="success",
         )
