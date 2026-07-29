@@ -4,12 +4,15 @@ Monitoring and delivery only. Creating and editing watches stays in
 ``config.toml`` — see ``docs/plans/2026-07-29-gui-watches-pane-design.md``.
 
 The rows are built from :func:`~bmnews.notify.watches.parse_watches` with the
-counts joined **onto** them, rather than from the counts alone. Three
+counts joined **onto** them, rather than from the counts alone. Two
 configurations produce no counts at all and would otherwise render an empty or
-misleading pane: a watch naming no configured channel, a watch that fails to
-parse, and a watch that is switched off. Each of those is a case where the user
-believes they are being alerted and are not, which is the whole thing this pane
-exists to make visible.
+misleading pane: a watch naming no configured channel, and a watch that fails
+to parse. Both are cases where the user believes they are being alerted and are
+not, which is the whole thing this pane exists to make visible.
+
+A disabled watch is not one of them: :func:`~bmnews.notify.service.pending_counts`
+includes disabled watches deliberately, so their counts *do* render — what such
+a watch does not get is delivery buttons.
 """
 
 from __future__ import annotations
