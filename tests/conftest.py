@@ -2,11 +2,51 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 
 import pytest
 
 from tests.backends import backend_params, use_backend
+
+logger = logging.getLogger(__name__)
+
+
+def _reset_jobs() -> None:
+    """Wait out any running GUI job, then force the shared state back to idle.
+
+    A wait that times out means the worker is still holding ``jobs._lock``, so
+    every later ``jobs.start()`` would return False and one slow test would
+    cascade into a run of unrelated-looking failures. Prising the lock open
+    from another thread is wrong in production and right here — the state is
+    being discarded either way, and a plain ``Lock`` permits it.
+    """
+    # Imported inside the fixture so collecting the non-GUI suites does not
+    # pay for Flask.
+    from bmnews.gui import jobs
+
+    if not jobs.wait_for_idle(5.0):
+        logger.error("A GUI background job outlived its test — forcing the shared state idle")
+        if jobs._lock.locked():
+            try:
+                jobs._lock.release()
+            except RuntimeError:  # Released between the check and the call.
+                pass
+    jobs.status().update(running=False, message="Ready", status="idle", refresh_list=False)
+
+
+@pytest.fixture(autouse=True)
+def idle_jobs() -> Iterator[None]:
+    """Leave the GUI's module-level job state clean around every test.
+
+    Autouse for the whole suite rather than one module: ``bmnews.gui.jobs``
+    owns process state, and any test driving ``POST /pipeline/run`` or a
+    watches delivery leaks a thread, a lock and a status line into whatever
+    runs next.
+    """
+    _reset_jobs()
+    yield
+    _reset_jobs()
 
 
 @pytest.fixture(params=backend_params())

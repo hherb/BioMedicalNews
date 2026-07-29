@@ -5,19 +5,10 @@ from __future__ import annotations
 import threading
 from unittest.mock import patch
 
-import pytest
-
 from bmnews.gui import jobs
 
-
-@pytest.fixture(autouse=True)
-def idle_jobs():
-    """Leave the module-level job state clean around every test."""
-    jobs.wait_for_idle(5.0)
-    jobs.status().update(running=False, message="Ready", status="idle", refresh_list=False)
-    yield
-    jobs.wait_for_idle(5.0)
-    jobs.status().update(running=False, message="Ready", status="idle", refresh_list=False)
+# The autouse ``idle_jobs`` fixture that resets this module's process state
+# lives in tests/conftest.py, so every suite touching the GUI gets it.
 
 
 class TestStart:

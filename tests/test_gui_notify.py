@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import re
+import threading
+from unittest.mock import Mock
+
 import pytest
 from bmlib.db import connect_sqlite
 
@@ -10,15 +14,19 @@ from bmnews.db.schema import init_db
 from bmnews.gui import jobs
 from bmnews.notify.service import DeliveryReport
 
+# The autouse ``idle_jobs`` fixture that resets jobs' process state lives in
+# tests/conftest.py, so every suite touching the GUI gets it.
 
-@pytest.fixture(autouse=True)
-def idle_jobs():
-    """Leave the module-level job state clean around every test."""
-    jobs.wait_for_idle(5.0)
-    jobs.status().update(running=False, message="Ready", status="idle", refresh_list=False)
-    yield
-    jobs.wait_for_idle(5.0)
-    jobs.status().update(running=False, message="Ready", status="idle", refresh_list=False)
+
+def channel_row(name: str, delivered: int, matching: int, remaining: int) -> re.Pattern[str]:
+    """A pattern matching one channel row *in column order*.
+
+    Substring assertions on the numbers alone pass just as happily when
+    delivered, matching and remaining are rendered in the wrong columns, which
+    is the one way this table can lie.
+    """
+    cells = (name, delivered, matching, remaining)
+    return re.compile(r"\s*".join(f"<td>{cell}</td>" for cell in cells))
 
 
 @pytest.fixture
@@ -71,10 +79,8 @@ class TestPane:
         assert resp.status_code == 200
         body = resp.data.decode()
         assert "melanoma" in body
-        assert "mailbox" in body
-        assert ">3<" in body  # delivered
-        assert ">12<" in body  # matching
-        assert ">9<" in body  # remaining
+        # channel, delivered, matching, remaining — in that order.
+        assert channel_row("mailbox", 3, 12, 9).search(body)
 
     def test_shows_the_criteria_summary(self, client, monkeypatch):
         monkeypatch.setattr("bmnews.notify.service.pending_counts", lambda config: [report()])
@@ -97,6 +103,31 @@ class TestPane:
 
         assert "orphan" in body
         assert "no configured channel" in body
+
+    def test_a_watch_whose_channels_resolve_only_partly_names_the_dropped_ones(
+        self, client, config, monkeypatch
+    ):
+        # resolve_channels() logs the bad name and returns the rest, so this
+        # watch renders one healthy-looking row and "typo" vanishes. That is
+        # the exact failure the pane exists to prevent.
+        config.notifications.watches["melanoma"]["channels"] = ["mailbox", "typo"]
+        monkeypatch.setattr("bmnews.notify.service.pending_counts", lambda config: [report()])
+
+        body = client.get("/watches").data.decode()
+
+        assert channel_row("mailbox", 3, 12, 9).search(body)
+        assert "typo" in body
+        assert "nothing will be delivered there" in body
+
+    def test_a_watch_with_no_criteria_says_it_matches_everything(self, client, config, monkeypatch):
+        config.notifications.watches = {"everything": {"channels": ["mailbox"]}}
+        monkeypatch.setattr(
+            "bmnews.notify.service.pending_counts", lambda config: [report(watch="everything")]
+        )
+
+        body = client.get("/watches").data.decode()
+
+        assert "no criteria — matches every scored paper" in body
 
     def test_an_unparseable_watch_is_named(self, client, config, monkeypatch):
         # parse_watches() skips this one with an ERROR log; without the diff
@@ -150,6 +181,22 @@ class TestPane:
         body = client.get("/watches").data.decode()
 
         assert "No watches configured" in body
+
+    def test_watches_that_all_fail_to_parse_do_not_read_as_none_configured(
+        self, client, config, monkeypatch
+    ):
+        # Telling the user to add a watch when they have added two, and both
+        # are broken, sends them to do the thing they already did.
+        config.notifications.watches = {"a": {"min_relevance": "very"}, "b": {"max_per_run": 0}}
+        monkeypatch.setattr("bmnews.notify.service.pending_counts", lambda config: [])
+
+        page = client.get("/watches").data.decode()
+        rows = client.get("/watches/rows").data.decode()
+
+        for body in (page, rows):
+            assert "No watches configured" not in body
+            assert "No readable watches" in body
+        assert "could not be read" in page
 
     def test_the_tab_is_in_the_shell(self, client):
         body = client.get("/").data.decode()
@@ -231,9 +278,16 @@ class TestDelivery:
         assert "smtp down" in jobs.status()["message"]
         assert jobs.running() is False
 
-    def test_a_second_delivery_is_refused_while_one_runs(self, client, monkeypatch):
-        import threading
+    def test_an_empty_run_reports_nothing_to_notify(self, client, monkeypatch):
+        monkeypatch.setattr("bmnews.notify.service.run_notify", lambda config, **kwargs: [])
 
+        client.post("/watches/melanoma/notify")
+
+        assert jobs.wait_for_idle(5.0) is True
+        assert jobs.status()["message"] == "melanoma: nothing to notify"
+        assert jobs.status()["status"] == "success"
+
+    def test_a_second_delivery_is_refused_while_one_runs(self, client, monkeypatch):
         release = threading.Event()
         started = threading.Event()
         runs = []
@@ -255,14 +309,52 @@ class TestDelivery:
         assert jobs.wait_for_idle(5.0) is True
         assert runs == ["melanoma"]
 
+    def test_a_refused_delivery_says_it_did_not_start(self, client, monkeypatch):
+        # The delivery buttons stay on screen during a pipeline run, so this is
+        # the state a real click lands in. Without a notice the response is the
+        # *blocking* job's progress line and the click looks like it worked.
+        run_notify = Mock()
+        monkeypatch.setattr("bmnews.notify.service.run_notify", run_notify)
+
+        release = threading.Event()
+        started = threading.Event()
+
+        def _blocker() -> None:
+            started.set()
+            release.wait(5.0)
+
+        assert jobs.start(message="Busy...", target=_blocker, error_label="Job error") is True
+        started.wait(5.0)
+        try:
+            body = client.post("/watches/melanoma/notify").data.decode()
+        finally:
+            release.set()
+
+        assert jobs.wait_for_idle(5.0) is True
+        assert "this delivery did not start" in body
+        # The poller still goes out: the counts need refreshing when the
+        # blocking job ends.
+        assert 'hx-get="/watches/rows"' in body
+        run_notify.assert_not_called()
+
+    def test_a_started_delivery_clears_the_refusal_slot(self, client, monkeypatch):
+        monkeypatch.setattr("bmnews.notify.service.run_notify", lambda config, **kwargs: [])
+
+        body = client.post("/watches/melanoma/notify").data.decode()
+
+        assert jobs.wait_for_idle(5.0) is True
+        assert '<div id="watch-message" hx-swap-oob="innerHTML"></div>' in body
+
     def test_an_unknown_watch_is_a_404(self, client, monkeypatch):
-        monkeypatch.setattr(
-            "bmnews.notify.service.run_notify",
-            lambda config, **kwargs: pytest.fail("must not be called"),
-        )
+        run_notify = Mock()
+        monkeypatch.setattr("bmnews.notify.service.run_notify", run_notify)
 
         assert client.post("/watches/nosuchwatch/notify").status_code == 404
         assert client.post("/watches/nosuchwatch/notify-all").status_code == 404
+        # Both run on the request thread, so unlike a pytest.fail() inside the
+        # patched callable they cannot be swallowed by jobs.py's broad except.
+        run_notify.assert_not_called()
+        assert jobs.running() is False
 
     def test_the_response_attaches_the_completion_poller(self, client, monkeypatch):
         monkeypatch.setattr("bmnews.notify.service.run_notify", lambda config, **kwargs: [])
@@ -303,7 +395,7 @@ class TestRefresh:
 
         assert resp.status_code == 200
         assert "melanoma" in body
-        assert ">4<" in body
+        assert channel_row("mailbox", 3, 12, 4).search(body)
         # The poller's slot is emptied, which is what stops the polling.
         assert '<div id="watch-poller" hx-swap-oob="innerHTML"></div>' in body
         assert 'hx-get="/watches/rows"' not in body
