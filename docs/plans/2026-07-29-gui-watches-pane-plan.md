@@ -498,7 +498,7 @@ In `tests/test_gui_app.py`, replace `TestPipelineRoute.test_run_pipeline_returns
 - [ ] **Step 7: Run the full suite**
 
 Run: `uv run pytest tests/ -q`
-Expected: PASS, 404 passed (399 before + 5 new), 116 skipped
+Expected: PASS, 405 passed (399 before + 6 new), 116 skipped
 
 - [ ] **Step 8: Lint**
 
@@ -1596,7 +1596,7 @@ Add to the test-file table:
 
 ```markdown
 | `test_gui_jobs.py` | The shared background job — refusal while one runs without clobbering its progress line, a raising target freeing the lock, a target that forgets to clear `running` |
-| `test_gui_notify.py` | The watches pane — the count join, the three configurations that produce no counts (unresolved channel, unparseable watch, disabled watch), delivery and drain, failed-delivery reporting, 404 on an unknown watch, and the 204-while-running refresh |
+| `test_gui_notify.py` | The watches pane — the count join, an unresolved channel and an unparseable watch (both produce no counts at all) versus a disabled watch (counts render, buttons don't), delivery and drain, failed-delivery reporting, 404 on an unknown watch, and the 204-while-running refresh |
 ```
 
 - [ ] **Step 3: `docs/user/usage.md`**
