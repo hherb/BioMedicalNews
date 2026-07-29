@@ -21,9 +21,15 @@ def _reset_jobs() -> None:
     from another thread is wrong in production and right here — the state is
     being discarded either way, and a plain ``Lock`` permits it.
     """
-    # Imported inside the fixture so collecting the non-GUI suites does not
-    # pay for Flask.
-    from bmnews.gui import jobs
+    try:
+        # Imported here rather than at module scope: this fixture is autouse
+        # for the whole suite, and Flask is the optional ``gui`` extra. In an
+        # environment installed as ``.[dev]`` alone the GUI test modules fail
+        # collection on their own imports and the rest of the suite still
+        # runs — which it would not if this raised for every test.
+        from bmnews.gui import jobs
+    except ImportError:
+        return
 
     if not jobs.wait_for_idle(5.0):
         logger.error("A GUI background job outlived its test — forcing the shared state idle")
