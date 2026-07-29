@@ -131,6 +131,19 @@ Net cost: no scans during delivery, exactly one when it finishes. Nothing is
 swapped out-of-band into an element that may not be on the page, and the poller
 dies with the pane if the user switches tabs.
 
+`GET /watches` holds to the same rule, and has to: opening the tab mid-run is
+the one way left to reach the pane without going through the poller, and it
+would otherwise run the exact scan the 204 exists to avoid — for numbers that
+are stale before they reach the screen, since the poller it renders alongside
+is about to replace them. So it skips the counts while `jobs.running()` and
+each table says it is waiting. What it does **not** skip is anything about the
+configuration: which channels a watch resolves to is settled from
+`parse_channels()`, not from the reports, so an unresolved channel name and an
+unreadable watch are still named on a page that gathered no counts at all.
+Telling a user their alerts are misdirected is the pane's whole reason for
+existing; making that answer queue behind a scoring run would be the tail
+wagging the dog.
+
 `jobs.running()` is global rather than per-job, so a pipeline run started while
 the poller is alive holds it at 204 until that run finishes too. That is the
 wanted behaviour, not a compromise: the pipeline's own NOTIFY stage delivers,
@@ -153,6 +166,22 @@ The pane shows no per-failure detail: `pending_counts()` fills only
 `sent_total`, `matching` and `remaining`, and `DeliveryReport` carries no error
 text. Failures surface in the status bar at delivery time and in the log.
 
+One report covers one `(watch, channel)` pair, so **every one of these numbers
+is a paper count only within its own row**. Sum `remaining` across a watch's two
+channels and the answer is deliveries, not papers: the same five papers queued
+for email and for Matrix is ten deliveries. The distinct-paper count cannot be
+recovered from the reports at all — each channel's pending set is "matches minus
+what *that* channel already got", and the union is not derivable from two
+totals.
+
+So the pane renders paper counts only in the per-channel table columns, where
+they are exact. Aggregates are either counted in **notifications** and labelled
+as such — one notification is one paper on one channel, which is precisely the
+grain the `notifications` table records — or not rendered at all. That is why
+the drain button is "Notify all remaining" with no total, and why the terminal
+status line reads "N notification(s) sent". "Notify N more" keeps its number:
+`max_per_run` is per channel, so it stays a paper count.
+
 ## Testing
 
 `tests/test_gui_notify.py`, following the existing GUI pattern — Flask test
@@ -169,10 +198,22 @@ client, `pending_counts` and `run_notify` patched, no SMTP and no HTTP.
 | POST notify | Returns busy status bar; `run_notify` called with the watch name |
 | POST notify-all | `run_notify` called with `drain=True` |
 | POST while a job runs | "already running", `run_notify` not called |
+| POST to a disabled watch | Refused before any job starts, `run_notify` not called |
+| Two channels, one run | Status counts notifications, and says so — never "papers" |
+| Drain button | Carries no total, so it cannot contradict its own table |
+| Slash in a watch name | Survives `urlencode` into the URL and routes back |
+| HTML in a watch name | Escaped in the notice, which is built outside a template |
 | Unknown watch name | 404 |
+| `GET /watches` while running | No scan; tables say so, config notices still render |
 | `/watches/rows` while running | 204, no scan |
 | `/watches/rows` when idle | Rows, poller absent |
 | `run_notify` raises | Error status published, lock released (a second POST succeeds) |
+
+One class runs with **nothing** patched, against a real file-backed SQLite
+database seeded with scored papers: the pane's counts, then a drain, then the
+counts again. The patched tests pin the rendering, which is where the bugs
+were, but a `pending_counts()` whose shape drifted would sail through all of
+them.
 
 The `jobs.py` extraction is covered by the existing pipeline route tests, which
 must keep passing unchanged apart from the sleep-poll they no longer need.

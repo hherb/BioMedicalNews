@@ -62,8 +62,20 @@ extracted from the pipeline routes so both share one lock, one status dict
 and one daemon thread — a delivery must not race a scoring run on the same
 database. Counts refresh once, when the job finishes: the poller gets a 204
 while one is running rather than re-scanning every candidate every two
-seconds against a database that job is still writing to. Nothing else
+seconds against a database that job is still writing to, and opening the tab
+mid-run skips the scan for the same reason and says so in place of the table.
+Which channels a watch resolves to is settled from `parse_channels()` rather
+than from the reports that came back, which is what lets every one of those
+config notices render on a page that gathered no counts at all. Nothing else
 depends on the notification service now; it is fully shipped.
+
+One thing to keep straight if you touch the pane's numbers: a report is per
+`(watch, channel)`, so anything summed across channels counts **notifications**
+— one paper on one channel — and not papers. Five papers going to email and
+Matrix is ten notifications, and calling that "10 papers" is simply false. The
+per-channel table columns are the only place a paper count is safe to render,
+which is why the drain button carries no total and the terminal status line
+says "N notification(s)".
 
 Three invariants to preserve if you touch any of this. Each of them is the
 whole reason some piece is shaped the way it is:

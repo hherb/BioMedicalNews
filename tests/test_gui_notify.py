@@ -198,6 +198,55 @@ class TestPane:
             assert "No readable watches" in body
         assert "could not be read" in page
 
+    def test_the_drain_button_carries_no_count(self, client, monkeypatch):
+        # Summing `remaining` across channels counts deliveries, not papers, so
+        # a two-channel watch would offer to notify twice what its own table
+        # says. The per-channel figures are on screen; the aggregate is not.
+        monkeypatch.setattr(
+            "bmnews.notify.service.pending_counts",
+            lambda config: [report(remaining=9), report(channel="chatroom", remaining=9)],
+        )
+
+        body = client.get("/watches").data.decode()
+
+        assert "Notify all remaining" in body
+        assert "Notify all 18" not in body
+
+    def test_the_counts_are_skipped_while_a_job_runs(self, client, monkeypatch):
+        # The same scan /watches/rows returns 204 to avoid: opening the tab
+        # mid-run must not run it against the database that job is writing.
+        scans = []
+
+        def _counts(config):
+            scans.append(1)
+            return [report()]
+
+        monkeypatch.setattr("bmnews.notify.service.pending_counts", _counts)
+        jobs.status()["running"] = True
+
+        body = client.get("/watches").data.decode()
+
+        assert scans == []
+        assert "Counts refresh when the running job finishes" in body
+        # No counts means no basis for a button, and a click would be refused.
+        assert "/watches/melanoma/notify" not in body
+
+    def test_a_config_problem_is_still_named_while_a_job_runs(self, client, config, monkeypatch):
+        # The counts wait for the job; the reason a watch will never deliver
+        # does not. It is derived from the parsed config, not from the reports.
+        config.notifications.watches["orphan"] = {"channels": ["nowhere"]}
+        config.notifications.watches["melanoma"]["channels"] = ["mailbox", "typo"]
+        monkeypatch.setattr(
+            "bmnews.notify.service.pending_counts", lambda config: pytest.fail("scanned")
+        )
+        jobs.status()["running"] = True
+
+        body = client.get("/watches").data.decode()
+
+        assert "no configured channel" in body  # orphan: every name unresolved
+        assert "typo" in body  # melanoma: one name of two
+        assert "nothing will be delivered there" in body
+
     def test_the_tab_is_in_the_shell(self, client):
         body = client.get("/").data.decode()
         assert 'hx-get="/watches"' in body
@@ -219,7 +268,25 @@ class TestDelivery:
         assert jobs.wait_for_idle(5.0) is True
         assert calls == [{"watch": "melanoma", "drain": False, "on_progress": jobs.progress}]
         assert jobs.status()["status"] == "success"
-        assert "5 paper(s) notified" in jobs.status()["message"]
+        assert "5 notification(s) sent" in jobs.status()["message"]
+
+    def test_a_multi_channel_run_counts_notifications_not_papers(self, client, monkeypatch):
+        # One report per (watch, channel), so the same five papers delivered to
+        # both channels sums to ten. Calling that "10 paper(s)" is false, and
+        # this is the shape that makes it false.
+        monkeypatch.setattr(
+            "bmnews.notify.service.run_notify",
+            lambda config, **kwargs: [
+                DeliveryReport(watch="melanoma", channel="mailbox", delivered=5),
+                DeliveryReport(watch="melanoma", channel="chatroom", delivered=5),
+            ],
+        )
+
+        client.post("/watches/melanoma/notify")
+
+        assert jobs.wait_for_idle(5.0) is True
+        assert jobs.status()["message"] == "melanoma: 10 notification(s) sent"
+        assert "paper" not in jobs.status()["message"]
 
     def test_notify_all_drains(self, client, monkeypatch):
         calls = []
@@ -262,7 +329,7 @@ class TestDelivery:
 
         assert jobs.wait_for_idle(5.0) is True
         assert jobs.status()["status"] == "error"
-        assert "5 paper(s) notified" in jobs.status()["message"]
+        assert "5 notification(s) sent" in jobs.status()["message"]
         assert "5 failed" in jobs.status()["message"]
 
     def test_a_raising_run_notify_reports_and_frees_the_lock(self, client, monkeypatch):
@@ -345,6 +412,68 @@ class TestDelivery:
         assert jobs.wait_for_idle(5.0) is True
         assert '<div id="watch-message" hx-swap-oob="innerHTML"></div>' in body
 
+    def test_a_watch_named_with_a_slash_is_reachable(self, client, config, monkeypatch):
+        # Watches are named by their config table heading, which may contain a
+        # slash — the whole reason the routes use a <path:> converter. The
+        # button's URL and the route that answers it have to agree on it.
+        calls = []
+        monkeypatch.setattr(
+            "bmnews.notify.service.run_notify",
+            lambda config, **kwargs: calls.append(kwargs["watch"]) or [],
+        )
+        config.notifications.watches["onc/trials"] = {
+            "channels": ["mailbox"],
+            "max_per_run": 5,
+        }
+        monkeypatch.setattr(
+            "bmnews.notify.service.pending_counts", lambda config: [report(watch="onc/trials")]
+        )
+
+        body = client.get("/watches").data.decode()
+        resp = client.post("/watches/onc/trials/notify")
+
+        assert "/watches/onc/trials/notify" in body, "the button's URL must survive urlencode"
+        assert resp.status_code == 200
+        assert jobs.wait_for_idle(5.0) is True
+        assert calls == ["onc/trials"]
+
+    def test_a_disabled_watch_does_not_start_a_run(self, client, config, monkeypatch):
+        # run_notify() skips disabled watches and returns no reports at all,
+        # which is indistinguishable from "every queue was empty" — so this is
+        # refused up front rather than reported as a cheerful "nothing to
+        # notify" for a delivery nobody attempted.
+        run_notify = Mock()
+        monkeypatch.setattr("bmnews.notify.service.run_notify", run_notify)
+        config.notifications.watches["melanoma"]["enabled"] = False
+
+        body = client.post("/watches/melanoma/notify").data.decode()
+
+        run_notify.assert_not_called()
+        assert jobs.running() is False
+        assert "is disabled" in body
+
+    def test_globally_disabled_notifications_do_not_start_a_run(self, client, config, monkeypatch):
+        run_notify = Mock()
+        monkeypatch.setattr("bmnews.notify.service.run_notify", run_notify)
+        config.notifications.enabled = False
+
+        body = client.post("/watches/melanoma/notify").data.decode()
+
+        run_notify.assert_not_called()
+        assert jobs.running() is False
+        assert "switched off" in body
+
+    def test_a_refusal_escapes_the_watch_name(self, client, config, monkeypatch):
+        # The name is user-authored TOML and this notice is assembled in
+        # Python, outside any template's autoescaping.
+        monkeypatch.setattr("bmnews.notify.service.run_notify", Mock())
+        config.notifications.watches['<img src=x onerror="alert(1)">'] = {"enabled": False}
+
+        body = client.post('/watches/<img src=x onerror="alert(1)">/notify').data.decode()
+
+        assert "<img" not in body
+        assert "&lt;img" in body
+
     def test_an_unknown_watch_is_a_404(self, client, monkeypatch):
         run_notify = Mock()
         monkeypatch.setattr("bmnews.notify.service.run_notify", run_notify)
@@ -365,6 +494,59 @@ class TestDelivery:
         assert 'id="watch-poller"' in body
         assert 'hx-swap-oob="innerHTML"' in body
         assert 'hx-get="/watches/rows"' in body
+
+
+class TestAgainstARealDatabase:
+    """One pass with nothing mocked, so the two halves are known to fit.
+
+    Every other test here fakes the reports. That pins the rendering, which is
+    where the bugs were, but a ``pending_counts`` whose shape drifted would
+    sail straight through all of it.
+    """
+
+    @pytest.fixture
+    def seeded(self, config):
+        """Three papers the watch matches, in the database the config names."""
+        from bmnews.db.operations import save_paper_tags, save_score, store_paper
+
+        conn = connect_sqlite(config.database.sqlite_path)
+        init_db(conn)
+        for n in range(3):
+            paper_id = store_paper(conn, doi=f"10.1/melanoma{n}", title=f"Melanoma paper {n}")
+            save_score(
+                conn,
+                paper_id=paper_id,
+                relevance_score=0.9,
+                combined_score=0.9 - n / 100.0,
+                quality_tier="TIER_2_STRONG",
+            )
+            save_paper_tags(conn, paper_id=paper_id, tags=["melanoma"])
+        yield conn
+        conn.close()
+
+    def test_the_pane_counts_a_real_queue(self, client, seeded):
+        body = client.get("/watches").data.decode()
+
+        # Nothing delivered yet, three matching, three still queued.
+        assert channel_row("mailbox", 0, 3, 3).search(body)
+        assert "Notify 5 more" in body
+
+    def test_a_delivery_moves_the_counts(self, client, config, seeded, monkeypatch):
+        sent = []
+        monkeypatch.setattr(
+            "bmnews.notify.service.build_adapter",
+            lambda _channel, _config: Mock(send=lambda message, *, txn_key: sent.append(txn_key)),
+        )
+
+        client.post("/watches/melanoma/notify-all")
+        assert jobs.wait_for_idle(5.0) is True
+
+        assert len(sent) == 1, "one batch, one send"
+        assert jobs.status()["message"] == "melanoma: 3 notification(s) sent"
+        body = client.get("/watches/rows").data.decode()
+        assert channel_row("mailbox", 3, 3, 0).search(body)
+        # Queue drained, so the buttons retire.
+        assert "/watches/melanoma/notify" not in body
 
 
 class TestRefresh:

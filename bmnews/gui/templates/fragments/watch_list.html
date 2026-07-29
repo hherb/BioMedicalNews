@@ -17,6 +17,10 @@
 
     <p class="watch-criteria">{{ row.criteria }}</p>
 
+    {# Keyed on channel_names, not on the counts: a render that skipped the
+       scan has no counts and must not therefore claim the channels are
+       misconfigured. #}
+    {% if row.channel_names %}
     {% if row.channels %}
     <table class="watch-channels">
         <thead>
@@ -33,6 +37,11 @@
             {% endfor %}
         </tbody>
     </table>
+    {% else %}
+    <p class="watch-notice muted">
+        Counts refresh when the running job finishes.
+    </p>
+    {% endif %}
     {% if row.unresolved %}
     <p class="watch-notice error">
         No configured channel is named {{ row.unresolved | join(', ') }} —
@@ -52,10 +61,14 @@
                 hx-target="#status-right" hx-swap="innerHTML">
             Notify {{ row.max_per_run }} more
         </button>
+        {# No count on this one. Summing "remaining" across channels counts
+           deliveries, not papers, so a watch on two channels would offer to
+           notify twice the number the table above it shows — and the per-channel
+           figures are right there, two lines up. #}
         <button class="btn btn-secondary"
                 hx-post="/watches/{{ row.name | urlencode }}/notify-all"
                 hx-target="#status-right" hx-swap="innerHTML">
-            Notify all {{ row.remaining }} remaining
+            Notify all remaining
         </button>
     </div>
     {% endif %}

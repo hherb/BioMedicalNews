@@ -483,3 +483,4 @@ body {
 .watch-actions { display: flex; gap: 0.5rem; }
 .watch-notice { font-size: 0.85rem; margin-bottom: 0.75rem; }
 .watch-notice.error { color: var(--danger); }
+.watch-notice.muted { color: var(--text-muted); }

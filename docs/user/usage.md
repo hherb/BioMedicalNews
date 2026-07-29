@@ -166,6 +166,16 @@ The **Watches** tab lists every watch in your config with, per channel:
 all remaining** drains the queue. Delivery runs in the background and reports in
 the status bar at the bottom of the window; the counts refresh once it finishes.
 
+A watch delivering to more than one channel sends one notification per paper
+*per channel*, which is what the status bar counts when a run ends — five papers
+going to both email and Matrix report as ten notifications, not ten papers.
+
+Working out the counts means scanning every scored paper against every watch, so
+the tab does not do it while a fetch, score or delivery is running: those tables
+read "Counts refresh when the running job finishes" and fill themselves in when
+it does. Everything else — the criteria, and any warning that a watch is
+misconfigured — shows immediately either way.
+
 Watches are created and edited in `~/.bmnews/config.toml` — the tab does not edit
 them. A watch shown as *disabled*, or one reported as naming no configured
 channel, is not delivering anything; a watch listed as unreadable failed

@@ -49,9 +49,11 @@ def run() -> str:
                 on_progress=_progress_with_refresh,
                 on_scored=_scored_paper_ids.append,
             )
-        # `running` is left alone: jobs.start()'s finally block clears it once
-        # the lock is actually released, and clearing it here would open a
-        # window in which running() reads False while the lock is still held.
+        # `running` is left alone: jobs.start()'s finally block is the one
+        # place that clears it, so it is cleared exactly once whether the
+        # target returned, raised, or forgot. Clearing it here as well would
+        # widen the window in which running() reads False while the lock is
+        # still held from a couple of bytecodes to the whole of this update.
         jobs.status().update(
             message="Pipeline complete — papers fetched, scored, and digested.",
             status="success",
