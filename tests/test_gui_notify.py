@@ -273,3 +273,45 @@ class TestDelivery:
         assert 'id="watch-poller"' in body
         assert 'hx-swap-oob="innerHTML"' in body
         assert 'hx-get="/watches/rows"' in body
+
+
+class TestRefresh:
+    def test_204_while_a_job_runs_and_no_scan_is_performed(self, client, monkeypatch):
+        scans = []
+
+        def _counts(config):
+            scans.append(1)
+            return [report()]
+
+        monkeypatch.setattr("bmnews.notify.service.pending_counts", _counts)
+        jobs.status()["running"] = True
+
+        resp = client.get("/watches/rows")
+
+        assert resp.status_code == 204
+        assert resp.data == b""
+        # The scan a refresh costs is the thing the 204 exists to avoid.
+        assert scans == []
+
+    def test_idle_returns_rows_and_retires_the_poller(self, client, monkeypatch):
+        monkeypatch.setattr(
+            "bmnews.notify.service.pending_counts", lambda config: [report(remaining=4)]
+        )
+
+        resp = client.get("/watches/rows")
+        body = resp.data.decode()
+
+        assert resp.status_code == 200
+        assert "melanoma" in body
+        assert ">4<" in body
+        # The poller's slot is emptied, which is what stops the polling.
+        assert '<div id="watch-poller" hx-swap-oob="innerHTML"></div>' in body
+        assert 'hx-get="/watches/rows"' not in body
+
+    def test_the_pane_carries_the_poller_when_opened_during_a_run(self, client, monkeypatch):
+        monkeypatch.setattr("bmnews.notify.service.pending_counts", lambda config: [report()])
+        jobs.status()["running"] = True
+
+        body = client.get("/watches").data.decode()
+
+        assert 'hx-get="/watches/rows"' in body

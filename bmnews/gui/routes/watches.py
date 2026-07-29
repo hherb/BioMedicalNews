@@ -18,7 +18,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from flask import Blueprint, Flask, abort, current_app, render_template
+from flask import Blueprint, Flask, Response, abort, current_app, render_template
 
 from bmnews.config import AppConfig
 from bmnews.gui import jobs
@@ -123,6 +123,36 @@ def notify_all(name: str) -> str:
         poller.
     """
     return _start_delivery(name, drain=True)
+
+
+@watches_bp.route("/watches/rows")
+def rows() -> Response | str:
+    """Re-render the rows once the running job has finished.
+
+    Returns **204 No Content** while a job is in flight. htmx does not swap on
+    a 204, so the poller that asked survives to ask again and no scan is
+    performed. That matters: a refresh is a full pass over every candidate for
+    every ``(watch, channel)`` pair, which is worth paying once when the counts
+    have settled and not every two seconds while they are still moving.
+
+    ``jobs.running()`` is global rather than per-job, so a pipeline run started
+    while the poller is alive holds it here until that finishes too. That is
+    wanted — the pipeline's own NOTIFY stage delivers, and scoring moves papers
+    into and out of the queue.
+
+    Returns:
+        204 while a job runs; otherwise the ``watch_list`` fragment followed by
+        an OOB swap emptying the poller's slot, which stops the polling.
+    """
+    if jobs.running():
+        return Response(status=204)
+
+    config: AppConfig = current_app.config["BMNEWS_CONFIG"]
+    watch_rows, _ = _build_rows(config)
+    return (
+        render_template("fragments/watch_list.html", rows=watch_rows)
+        + '<div id="watch-poller" hx-swap-oob="innerHTML"></div>'
+    )
 
 
 # --- Internals --------------------------------------------------------------
