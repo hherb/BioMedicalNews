@@ -1,0 +1,30 @@
+<div class="watches-page">
+    <h1>Watches</h1>
+
+    {% if not notifications_enabled %}
+    <p class="watch-notice error">
+        Notifications are switched off. Set <code>enabled = true</code> under
+        <code>[notifications]</code> in <code>~/.bmnews/config.toml</code> to deliver them.
+    </p>
+    {% endif %}
+
+    {% if unreadable %}
+    <p class="watch-notice error">
+        {{ unreadable | length }} watch(es) could not be read and are not being evaluated:
+        {{ unreadable | join(', ') }}. The log says what is wrong with each.
+    </p>
+    {% endif %}
+
+    <div id="watch-list">
+        {% include "fragments/watch_list.html" %}
+    </div>
+
+    <div id="watch-poller">
+        {% if polling %}{% include "fragments/watch_poller.html" %}{% endif %}
+    </div>
+
+    <button class="btn btn-secondary"
+            hx-get="/watches" hx-target="#main-content" hx-swap="innerHTML">
+        Refresh
+    </button>
+</div>

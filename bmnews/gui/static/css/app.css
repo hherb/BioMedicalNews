@@ -454,3 +454,32 @@ body {
     .gutter { display: none; }
     .reading-pane { display: none; }
 }
+
+/* Watches pane */
+.watches-page { padding: 1.5rem; height: 100%; overflow-y: auto; }
+.watches-page h1 { margin-bottom: 1.5rem; }
+.watch-card {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 1rem;
+    margin-bottom: 1rem;
+}
+.watch-header { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.35rem; }
+.watch-name { font-weight: 600; }
+.watch-badge {
+    font-size: 0.75rem;
+    padding: 0.1rem 0.4rem;
+    border-radius: 10px;
+    background: var(--bg-alt);
+    color: var(--text-muted);
+}
+.watch-criteria { color: var(--text-muted); font-size: 0.85rem; margin-bottom: 0.75rem; }
+.watch-channels { border-collapse: collapse; font-size: 0.85rem; margin-bottom: 0.75rem; }
+.watch-channels th, .watch-channels td {
+    text-align: left;
+    padding: 0.25rem 1rem 0.25rem 0;
+}
+.watch-channels th { color: var(--text-muted); font-weight: 500; }
+.watch-actions { display: flex; gap: 0.5rem; }
+.watch-notice { font-size: 0.85rem; margin-bottom: 0.75rem; }
+.watch-notice.error { color: var(--danger); }
