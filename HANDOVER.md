@@ -6,7 +6,7 @@
 |---|---|
 | Storage on `bmlib.publications` | **Done.** No `papers` table; fetch+store is one `sync()` call. Decisions worth keeping are recorded below. |
 | Multi-provider LLM + model selector | **Done.** Six providers via bmlib (`list_providers()` is the authority), settings UI datalist cached in `~/.bmnews/model_cache.json`. Design/plan: `docs/plans/2026-02-15-llm-providers-model-selector-*.md`. |
-| Notification service | **Done except the GUI watches pane** — see below. |
+| Notification service | **Done.** CLI, pipeline stage, and the GUI watches pane — see below. |
 | `bmlib.transparency` | **Unused.** Config section and packaging extra declared, analyzer never called. This is now the largest open item. |
 | `docs/dev/` drift | `architecture.md` and `database.md` still describe the removed `papers` table — [issue #11](https://github.com/hherb/BioMedicalNews/issues/11). |
 
@@ -41,13 +41,25 @@ and `notify/matcher.py` (all of which predate this session), plus
 the four `notify_*` templates, the `bmnews notify` CLI and the NOTIFY stage in
 `run_pipeline()`.
 
-**Still to do: the GUI watches pane.** The design sketches it as a pane
-listing each watch with `delivered / matching`, plus "Notify N more" and
-"Notify all remaining" buttons posting to `/notify/<watch>`, delivery running
-in a daemon thread behind the existing `_pipeline_lock` and reporting through
-the same status-bar fragment as the pipeline routes. `service.pending_counts()`
-already returns exactly what the pane needs to render, per `(watch, channel)`.
-Nothing else depends on it.
+**The GUI watches pane shipped**, completing this service's last surface.
+Design: `docs/plans/2026-07-29-gui-watches-pane-design.md`. `/watches` lists
+every watch with, per channel, `delivered / matching / remaining`; **Notify N
+more** posts to `/watches/<name>/notify` for one batch (the watch's
+`max_per_run`), **Notify all remaining** to `/watches/<name>/notify-all` to
+drain it. Rows are built from `parse_watches()` with `service.pending_counts()`
+joined **onto** them, not from the counts alone — a watch naming no configured
+channel produces no reports and would otherwise vanish, and one that fails to
+parse is skipped by `parse_watches()` with only a log line, so the pane diffs
+the configured names against the parsed ones to still list it. A disabled
+watch is different again: `pending_counts()` reports it deliberately (knowing
+what it would send is the point of being able to look), so its counts render,
+but it earns no delivery buttons. Delivery runs through `gui/jobs.py`,
+extracted from the pipeline routes so both share one lock, one status dict
+and one daemon thread — a delivery must not race a scoring run on the same
+database. Counts refresh once, when the job finishes: the poller gets a 204
+while one is running rather than re-scanning every candidate every two
+seconds against a database that job is still writing to. Nothing else
+depends on the notification service now; it is fully shipped.
 
 Three invariants to preserve if you touch any of this. Each of them is the
 whole reason some piece is shaped the way it is:

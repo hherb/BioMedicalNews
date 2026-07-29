@@ -1078,7 +1078,7 @@ Expected: PASS (9 tests)
 - [ ] **Step 9: Run the full suite and lint**
 
 Run: `uv run pytest tests/ -q && uv run ruff check bmnews/ tests/ && uv run ruff format --check bmnews/ tests/`
-Expected: 413 passed, 116 skipped; no lint findings
+Expected: 414 passed, 116 skipped; no lint findings
 
 - [ ] **Step 10: Commit**
 
@@ -1370,7 +1370,7 @@ Expected: PASS (17 tests)
 - [ ] **Step 5: Run the full suite and lint**
 
 Run: `uv run pytest tests/ -q && uv run ruff check bmnews/ tests/ && uv run ruff format --check bmnews/ tests/`
-Expected: 421 passed, 116 skipped; no lint findings
+Expected: 422 passed, 116 skipped; no lint findings
 
 - [ ] **Step 6: Commit**
 
@@ -1403,7 +1403,10 @@ EOF
 - Test: `tests/test_gui_notify.py`
 
 **Interfaces:**
-- Consumes: `jobs.running` (Task 1), `_build_rows` (Task 2), `_oob_poller` (Task 3).
+- Consumes: `jobs.running` (Task 1), `_build_rows` (Task 2). It does not call
+  `_oob_poller` (Task 3): `rows()` inlines its own empty
+  `<div id="watch-poller" hx-swap-oob="innerHTML"></div>` directly, since
+  retiring the poller needs only the swap target's id, not rendered content.
 - Produces: route `watches.rows`.
 
 - [ ] **Step 1: Write the failing test**
@@ -1511,7 +1514,7 @@ Expected: PASS (20 tests)
 - [ ] **Step 5: Run the full suite and lint**
 
 Run: `uv run pytest tests/ -q && uv run ruff check bmnews/ tests/ && uv run ruff format --check bmnews/ tests/`
-Expected: 424 passed, 116 skipped; no lint findings
+Expected: 425 passed, 116 skipped; no lint findings
 
 - [ ] **Step 6: Commit**
 
@@ -1646,7 +1649,7 @@ In `docs/plans/2026-07-29-gui-watches-pane-design.md`, change the status line to
 - [ ] **Step 7: Verify and commit**
 
 Run: `uv run pytest tests/ -q && uv run ruff check bmnews/ tests/ && uv run ruff format --check bmnews/ tests/`
-Expected: 424 passed, 116 skipped; no lint findings
+Expected: 425 passed, 116 skipped; no lint findings
 
 ```bash
 git add CLAUDE.md bmnews/gui/CLAUDE.md docs/ HANDOVER.md

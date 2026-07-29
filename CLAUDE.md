@@ -75,7 +75,7 @@ bmnews/
 ├── digest/
 │   ├── renderer.py      # Jinja2 digest rendering (HTML + plain text)
 │   └── sender.py        # SMTP email delivery (TLS, multipart MIME)
-├── notify/              # Watch-based alerts (GUI pane still to come)
+├── notify/              # Watch-based alerts (CLI, pipeline stage, GUI pane)
 │   ├── watches.py       # Watch/Channel dataclasses, validated from config dicts
 │   ├── matcher.py       # Pure `(paper, watch) -> bool`. No I/O, no LLM
 │   ├── renderer.py      # Renders a batch into the notify_* templates
@@ -88,17 +88,20 @@ bmnews/
     ├── app.py           # Flask application factory (registers blueprints)
     ├── launcher.py      # pywebview window launcher (geometry persistence, port auto-detect)
     ├── helpers.py        # HTML formatting helpers (abstract section parsing)
+    ├── jobs.py          # The one background job: lock, status, thread, status-bar fragment
     ├── routes/
     │   ├── papers.py    # Paper list/detail, search, fulltext retrieval
     │   ├── pipeline.py  # Async pipeline execution + status polling
-    │   └── settings.py  # Settings UI, dynamic model selector
+    │   ├── settings.py  # Settings UI, dynamic model selector
+    │   └── watches.py   # Watches pane: counts, delivery, refresh
     ├── static/
     │   ├── css/app.css  # Email-client UI styling
     │   ├── js/app.js    # Split-pane, tabs, fulltext toggle, HTMX events
     │   └── vendor/      # htmx.min.js (v2.x), split-grid.min.js
     └── templates/
         ├── base.html    # Main layout (nav tabs, split pane, status footer)
-        └── fragments/   # HTMX partial templates (paper_list, reading_pane, settings, etc.)
+        └── fragments/   # HTMX partial templates (paper_list, reading_pane, settings,
+                          # watches_view, watch_list, watch_poller, etc.)
 
 templates/                     # Email digest + notification + LLM prompt templates (Jinja2)
 ├── digest_email.html          # HTML email digest
@@ -108,7 +111,7 @@ templates/                     # Email digest + notification + LLM prompt templa
 ├── relevance_system.txt       # LLM system prompt for relevance scoring
 └── relevance_scoring.txt      # LLM user prompt (paper title, abstract, interests)
 
-tests/                         # Test suite (12 files)
+tests/                         # Test suite (14 files)
 docs/plans/                    # Implementation design documents and plans
 bmlib_patch/                   # bmlib source archive and patch files
 ```
@@ -219,7 +222,7 @@ Layered: dataclass defaults → TOML file (`~/.bmnews/config.toml`) → CLI flag
 
 A **watch** is named criteria that alert on a matching paper as it is scored, separately from the periodic digest — a notified paper is still included in the next digest. Design: `docs/plans/2026-07-26-notification-service-design.md`.
 
-Surfaces: the `bmnews notify` CLI (`--watch`, `--count`, `--all`, `--dry-run`, `--list`) and the NOTIFY stage of `run_pipeline()`. **Still to come**: the GUI watches pane. Everything else is implemented.
+Surfaces: the `bmnews notify` CLI (`--watch`, `--count`, `--all`, `--dry-run`, `--list`), the NOTIFY stage of `run_pipeline()`, and the GUI watches pane (`/watches`). The pane monitors and delivers; watches are still created and edited in `config.toml`.
 
 Criteria are AND-combined; an empty list means "no constraint", and within one list criterion the test is `any`. `matcher._tier_ok()` reuses `scoring.scorer.tiers_below()`, so the tier floor exempts `UNCLASSIFIED` exactly as the digest does. The matcher reads `paper["tags"]`, which `publications` has no column for — `get_notification_candidates()` attaches them from `paper_tags` per chunk.
 
@@ -289,6 +292,8 @@ Test files:
 | `test_fulltext_integration.py` | Fulltext service integration (Europe PMC/Unpaywall/DOI) |
 | `test_gui_app.py` | Flask blueprints, HTMX responses, paper queries, pipeline status, the View PDF button, and the outbound-URL scheme allowlist |
 | `test_gui_helpers.py` | Abstract HTML formatting |
+| `test_gui_jobs.py` | The shared background job — refusal while one runs without clobbering its progress line, a raising target freeing the lock, a target that forgets to clear `running` |
+| `test_gui_notify.py` | The watches pane — the count join, the three configurations that produce no counts (unresolved channel, unparseable watch, disabled watch), delivery and drain, failed-delivery reporting, 404 on an unknown watch, and the 204-while-running refresh |
 | `test_notify.py` | Every watch criterion in isolation against literal paper dicts; watch/channel parsing, validation and unknown-key warnings |
 | `test_notify_channels.py` | Channel adapters and the four templates: Matrix endpoint/auth/body shape, deterministic `txnId`, alias resolution, encrypted-room refusal, transport errors arriving as `ChannelError`, non-https homeserver refusal, HTML escaping of third-party metadata; email over mocked SMTP, including a `False` return raising |
 | `test_notify_service.py` | `run_notify` — paging with no gaps or repeats, chunk-boundary exhaustion, dedup, per-channel retry, dry run leaving `sent_total` unmoved, contradictory CLI batch sizes, and the `bmnews notify` CLI. Plus `collect_matches` directly: scanning past the chunk window, and not carrying the full-text cache. File-backed SQLite, since each run opens its own connection |

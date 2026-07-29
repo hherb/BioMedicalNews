@@ -1,7 +1,7 @@
 # GUI Watches Pane Design
 
 **Date:** 2026-07-29
-**Status:** design only — no implementation in this document.
+**Status:** implemented.
 **Completes:** `docs/plans/2026-07-26-notification-service-design.md`, whose
 "Surfaces" section sketched this pane and left it unbuilt. Everything else in
 that design shipped (`docs/plans/2026-07-28-notification-service-plan.md`).

@@ -145,6 +145,22 @@ main (group)
 
 The `main` group handles config loading and logging setup. Each command gets the config via Click's context object (`ctx.obj["config"]`).
 
+## GUI
+
+`bmnews gui` is a second entry point alongside the CLI: pywebview supplies the
+native window, Flask the HTTP backend, HTMX the partial-page updates. Routes,
+fragments and key features are documented in `bmnews/gui/CLAUDE.md`, not
+repeated here.
+
+One thing worth stating at the architecture level: a pipeline run and a
+notification delivery both write to the same database from a background
+thread, and must never do so at once. `gui/jobs.py` owns the single lock,
+status dict and daemon thread both go through, so starting one while the
+other is busy is refused rather than raced. `gui/app.py` registers four
+blueprints — `papers`, `settings`, `pipeline`, and `watches`
+(`gui/routes/watches.py`) — the last of which renders the pane that lets a
+user pull a watch's next batch or drain its queue without leaving the app.
+
 ## Configuration architecture
 
 Configuration follows a layered approach:
