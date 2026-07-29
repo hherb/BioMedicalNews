@@ -92,16 +92,20 @@ def start(*, message: str, target: Callable[[], None], error_label: str) -> bool
             _status["running"] = False
             _lock.release()
 
+    thread = threading.Thread(target=_run, daemon=True)
     try:
-        _thread = threading.Thread(target=_run, daemon=True)
-        _thread.start()
+        thread.start()
     except RuntimeError as exc:
         # The worker never ran, so its finally block will not release the lock.
+        # _thread is deliberately left untouched: a Thread that never started
+        # cannot be joined, so publishing it here would make wait_for_idle()
+        # raise instead of returning a bool.
         logger.exception("Could not start a background job")
         _status.update(running=False, message=f"{error_label}: {exc}", status="error")
         _lock.release()
         return False
 
+    _thread = thread
     return True
 
 

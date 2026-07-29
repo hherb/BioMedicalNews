@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from unittest.mock import patch
 
 import pytest
 
@@ -71,6 +72,20 @@ class TestStart:
         )
         assert jobs.wait_for_idle(5.0) is True
         assert jobs.running() is False
+
+    def test_a_spawn_failure_publishes_an_error_and_frees_the_lock(self):
+        with patch("threading.Thread.start", side_effect=RuntimeError("can't start new thread")):
+            result = jobs.start(message="Working...", target=lambda: None, error_label="Job error")
+
+        assert result is False
+        assert jobs.status()["status"] == "error"
+        assert jobs.status()["message"] == "Job error: can't start new thread"
+        # The lock was released and _thread was never published, so waiting
+        # for idle must return cleanly rather than raising on a Thread that
+        # was never started, and the next job must be able to start.
+        assert jobs.wait_for_idle(5.0) is True
+        assert jobs.start(message="Next...", target=lambda: None, error_label="Job error") is True
+        assert jobs.wait_for_idle(5.0) is True
 
 
 class TestProgress:
