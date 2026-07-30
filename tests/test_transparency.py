@@ -464,3 +464,132 @@ class TestListResults:
 
         service.list_results(config, limit=5)
         assert captured["limit"] == 5
+
+
+class TestCli:
+    """The `bmnews transparency` command."""
+
+    def _invoke(self, args, config):
+        """Invoke the CLI with *config* as the loaded config.
+
+        ``main()``'s group callback always calls ``load_config()`` itself and
+        overwrites ``ctx.obj["config"]`` with the result, so passing
+        ``obj={"config": config}`` to ``CliRunner.invoke`` alone is not enough
+        — the group callback runs first and clobbers it before the
+        ``transparency`` subcommand ever sees it. Patching ``load_config`` is
+        what actually threads the fixture's config (and its database) through.
+        """
+        from click.testing import CliRunner
+
+        from bmnews.cli import main
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("bmnews.cli.load_config", lambda path: config)
+            return CliRunner().invoke(main, args, obj={"config": config})
+
+    def test_disabled_config_says_so(self, db):
+        config, _ = db
+        config.transparency.enabled = False
+
+        result = self._invoke(["transparency"], config)
+
+        assert result.exit_code == 0
+        assert "disabled" in result.output.lower()
+
+    def test_list_reads_stored_results_even_when_disabled(self, db):
+        """Results already stored are worth reading whether or not the
+        feature is currently switched on — the ``--list`` check must run
+        before the ``enabled`` guard, not after."""
+        config, conn = db
+        paper_id = _scored(conn, doi="10.1/a", combined=0.9)
+        save_transparency(conn, paper_id=paper_id, transparency_score=20, risk_level="high")
+        config.transparency.enabled = False
+
+        result = self._invoke(["transparency", "--list"], config)
+
+        assert result.exit_code == 0
+        assert "HIGH" in result.output
+        assert "disabled" not in result.output.lower()
+
+    def test_reports_what_it_analysed(self, db, monkeypatch):
+        config, conn = db
+        _scored(conn, doi="10.1/a", combined=0.9)
+        _install(monkeypatch, _FakeAnalyzer())
+
+        result = self._invoke(["transparency"], config)
+
+        assert result.exit_code == 0
+        assert "1" in result.output
+
+    def test_nothing_to_do_is_stated(self, db, monkeypatch):
+        config, _ = db
+        _install(monkeypatch, _FakeAnalyzer())
+
+        result = self._invoke(["transparency"], config)
+
+        assert "othing" in result.output
+
+    def test_dry_run_reports_the_selection(self, db, monkeypatch):
+        config, conn = db
+        _scored(conn, doi="10.1/a", combined=0.9)
+
+        def _boom(**kwargs):
+            raise AssertionError("dry run must not build an analyzer")
+
+        monkeypatch.setattr(service, "TransparencyAnalyzer", _boom)
+
+        result = self._invoke(["transparency", "--dry-run"], config)
+
+        assert result.exit_code == 0
+        assert "1" in result.output
+
+    def test_list_prints_stored_results(self, db):
+        config, conn = db
+        paper_id = _scored(conn, doi="10.1/a", combined=0.9)
+        save_transparency(
+            conn,
+            paper_id=paper_id,
+            transparency_score=20,
+            risk_level="high",
+            result_json='{"risk_indicators": ["No COI disclosure found in full text"]}',
+        )
+
+        result = self._invoke(["transparency", "--list"], config)
+
+        assert "HIGH" in result.output
+        assert "No COI disclosure" in result.output
+
+    def test_list_with_nothing_stored(self, db):
+        config, _ = db
+
+        result = self._invoke(["transparency", "--list"], config)
+
+        assert "o results" in result.output
+
+    def test_limit_must_be_positive(self, db):
+        config, _ = db
+
+        result = self._invoke(["transparency", "--limit", "0"], config)
+
+        assert result.exit_code != 0
+        assert "at least 1" in result.output
+
+    def test_list_refuses_analysis_flags(self, db):
+        """--list says 'analyse nothing'; --refresh says 'analyse again'.
+        Honouring one and dropping the other silently is the failure mode."""
+        config, _ = db
+
+        result = self._invoke(["transparency", "--list", "--refresh"], config)
+
+        assert result.exit_code != 0
+
+    def test_paper_id_is_passed_through(self, db, monkeypatch):
+        config, conn = db
+        low = _scored(conn, doi="10.1/low", combined=0.01)
+        analyzer = _FakeAnalyzer()
+        _install(monkeypatch, analyzer)
+
+        result = self._invoke(["transparency", "--paper-id", str(low)], config)
+
+        assert result.exit_code == 0
+        assert analyzer.calls == [(str(low), None, "10.1/low")]

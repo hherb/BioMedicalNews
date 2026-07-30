@@ -11,6 +11,7 @@ import click
 from bmnews import __version__
 from bmnews.config import load_config, write_default_config
 from bmnews.constants import CLI_TITLE_TRUNCATE, DEFAULT_PAGE_SIZE
+from bmnews.metadata import parse_transparency
 
 
 @click.group()
@@ -170,6 +171,93 @@ def notify(
     # and a cron job that cannot tell is a cron job that never reports it.
     if failed and not delivered:
         ctx.exit(1)
+
+
+@main.command()
+@click.option("--limit", default=None, type=int, help="Analyse at most this many papers.")
+@click.option("--refresh", is_flag=True, help="Re-analyse papers that already have a result.")
+@click.option(
+    "--paper-id", default=None, type=int, help="Restrict to one paper, ignoring the gate."
+)
+@click.option("--list", "list_only", is_flag=True, help="Print stored results; analyse nothing.")
+@click.option("--dry-run", is_flag=True, help="Report what would be analysed; call no API.")
+@click.pass_context
+def transparency(
+    ctx: click.Context,
+    limit: int | None,
+    refresh: bool,
+    paper_id: int | None,
+    list_only: bool,
+    dry_run: bool,
+) -> None:
+    """Assess research integrity for scored papers.
+
+    Checks funder disclosure, COI statements, data availability and trial
+    results reporting against CrossRef, Europe PMC, PubMed, OpenAlex and
+    ClinicalTrials.gov. Results are displayed beside a paper and never change
+    which papers are selected or how they rank.
+
+    Each analysis costs several external requests, so only papers scoring above
+    transparency.min_combined_score are analysed. --paper-id ignores that gate,
+    but does not by itself redo a paper that already has a determinate result —
+    combine it with --refresh to force that.
+    """
+    from bmnews.transparency import service
+
+    config = ctx.obj["config"]
+
+    if limit is not None and limit < 1:
+        raise click.UsageError("--limit must be at least 1.")
+    # Refusing rather than quietly ignoring: --list means "analyse nothing" and
+    # these two mean "analyse differently", so honouring one and dropping the
+    # other would do something the user did not ask for.
+    if list_only and (refresh or dry_run):
+        raise click.UsageError("--list analyses nothing; drop --refresh/--dry-run.")
+
+    if list_only:
+        rows = service.list_results(config, limit=limit)
+        if not rows:
+            click.echo("No results stored yet. Run `bmnews transparency` first.")
+            return
+        for row in rows:
+            click.echo(
+                f"{row['risk_level'].upper()} {row['transparency_score']}/100 — "
+                f"{row['title']} ({row['doi'] or 'no DOI'})"
+            )
+            for indicator in parse_transparency(row["result_json"]).get("risk_indicators", []):
+                click.echo(f"    - {indicator}")
+        return
+
+    if not config.transparency.enabled:
+        click.echo(
+            "Transparency analysis is disabled. Set enabled = true under "
+            "[transparency] in your config to turn it on."
+        )
+        return
+
+    report = service.run_transparency(
+        config, refresh=refresh, paper_id=paper_id, limit=limit, dry_run=dry_run
+    )
+
+    if dry_run:
+        click.echo(f"Would analyse {report.candidates} paper(s).")
+        return
+
+    if not report.analyzed and not report.failed:
+        click.echo("Nothing to analyse.")
+        return
+
+    click.echo(f"Analysed {report.analyzed} paper(s).")
+    if report.indeterminate:
+        click.echo(
+            f"{report.indeterminate} could not be determined "
+            f"({report.exhausted} will not be retried without --refresh)."
+        )
+    if report.failed:
+        click.echo(
+            f"{report.failed} analysis attempt(s) failed — they stay queued and retry.",
+            err=True,
+        )
 
 
 @main.command()
