@@ -18,6 +18,7 @@ from bmlib.db import (
 )
 from bmlib.fulltext import FullTextCache
 from bmlib.fulltext.cache import sanitize_identifier
+from bmlib.transparency import TransparencyRisk
 
 from bmnews.db import migrations
 from bmnews.db.migrations import MIGRATIONS
@@ -35,6 +36,8 @@ from bmnews.db.operations import (
     get_papers_filtered,
     get_papers_for_digest,
     get_scored_papers,
+    get_transparency_candidates,
+    get_transparency_results,
     get_unscored_papers,
     paper_exists,
     record_digest,
@@ -44,6 +47,7 @@ from bmnews.db.operations import (
     save_paper_metadata,
     save_paper_tags,
     save_score,
+    save_transparency,
     store_paper,
 )
 from bmnews.db.schema import init_db
@@ -1239,7 +1243,14 @@ class TestMigrationFulltextPdfUrl:
         catalogue: every paper query selects ``e.fulltext_pdf_url``, so a
         column that is missing breaks all of them — and the check then reads
         the same on SQLite and PostgreSQL.
+
+        The shared paper query also joins the migration-7 ``transparency``
+        table now, so this helper — which runs against a connection
+        deliberately frozen at schema version 6 — applies migration 7 too.
+        That table is not what this test is about; it just has to exist for
+        the "normal paper query" to run at all.
         """
+        run_migrations(conn, MIGRATIONS[6:7])
         pid = store_paper(conn, doi="10.1/column-probe", title="Probe")
         save_fulltext(
             conn,
@@ -1627,3 +1638,293 @@ class TestNotifications:
         assert count_notifications(conn, watch="w", channel="c", status="sent") == 1
         assert count_notifications(conn, watch="w", channel="elsewhere") == 0
         assert count_notifications(conn, watch="nobody") == 0
+
+
+class TestTransparency:
+    """The transparency table: storage, the attempt ceiling, and selection."""
+
+    def _scored_paper(self, conn, *, doi, combined, pmid=None):
+        """Store a paper with a score, returning its publication id."""
+        paper_id = store_paper(
+            conn,
+            doi=doi,
+            pmid=pmid,
+            title=f"Paper {doi}",
+            abstract="Abstract",
+            source="medrxiv",
+        )
+        save_score(conn, paper_id=paper_id, relevance_score=0.9, combined_score=combined)
+        return paper_id
+
+    def test_save_and_read_back(self):
+        conn = _db()
+        paper_id = self._scored_paper(conn, doi="10.1/a", combined=0.9)
+
+        save_transparency(
+            conn,
+            paper_id=paper_id,
+            transparency_score=82,
+            risk_level="low",
+            result_json='{"transparency_score": 82}',
+        )
+
+        rows = get_transparency_results(conn)
+        assert len(rows) == 1
+        assert rows[0]["paper_id"] == paper_id
+        assert rows[0]["transparency_score"] == 82
+        assert rows[0]["risk_level"] == "low"
+        assert rows[0]["attempts"] == 1
+        assert rows[0]["title"] == "Paper 10.1/a"
+
+    def test_repeat_analysis_increments_attempts(self):
+        """The ceiling only binds if a repeat actually counts."""
+        conn = _db()
+        paper_id = self._scored_paper(conn, doi="10.1/a", combined=0.9)
+
+        for _ in range(3):
+            save_transparency(conn, paper_id=paper_id, transparency_score=0, risk_level="unknown")
+
+        rows = get_transparency_results(conn)
+        assert len(rows) == 1, "one row per paper, not one per attempt"
+        assert rows[0]["attempts"] == 3
+
+    def test_reset_attempts_restarts_the_budget(self):
+        conn = _db()
+        paper_id = self._scored_paper(conn, doi="10.1/a", combined=0.9)
+        save_transparency(conn, paper_id=paper_id, transparency_score=0, risk_level="unknown")
+        save_transparency(conn, paper_id=paper_id, transparency_score=0, risk_level="unknown")
+
+        save_transparency(
+            conn,
+            paper_id=paper_id,
+            transparency_score=0,
+            risk_level="unknown",
+            reset_attempts=True,
+        )
+
+        assert get_transparency_results(conn)[0]["attempts"] == 1
+
+    def test_candidates_respect_the_score_gate(self):
+        conn = _db()
+        high = self._scored_paper(conn, doi="10.1/high", combined=0.9)
+        self._scored_paper(conn, doi="10.1/low", combined=0.1)
+
+        rows = get_transparency_candidates(conn, min_combined=0.5)
+
+        assert [r["id"] for r in rows] == [high]
+
+    def test_unscored_papers_are_never_candidates(self):
+        """The gate reads combined_score, so a paper without one cannot pass."""
+        conn = _db()
+        store_paper(conn, doi="10.1/unscored", title="No score", source="medrxiv")
+
+        assert get_transparency_candidates(conn, min_combined=0.0) == []
+
+    def test_determinate_result_leaves_the_queue(self):
+        conn = _db()
+        paper_id = self._scored_paper(conn, doi="10.1/a", combined=0.9)
+        save_transparency(conn, paper_id=paper_id, transparency_score=82, risk_level="low")
+
+        assert get_transparency_candidates(conn, min_combined=0.0) == []
+
+    def test_unknown_result_retries_until_the_ceiling(self):
+        conn = _db()
+        paper_id = self._scored_paper(conn, doi="10.1/a", combined=0.9)
+
+        save_transparency(conn, paper_id=paper_id, transparency_score=0, risk_level="unknown")
+        assert [r["id"] for r in get_transparency_candidates(conn, max_attempts=3)] == [paper_id]
+        assert get_transparency_candidates(conn, max_attempts=3)[0]["attempts"] == 1
+
+        save_transparency(conn, paper_id=paper_id, transparency_score=0, risk_level="unknown")
+        save_transparency(conn, paper_id=paper_id, transparency_score=0, risk_level="unknown")
+
+        assert get_transparency_candidates(conn, max_attempts=3) == []
+
+    def test_refresh_reselects_a_determinate_result(self):
+        conn = _db()
+        paper_id = self._scored_paper(conn, doi="10.1/a", combined=0.9)
+        save_transparency(conn, paper_id=paper_id, transparency_score=82, risk_level="low")
+
+        rows = get_transparency_candidates(conn, min_combined=0.0, refresh=True)
+
+        assert [r["id"] for r in rows] == [paper_id]
+
+    def test_successive_refresh_runs_walk_the_corpus(self):
+        """A refresh run has no "not done yet" predicate to narrow it, so
+        ordering it by score would hand back the identical top-`limit` papers
+        every run — re-spending four to eight requests per paper while the
+        rest of the corpus is never reached at all."""
+        conn = _db()
+        ids = [self._scored_paper(conn, doi=f"10.1/{i}", combined=0.9 - i / 100) for i in range(4)]
+
+        first = get_transparency_candidates(conn, min_combined=0.0, limit=2, refresh=True)
+        for row in first:
+            save_transparency(conn, paper_id=row["id"], transparency_score=80, risk_level="low")
+
+        second = get_transparency_candidates(conn, min_combined=0.0, limit=2, refresh=True)
+
+        assert [r["id"] for r in second] != [r["id"] for r in first]
+        assert sorted([r["id"] for r in first] + [r["id"] for r in second]) == sorted(ids)
+
+    def test_refresh_puts_a_never_analysed_paper_first(self):
+        """Pins the explicit ``NULLS FIRST``: SQLite sorts NULLs first in ASC
+        and PostgreSQL sorts them last, so without it this passes on one
+        backend and silently strands unanalysed papers on the other. The
+        unanalysed paper scores *lower* here, so score order cannot produce
+        this answer by accident."""
+        conn = _db()
+        analysed = self._scored_paper(conn, doi="10.1/best", combined=0.95)
+        save_transparency(conn, paper_id=analysed, transparency_score=82, risk_level="low")
+        never = self._scored_paper(conn, doi="10.1/worst", combined=0.5)
+
+        rows = get_transparency_candidates(conn, min_combined=0.0, refresh=True)
+
+        assert [r["id"] for r in rows] == [never, analysed]
+
+    def test_paper_id_bypasses_the_score_gate(self):
+        """The user named this paper; a cost gate for papers nobody reads
+        does not apply to one that was asked for by id."""
+        conn = _db()
+        low = self._scored_paper(conn, doi="10.1/low", combined=0.01)
+
+        rows = get_transparency_candidates(conn, min_combined=0.9, paper_id=low)
+
+        assert [r["id"] for r in rows] == [low]
+
+    def test_candidates_are_ordered_best_score_first(self):
+        conn = _db()
+        mid = self._scored_paper(conn, doi="10.1/mid", combined=0.6)
+        best = self._scored_paper(conn, doi="10.1/best", combined=0.95)
+
+        rows = get_transparency_candidates(conn, min_combined=0.0)
+
+        assert [r["id"] for r in rows] == [best, mid]
+
+    def test_candidates_carry_only_identifying_columns(self):
+        """No abstract and no cached full text: this query materialises every
+        candidate, so a column it does not need is multiplied by all of them."""
+        conn = _db()
+        self._scored_paper(conn, doi="10.1/a", pmid="123", combined=0.9)
+
+        row = get_transparency_candidates(conn, min_combined=0.0)[0]
+
+        assert set(row) == {"id", "doi", "pmid", "title", "attempts"}
+
+    def test_results_are_ordered_worst_risk_first(self):
+        conn = _db()
+        for doi, risk in (("10.1/l", "low"), ("10.1/h", "high"), ("10.1/m", "medium")):
+            paper_id = self._scored_paper(conn, doi=doi, combined=0.9)
+            save_transparency(conn, paper_id=paper_id, transparency_score=50, risk_level=risk)
+
+        assert [r["risk_level"] for r in get_transparency_results(conn)] == [
+            "high",
+            "medium",
+            "low",
+        ]
+
+    def test_unknown_risk_value_is_pinned(self):
+        """``get_transparency_candidates`` hardcodes the literal ``'unknown'``
+        in SQL rather than reading it from the enum (unlike
+        ``bmnews/transparency/service.py``'s ``_UNKNOWN``, which deliberately
+        does read it from ``TransparencyRisk.UNKNOWN.value`` so a rename
+        upstream cannot silently stop matching). This pins the coupling on
+        the SQL side too: if bmlib ever renames the value, this test fails
+        loudly in CI instead of new rows silently falling out of the retry
+        queue."""
+        assert TransparencyRisk.UNKNOWN.value == "unknown"
+
+
+class TestTransparencyReadPath:
+    def test_digest_papers_carry_the_risk_badge(self):
+        conn = _db()
+        paper_id = store_paper(conn, doi="10.1/a", title="A", abstract="x", source="medrxiv")
+        save_score(conn, paper_id=paper_id, relevance_score=0.9, combined_score=0.9)
+        save_transparency(conn, paper_id=paper_id, transparency_score=82, risk_level="low")
+
+        papers = get_papers_for_digest(conn, min_combined=0.0)
+
+        assert papers[0]["transparency_risk"] == "low"
+        assert papers[0]["transparency_score"] == 82
+
+    def test_unanalysed_paper_reads_as_empty_not_none(self):
+        """Templates guard on truthiness, exactly as they do for quality_tier."""
+        conn = _db()
+        paper_id = store_paper(conn, doi="10.1/a", title="A", abstract="x", source="medrxiv")
+        save_score(conn, paper_id=paper_id, relevance_score=0.9, combined_score=0.9)
+
+        papers = get_papers_for_digest(conn, min_combined=0.0)
+
+        assert papers[0]["transparency_risk"] == ""
+
+    def test_detail_query_decodes_the_result_blob(self):
+        conn = _db()
+        paper_id = store_paper(conn, doi="10.1/a", title="A", abstract="x", source="medrxiv")
+        save_transparency(
+            conn,
+            paper_id=paper_id,
+            transparency_score=30,
+            risk_level="high",
+            result_json='{"risk_indicators": ["No COI disclosure found in full text"]}',
+        )
+
+        paper = get_paper_with_score(conn, paper_id)
+
+        assert paper["transparency"]["risk_indicators"] == ["No COI disclosure found in full text"]
+
+    def test_detail_query_survives_a_malformed_blob(self):
+        """A display surface must not fail to render because of stored junk."""
+        conn = _db()
+        paper_id = store_paper(conn, doi="10.1/a", title="A", abstract="x", source="medrxiv")
+        save_transparency(
+            conn,
+            paper_id=paper_id,
+            transparency_score=0,
+            risk_level="unknown",
+            result_json="not json at all",
+        )
+
+        assert get_paper_with_score(conn, paper_id)["transparency"] == {}
+
+    def test_list_queries_do_not_carry_the_blob(self):
+        """Absent means 'not asked for', which must not read as 'analysed and
+        empty' — so only the detail query populates it."""
+        conn = _db()
+        paper_id = store_paper(conn, doi="10.1/a", title="A", abstract="x", source="medrxiv")
+        save_score(conn, paper_id=paper_id, relevance_score=0.9, combined_score=0.9)
+        save_transparency(conn, paper_id=paper_id, transparency_score=82, risk_level="low")
+
+        papers = get_papers_for_digest(conn, min_combined=0.0)
+
+        assert "transparency" not in papers[0]
+
+    def test_notification_candidates_carry_the_badge_but_not_the_blob(self):
+        conn = _db()
+        paper_id = store_paper(conn, doi="10.1/a", title="A", abstract="x", source="medrxiv")
+        save_score(conn, paper_id=paper_id, relevance_score=0.9, combined_score=0.9)
+        save_transparency(conn, paper_id=paper_id, transparency_score=82, risk_level="low")
+
+        papers = get_notification_candidates(conn, watch="w", channel="c")
+
+        assert papers[0]["transparency_risk"] == "low"
+        assert "transparency" not in papers[0]
+        assert "fulltext_html" not in papers[0]
+
+
+class TestMigration7:
+    def test_creates_the_transparency_table(self):
+        # A fresh, unmigrated connection: _db() would apply every migration
+        # (including this one) up front, defeating the "not yet" assertion —
+        # the same reason _v3_db()/_v5_db() start from new_db() rather than _db().
+        conn = new_db()
+        run_migrations(conn, MIGRATIONS[:6])
+        assert not table_exists(conn, "transparency")
+
+        run_migrations(conn, MIGRATIONS)
+
+        assert table_exists(conn, "transparency")
+
+    def test_is_idempotent(self):
+        conn = _db()
+        init_db(conn)
+        run_migrations(conn, MIGRATIONS)
+        assert table_exists(conn, "transparency")

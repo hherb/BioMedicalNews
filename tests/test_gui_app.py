@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import patch
 
 import pytest
@@ -14,6 +15,7 @@ from bmnews.db.operations import (
     get_paper_with_score,
     save_fulltext,
     save_score,
+    save_transparency,
     store_paper,
 )
 from bmnews.db.schema import init_db
@@ -133,6 +135,85 @@ class TestPapersRoute:
         assert resp.status_code == 200
         assert b"Alpha Paper" in resp.data
         assert b"Beta Paper" not in resp.data
+
+
+def test_reading_pane_shows_the_transparency_badge(app):
+    conn = app.config["BMNEWS_DB"]
+    paper_id = store_paper(
+        conn, doi="10.1/a", title="A paper", abstract="Abstract", source="medrxiv"
+    )
+    save_score(conn, paper_id=paper_id, relevance_score=0.9, combined_score=0.9)
+    save_transparency(
+        conn,
+        paper_id=paper_id,
+        transparency_score=25,
+        risk_level="high",
+        result_json=json.dumps(
+            {
+                "industry_funding_detected": True,
+                "data_availability_level": "not_stated",
+                "coi_disclosed": False,
+                "trial_registered": False,
+                "trial_results_compliant": False,
+                "risk_indicators": ["No COI disclosure found in full text"],
+            }
+        ),
+    )
+
+    response = app.test_client().get(f"/papers/{paper_id}")
+    body = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert "risk-high" in body
+    assert "No COI disclosure found in full text" in body
+    assert "industry ties detected" in body and "no industry ties detected" not in body
+
+
+def test_reading_pane_renders_null_data_availability_as_unknown(app):
+    """Jinja's ``default`` filter only substitutes for *undefined*, not for a
+    JSON ``null`` decoded to ``None`` — without the boolean second argument,
+    a stored ``null`` renders the literal string "None" on the page."""
+    conn = app.config["BMNEWS_DB"]
+    paper_id = store_paper(
+        conn, doi="10.1/c", title="C paper", abstract="Abstract", source="medrxiv"
+    )
+    save_score(conn, paper_id=paper_id, relevance_score=0.9, combined_score=0.9)
+    save_transparency(
+        conn,
+        paper_id=paper_id,
+        transparency_score=60,
+        risk_level="medium",
+        result_json=json.dumps(
+            {
+                "industry_funding_detected": False,
+                "data_availability_level": None,
+                "coi_disclosed": True,
+                "trial_registered": False,
+                "trial_results_compliant": False,
+                "risk_indicators": [],
+            }
+        ),
+    )
+
+    response = app.test_client().get(f"/papers/{paper_id}")
+    body = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert "Data availability: unknown" in body
+    assert "Data availability: None" not in body
+
+
+def test_reading_pane_omits_transparency_when_unanalysed(app):
+    conn = app.config["BMNEWS_DB"]
+    paper_id = store_paper(
+        conn, doi="10.1/b", title="B paper", abstract="Abstract", source="medrxiv"
+    )
+    save_score(conn, paper_id=paper_id, relevance_score=0.9, combined_score=0.9)
+
+    body = app.test_client().get(f"/papers/{paper_id}").get_data(as_text=True)
+
+    assert "risk-badge" not in body
+    assert "Research integrity" not in body
 
 
 class TestSettingsRoute:

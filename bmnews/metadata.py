@@ -1,7 +1,7 @@
-"""Helpers for the ``paper_extras.metadata_json`` blob.
+"""Helpers for the JSON-object columns bmnews stores.
 
 The fields a source reports that bmlib's ``publications`` schema has no column
-for — Europe PMC's ``cited_by``, say — are stored as a JSON object.  Decoding
+for — Europe PMC's ``cited_by``, say — are stored as a JSON object. Decoding
 it defensively belongs in one place: the column holds data written by earlier
 versions of the app and by every fetcher, so a malformed or unexpectedly
 shaped value must degrade to "no metadata" rather than raise.
@@ -12,11 +12,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
-__all__ = ["parse_metadata"]
+__all__ = ["parse_metadata", "parse_transparency"]
 
 
-def parse_metadata(raw: Any) -> dict:
-    """Decode a stored ``metadata_json`` value into a dict.
+def parse_json_object(raw: Any) -> dict:
+    """Decode a stored JSON-object column into a dict.
 
     Args:
         raw: The stored value — a JSON string, an already-decoded dict, or None.
@@ -30,7 +30,36 @@ def parse_metadata(raw: Any) -> dict:
     if not raw:
         return {}
     try:
-        meta = json.loads(raw)
+        value = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
         return {}
-    return meta if isinstance(meta, dict) else {}
+    return value if isinstance(value, dict) else {}
+
+
+def parse_metadata(raw: Any) -> dict:
+    """Decode a stored ``paper_extras.metadata_json`` value into a dict.
+
+    The column holds data written by every fetcher and by earlier versions of
+    the app, so a malformed or unexpectedly shaped value degrades to "no
+    metadata" rather than raising.
+    """
+    return parse_json_object(raw)
+
+
+def parse_transparency(raw: Any) -> dict:
+    """Decode a stored ``transparency.result_json`` value into a dict.
+
+    Deliberately **not** ``bmlib.transparency.TransparencyResult.from_dict()``.
+    That classmethod is stricter than a display path can afford: it raises
+    ``ValueError`` if ``risk_level`` is not a value ``TransparencyRisk``
+    recognises, ``KeyError`` if ``document_id`` or ``transparency_score`` is
+    missing, and it raises out of ``datetime.fromisoformat`` on a malformed
+    ``analyzed_at``. A row this app wrote itself should never trip those, but
+    the column holds data from whatever bmlib version stored it, so a paper's
+    page must not fail to render over a decoding disagreement it had no part
+    in. (bmlib 0.6.0 also has ``from_dict`` raise on an ``unknown_reason`` it
+    does not recognise; not applicable to the 0.5.1 this project currently
+    pins, which has no such field.) The display surfaces read plain keys, so a
+    dict is all they need.
+    """
+    return parse_json_object(raw)

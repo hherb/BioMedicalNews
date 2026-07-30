@@ -28,19 +28,24 @@ from bmlib.publications.storage import get_publication_by_doi, get_publication_b
 from bmnews.constants import (
     DEFAULT_PAGE_SIZE,
     DEFAULT_QUERY_LIMIT,
+    TRANSPARENCY_MAX_ATTEMPTS,
     UNSCORED_BATCH_SIZE,
 )
-from bmnews.metadata import parse_metadata
+from bmnews.metadata import parse_metadata, parse_transparency
 
 logger = logging.getLogger(__name__)
 
 _is_sqlite = is_sqlite
 _placeholder = placeholder
 
-# Every paper query selects the same three-way join, so the SELECT list and the
-# FROM clause live here rather than being retyped (and drifting) per query.
+# Every paper query selects the same join, so the SELECT list and the FROM
+# clause live here rather than being retyped (and drifting) per query. The
+# transparency columns ride along on both, which is what makes the risk badge
+# available to the digest, the GUI and the tag views without editing eight
+# queries. Only ``get_paper_with_score`` adds ``result_json`` on top.
 _PAPER_COLUMNS = """
-    p.*, e.metadata_json, e.fulltext_html, e.fulltext_source, e.fulltext_pdf_url
+    p.*, e.metadata_json, e.fulltext_html, e.fulltext_source, e.fulltext_pdf_url,
+    t.risk_level AS transparency_risk, t.transparency_score
 """
 
 _SCORE_COLUMNS = """
@@ -51,6 +56,7 @@ _SCORE_COLUMNS = """
 _PAPER_FROM = """
     FROM publications p
     LEFT JOIN paper_extras e ON e.publication_id = p.id
+    LEFT JOIN transparency t ON t.paper_id = p.id
 """
 
 
@@ -194,7 +200,8 @@ def get_paper_with_score(conn: Any, paper_id: int) -> dict | None:
     row = fetch_one(
         conn,
         f"""
-        SELECT {_PAPER_COLUMNS}, {_SCORE_COLUMNS}, s.assessment_json
+        SELECT {_PAPER_COLUMNS}, {_SCORE_COLUMNS}, s.assessment_json,
+               t.result_json AS transparency_json
         {_PAPER_FROM}
         LEFT JOIN scores s ON s.paper_id = p.id
         WHERE p.id = {ph}
@@ -593,9 +600,13 @@ def record_digest(
 # cached article into memory to answer a question that needs none of it. These
 # are exactly the columns the matcher tests, the templates render, and
 # `_row_to_paper` needs to derive the outbound URL.
+# The two transparency columns are an integer and a short enum value, so they
+# cost nothing here; ``result_json`` is deliberately left out for the same
+# reason the cached full text is.
 _NOTIFY_PAPER_COLUMNS = """
     p.id, p.doi, p.pmid, p.pmcid, p.title, p.abstract, p.journal,
-    p.publication_date, p.authors, p.sources
+    p.publication_date, p.authors, p.sources,
+    t.risk_level AS transparency_risk, t.transparency_score
 """
 
 
@@ -661,6 +672,7 @@ def get_notification_candidates(
         SELECT {_NOTIFY_PAPER_COLUMNS}, {_SCORE_COLUMNS}
         FROM publications p
         JOIN scores s ON s.paper_id = p.id
+        LEFT JOIN transparency t ON t.paper_id = p.id
         LEFT JOIN notifications n
                ON n.paper_id = p.id
               AND n.watch = {ph}
@@ -827,6 +839,203 @@ def count_notifications(
         )
         or 0
     )
+
+
+# --- Transparency ---
+
+
+def save_transparency(
+    conn: Any,
+    *,
+    paper_id: int,
+    transparency_score: int,
+    risk_level: str,
+    result_json: str = "{}",
+    reset_attempts: bool = False,
+) -> None:
+    """Insert or update one paper's transparency result.
+
+    A repeat analysis **increments** ``attempts``, which is what bounds the
+    retry of an indeterminate result. Without the increment the ceiling never
+    binds and a paper indexed in none of bmlib's APIs is re-queried on every
+    run forever, since bmlib cannot distinguish that from a network outage.
+
+    Args:
+        conn: DB-API connection.
+        paper_id: The ``publications`` row this result is for.
+        transparency_score: bmlib's 0–100 transparency score.
+        risk_level: ``low``, ``medium``, ``high`` or ``unknown`` — a
+            :class:`bmlib.transparency.TransparencyRisk` value.
+        result_json: bmlib's whole ``TransparencyResult.to_dict()``, encoded.
+        reset_attempts: Restart the retry budget at 1 instead of incrementing.
+            Set by ``--refresh``: an explicit re-analysis is the user asking
+            for the work again, so it must restore the automatic retries too.
+            Otherwise a refreshed paper would spend its whole budget on that
+            single attempt and a transient outage would strand it as UNKNOWN.
+    """
+    ph = _placeholder(conn)
+    sqlite = _is_sqlite(conn)
+    now = "datetime('now')" if sqlite else "NOW()"
+    excluded = "excluded" if sqlite else "EXCLUDED"
+    # Qualifying the existing row by table name works on both backends, as
+    # ``record_notification`` already relies on.
+    attempts = "1" if reset_attempts else "transparency.attempts + 1"
+
+    sql = f"""
+        INSERT INTO transparency (paper_id, transparency_score, risk_level, result_json)
+        VALUES ({ph}, {ph}, {ph}, {ph})
+        ON CONFLICT(paper_id) DO UPDATE SET
+            transparency_score = {excluded}.transparency_score,
+            risk_level = {excluded}.risk_level,
+            result_json = {excluded}.result_json,
+            attempts = {attempts},
+            analyzed_at = {now}
+    """
+
+    with _transaction(conn):
+        execute(conn, sql, (paper_id, transparency_score, risk_level, result_json))
+
+
+# Enough to identify a paper to bmlib's analyzer and to report on it. The
+# analyzer takes identifiers only, so the abstract, the author list and the
+# GUI's cached full text are all dead weight in a query that materialises every
+# candidate — the same lesson `_NOTIFY_PAPER_COLUMNS` records. ``t.attempts``
+# rides along so the caller knows the retry budget it is about to spend without
+# reading the row back after writing it.
+_TRANSPARENCY_CANDIDATE_COLUMNS = """
+    p.id, p.doi, p.pmid, p.title, t.attempts
+"""
+
+
+def get_transparency_candidates(
+    conn: Any,
+    *,
+    min_combined: float = 0.0,
+    limit: int = DEFAULT_QUERY_LIMIT,
+    max_attempts: int = TRANSPARENCY_MAX_ATTEMPTS,
+    refresh: bool = False,
+    paper_id: int | None = None,
+) -> list[dict]:
+    """Select scored papers whose transparency is still worth analysing.
+
+    The queue is *papers with no result yet*, plus results that came back
+    ``unknown`` and have not spent their attempts. A determinate result never
+    returns however high its ``attempts`` climbed, because the ``risk_level``
+    test fails first.
+
+    Args:
+        conn: DB-API connection.
+        min_combined: Floor on the combined score — the cost gate, since each
+            analysis spends four to eight external requests. Ignored when
+            *paper_id* names a paper.
+        limit: Maximum rows to return.
+        max_attempts: How many times an ``unknown`` result may be re-attempted.
+        refresh: Also select papers already holding a determinate result, and
+            order by staleness rather than score — see below.
+        paper_id: Restrict to one publication and skip the score gate — the
+            user named that paper, so a gate meant to avoid spending requests
+            on papers nobody will read does not apply to it.
+
+    Returns:
+        Rows carrying ``id``, ``doi``, ``pmid``, ``title`` and ``attempts``
+        (``None`` when no result exists yet). Ordered by combined score, best
+        first — except under *refresh*, which orders by staleness.
+    """
+    ph = _placeholder(conn)
+    params: list = []
+
+    # Every publication has a DOI or a PMID — migration 4 could not represent a
+    # row with neither — so this is defensive. It is also what guarantees
+    # bmlib's NO_IDENTIFIER result is never reached, and therefore that the
+    # attempt count never has to tell a permanent failure from a transient one.
+    conditions = ["(p.doi IS NOT NULL OR p.pmid IS NOT NULL)"]
+
+    if paper_id is not None:
+        conditions.append(f"p.id = {ph}")
+        params.append(paper_id)
+    else:
+        conditions.append(f"s.combined_score >= {ph}")
+        params.append(min_combined)
+
+    if not refresh:
+        conditions.append(
+            f"(t.paper_id IS NULL OR (t.risk_level = 'unknown' AND t.attempts < {ph}))"
+        )
+        params.append(max_attempts)
+
+    params.append(limit)
+
+    # Score order is right for the normal queue: a paper drops out of it once
+    # it holds a result, so every run starts on papers the last one never saw.
+    #
+    # A refresh run has no such predicate — it selects everything above the
+    # gate — so score order would hand back the identical top-`limit` papers on
+    # every run and never reach the rest of the corpus, re-spending four to
+    # eight requests per paper to learn nothing. Least-recently-analysed first
+    # makes successive runs walk it instead: the batch just refreshed sorts to
+    # the back, and a never-analysed paper leads.
+    #
+    # NULLS FIRST is explicit because the backends disagree on the default —
+    # SQLite sorts NULLs first in ASC, PostgreSQL sorts them last — and a
+    # never-analysed paper is the one that must not be sorted to the back.
+    order = (
+        "t.analyzed_at ASC NULLS FIRST, s.combined_score DESC, p.id ASC"
+        if refresh
+        else "s.combined_score DESC, p.id ASC"
+    )
+
+    rows = fetch_all(
+        conn,
+        f"""
+        SELECT {_TRANSPARENCY_CANDIDATE_COLUMNS}
+        FROM publications p
+        JOIN scores s ON s.paper_id = p.id
+        LEFT JOIN transparency t ON t.paper_id = p.id
+        WHERE {" AND ".join(conditions)}
+        ORDER BY {order}
+        LIMIT {ph}
+        """,
+        tuple(params),
+    )
+    return [dict(row) for row in rows]
+
+
+def get_transparency_results(conn: Any, *, limit: int = DEFAULT_QUERY_LIMIT) -> list[dict]:
+    """Read stored transparency results, worst risk first.
+
+    Ordered by risk rather than score so ``bmnews transparency --list`` opens
+    on the papers that warrant a second look. The ranking is spelled out as a
+    CASE rather than leaning on the alphabetical accident that ``high`` sorts
+    before ``low`` before ``medium``.
+
+    Args:
+        conn: DB-API connection.
+        limit: Maximum rows to return.
+
+    Returns:
+        Rows carrying ``paper_id``, ``transparency_score``, ``risk_level``,
+        ``attempts``, ``result_json``, ``title`` and ``doi``.
+    """
+    ph = _placeholder(conn)
+    rows = fetch_all(
+        conn,
+        f"""
+        SELECT t.paper_id, t.transparency_score, t.risk_level, t.attempts,
+               t.result_json, p.title, p.doi
+        FROM transparency t
+        JOIN publications p ON p.id = t.paper_id
+        ORDER BY CASE t.risk_level
+                     WHEN 'high' THEN 0
+                     WHEN 'medium' THEN 1
+                     WHEN 'low' THEN 2
+                     ELSE 3
+                 END,
+                 t.transparency_score ASC, t.paper_id ASC
+        LIMIT {ph}
+        """,
+        (limit,),
+    )
+    return [dict(row) for row in rows]
 
 
 # --- Paper extras (bmnews-only per-publication data) ---
@@ -1011,7 +1220,7 @@ _JSON_LIST_COLUMNS = ("authors", "keywords", "publication_types", "sources")
 #
 # The identifiers (doi, pmid, pmcid) are deliberately absent: for those,
 # "not present" is a distinct state from "empty", and dedupe relies on it.
-_NULLABLE_TEXT_COLUMNS = ("abstract", "journal", "license")
+_NULLABLE_TEXT_COLUMNS = ("abstract", "journal", "license", "transparency_risk")
 
 
 def paper_url(paper: dict) -> str:
@@ -1047,8 +1256,9 @@ def _row_to_paper(row: Any) -> dict:
     """Convert a joined DB row into the paper dict the rest of bmnews uses.
 
     The JSON array columns become real lists, the source-specific extras blob
-    becomes a ``metadata`` dict, and the outbound ``url`` is derived from the
-    identifiers.
+    becomes a ``metadata`` dict, the transparency result blob becomes a
+    ``transparency`` dict when the query asked for it, and the outbound ``url``
+    is derived from the identifiers.
     """
     if row is None:
         return {}
@@ -1065,6 +1275,16 @@ def _row_to_paper(row: Any) -> dict:
             paper[column] = ""
 
     paper["metadata"] = parse_metadata(paper.get("metadata_json"))
+    # Only the paper-detail query selects the blob, so the membership test is
+    # what keeps ``transparency`` off the dicts the other queries build rather
+    # than putting an empty one there. The badge columns above are handled the
+    # other way round on purpose: ``_NULLABLE_TEXT_COLUMNS`` stamps
+    # ``transparency_risk`` to "" whether the query omitted it or the paper has
+    # no row, because both mean "render no badge" and every template guards on
+    # truthiness. The blob has no such collapse available — a section rendered
+    # from `{}` would claim the paper was analysed and found clean.
+    if "transparency_json" in paper:
+        paper["transparency"] = parse_transparency(paper["transparency_json"])
     paper["is_open_access"] = bool(paper.get("is_open_access"))
     paper["url"] = paper_url(paper)
     return paper

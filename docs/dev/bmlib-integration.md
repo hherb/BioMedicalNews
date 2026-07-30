@@ -213,11 +213,36 @@ The ceiling comes from config: `quality.default_tier` clamped by `quality.max_ti
 
 `UNCLASSIFIED` papers are never excluded by a tier floor — unjudged is not judged-and-rejected. `scoring.scorer.tiers_below()` is the one place that rule is implemented, and the notification matcher reuses it so the digest and watches agree.
 
-### `bmlib.transparency` — Transparency analysis (not wired up)
+### `bmlib.transparency` — Research-integrity analysis
 
-**Declared but unused.** `bmnews.config` has a `[transparency]` section (`enabled`, `min_score_threshold`) and `pyproject.toml` declares a `transparency` extra, but no bmnews code calls the analyzer — setting `enabled = true` currently changes nothing. bmlib's analyzer queries CrossRef, Europe PMC, OpenAlex and ClinicalTrials.gov for publication-integrity data.
+**Used in:** `bmnews/transparency/service.py` (the stage), `db/operations.py` (storage and the read path), `pipeline.py` (placement), `cli.py` (`bmnews transparency`)
 
-Wiring it up is the largest open item in bmnews; check `docs/plans/` and HANDOVER.md before starting. Install with `uv pip install -e ".[transparency]"`.
+A fifth pipeline stage between SCORE and NOTIFY. `bmnews.transparency.service.run_transparency()` selects scored papers above the `transparency.min_combined_score` cost gate, hands each to a single shared `TransparencyAnalyzer`, and stores whatever comes back — it **informs only**, never filters or re-ranks.
+
+```python
+from bmlib.transparency import TransparencyAnalyzer, TransparencyRisk, TransparencySettings
+
+analyzer = TransparencyAnalyzer(
+    email=config.user.email or DEFAULT_CONTACT_EMAIL,
+    pubmed_api_key=...,   # reused from sources.source_options.pubmed, not duplicated in config
+    settings=TransparencySettings(
+        enabled=True,   # always True here — see build_settings()'s docstring for why
+        score_threshold=config.transparency.score_threshold,
+        max_concurrent_analyses=config.transparency.concurrency,
+    ),
+)
+result = analyzer.analyze(str(paper["id"]), pmid=paper.get("pmid"), doi=paper.get("doi"))
+```
+
+**The settings mapping is smaller than bmlib's settings object.** `TransparencySettings` also carries `industry_funding_triggers_downgrade` and `missing_coi_triggers_downgrade` (both default `True`) and `tier_downgrade_amount`; `build_settings()` in `bmnews/transparency/service.py` leaves all three at bmlib's defaults rather than exposing them in `[transparency]`. The two `*_triggers_downgrade` flags matter regardless of the tier downgrade being unused here — they also shape `calculate_risk_level()`, which is what makes an industry-funded paper with restricted data read HIGH instead of MEDIUM. `filtering_enabled` stays `False` because this caller does not filter, and the settings object should not claim otherwise.
+
+**`tier_downgrade_applied` is stored, never applied.** bmlib's result carries a flag saying a paper's quality tier *would* be downgraded for transparency reasons. `result_json` (the whole `TransparencyResult.to_dict()`) keeps it, but nothing in bmnews reads it back into a score — a value derived from five external APIs must not be able to move a `combined_score` the user has already acted on. Filtering and the downgrade are both additive later, not oversights now.
+
+**The retry ceiling is the one thing not to undo.** bmlib's reachability flag is set only on an HTTP 200, so `UNREACHABLE` covers both a network outage and a paper indexed in none of the five APIs — the two cannot be told apart. `transparency.attempts` bounds automatic retries at `TRANSPARENCY_MAX_ATTEMPTS` (3); `bmnews transparency --refresh` resets it to 1. Removing the ceiling means re-querying every unindexed preprint, four to eight requests each, on every run, forever.
+
+**The bmlib pin (0.5.1) is untouched.** The design deliberately avoids `TransparencyUnknownReason`, which that version does not export — `parse_transparency()` in `bmnews/metadata.py` decodes `result_json` as a plain dict rather than through bmlib's `TransparencyResult.from_dict()` for the same reason: that classmethod raises on a member it does not recognise. Bumping to bmlib 0.6.0 needs no bmnews code change; `unknown_reason` then starts appearing inside the stored JSON on its own.
+
+Install with `uv pip install -e ".[transparency]"` — though note the extra is vestigial: it resolves to `bmlib[transparency]`, which is `httpx>=0.25`, already a core bmnews dependency. It installs nothing new; it exists to name the feature, not to gate a real dependency.
 
 ## Extending bmnews with bmlib
 

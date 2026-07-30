@@ -33,8 +33,11 @@ pip install -e ".[postgresql]"
 # Desktop GUI (pywebview + Flask) — needed for `bmnews gui`
 pip install -e ".[gui]"
 
-# Transparency analysis (declared but not yet wired up — installs the
-# bmlib dependency; nothing in bmnews calls it yet)
+# Transparency analysis (research-integrity checks via bmlib). This extra
+# resolves to httpx>=0.25, which bmnews already requires as a core
+# dependency — it installs nothing new. It exists as a marker for the
+# feature rather than a real dependency boundary; enable it in config with
+# [transparency] enabled = true, no extra install needed.
 pip install -e ".[transparency]"
 
 # Development tools (pytest, ruff)

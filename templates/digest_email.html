@@ -35,6 +35,7 @@ h1 { color: #1a5276; border-bottom: 2px solid #1a5276; padding-bottom: 10px; }
         <span class="score-badge">Relevance: {{ "%.0f"|format(paper.relevance_score * 100) }}%</span>
         {% if paper.quality_tier %}<span class="score-badge">Quality: {{ paper.quality_tier }}</span>{% endif %}
         {% if paper.study_design %}<span class="score-badge">Design: {{ paper.study_design }}</span>{% endif %}
+        {% if paper.transparency_risk %}<span class="score-badge">Transparency: {{ paper.transparency_risk|upper|e }}</span>{% endif %}
     </div>
 </div>
 {% endfor %}

@@ -8,8 +8,11 @@
 | Multi-provider LLM + model selector | **Done.** Six providers via bmlib (`list_providers()` is the authority), settings UI datalist cached in `~/.bmnews/model_cache.json`. Design/plan: `docs/plans/2026-02-15-llm-providers-model-selector-*.md`. |
 | Notification service | **Done.** CLI, pipeline stage, and the GUI watches pane — see below. |
 | `docs/dev/` drift | **Done.** All six files rewritten against the current code ([issue #11](https://github.com/hherb/BioMedicalNews/issues/11)). |
-| `bmlib.transparency` | **Unused.** Config section and packaging extra declared, analyzer never called. This is now the largest open item. |
+| `bmlib.transparency` | **Done.** Wired up as a fifth pipeline stage, informs only — see below. |
 | `docs/dev/` drift detection | **Open.** The rewrite above was verified by hand, and nothing in CI fails when a rename rots it again — [issue #16](https://github.com/hherb/BioMedicalNews/issues/16). |
+| bmlib pin → 0.6.0 | **Open, not urgent.** Every symbol the transparency stage uses exists in the pinned 0.5.1; the design avoids `TransparencyUnknownReason`, which only 0.6.0 exports. Bumping needs `uv lock --upgrade-package bmlib` and no code change — `unknown_reason` then starts appearing inside `result_json` on its own, since the whole `TransparencyResult.to_dict()` blob is stored. |
+| Digest templates don't escape metadata | **Open.** `templates/digest_email.html` / `digest_text.txt` interpolate `paper.title`, `paper.summary` and the author list unescaped, unlike the four `notify_*` templates. Found while adding the transparency badge; unrelated to it. [Issue #17](https://github.com/hherb/BioMedicalNews/issues/17). |
+| Reading pane shows literal `None` for a missing date | **Open.** `publication_date` is a date column, not text, so it was left out of `_NULLABLE_TEXT_COLUMNS` — a `NULL` reaches `reading_pane.html` unguarded. Pre-existing, unrelated to transparency. [Issue #18](https://github.com/hherb/BioMedicalNews/issues/18). |
 
 ## Environment gotcha
 
@@ -25,6 +28,13 @@ uv lock --upgrade-package bmlib
 That is what unblocked the suite this session: the lock sat at bmlib 0.2.1
 (`e227ec14`) while `db/operations.py` had already started importing
 `bmlib.db.is_sqlite`, which only exists from 0.5.x.
+
+**The pin is still 0.5.1, deliberately, as of the transparency stage.** Every
+`bmlib.transparency` symbol the stage uses — `TransparencyAnalyzer`,
+`TransparencyRisk`, `TransparencySettings` — exists in 0.5.1. The design
+avoids `TransparencyUnknownReason`, which only 0.6.0 exports, specifically so
+this feature would not force the pin to move. Bumping to 0.6.0 is still a
+reasonable follow-up (see below), but nothing about transparency requires it.
 
 ## The notification service
 
@@ -132,6 +142,79 @@ resends the rest under a different `txnId`. And the four `notify_*` templates
 escape their own interpolations, because bmlib's `TemplateEngine` runs with
 `autoescape=False`.
 
+## The transparency stage
+
+Design: `docs/plans/2026-07-30-transparency-analysis-design.md`. Plan:
+`docs/plans/2026-07-30-transparency-analysis-plan.md`. `[transparency]` had
+sat in `config.toml` since the first release with nothing calling an
+analyzer — `enabled = true` was a silent no-op. It is now a fifth pipeline
+stage, `SYNC → SCORE → TRANSPARENCY → NOTIFY → DIGEST`, wired end to end:
+config, the `transparency` table (migration 7), the read path, the stage
+itself, the CLI, and all four display surfaces (GUI reading pane, digest,
+notify templates, `bmnews transparency --list`).
+
+**Placement mirrors NOTIFY, and for the same reasons.** Neither stage is
+gated on `scored > 0` — a run with nothing newly scored can still have a
+paper that just crossed `min_combined_score` on a re-score, exactly as NOTIFY
+can still have a watch just loosened. Both are wrapped so a failure cannot
+take the run down: sync and scoring have already done the expensive work by
+the time either runs, and TRANSPARENCY specifically depends on five external
+APIs, any of which can be down without that costing the digest.
+
+**The one invariant not to undo: retries are bounded by an attempt count, not
+by the reason a result came back UNKNOWN.** bmlib's analyzer sets its
+"reachable" flag only on an HTTP 200, so it reports `UNREACHABLE` both for a
+network outage *and* for a paper indexed in none of the five APIs — the two
+are indistinguishable from the result alone. "Retry every `UNKNOWN`" would
+therefore mean re-querying every unindexed preprint, four to eight requests
+each, on every single run, forever. The `transparency.attempts` column stops
+that at `TRANSPARENCY_MAX_ATTEMPTS` (3); `bmnews transparency --refresh`
+resets it to 1, because an explicit re-analysis has to restore the automatic
+retries too, or a single forced attempt would exhaust the whole budget on one
+try. A determinate result (`low`/`medium`/`high`) is never re-selected
+regardless of `attempts` — `get_transparency_candidates()`'s `risk_level`
+test fails before `attempts` is even considered.
+
+**The second selection invariant: a refresh run is ordered by staleness, not
+by score.** The normal queue narrows itself — a paper drops out of it the
+moment it holds a determinate result — so ordering that queue best-score-first
+means every run starts on papers the last one never saw. A refresh run has no
+such predicate; it selects everything above the gate. Ordered by score it
+therefore returned the *identical* top-`limit` papers on every run, re-spending
+four to eight requests per paper while the rest of the corpus was never reached
+at all — so a corpus larger than one batch could not be refreshed by any number
+of `--refresh` runs. `get_transparency_candidates()` switches to
+`t.analyzed_at ASC NULLS FIRST` when `refresh` is set, which sorts the batch
+just refreshed to the back and lets successive runs walk the corpus. **Keep
+`NULLS FIRST` explicit**: SQLite sorts NULLs first in `ASC` and PostgreSQL
+sorts them last, so dropping it passes the SQLite suite and strands
+never-analysed papers at the back of the queue on PostgreSQL only.
+`tests/test_db.py::TestTransparency::test_refresh_puts_a_never_analysed_paper_first`
+runs on both backends and is what catches that.
+
+**The config gate was renamed.** `min_score_threshold` → `min_combined_score`
+— it sat one field away from bmlib's own `score_threshold`, which means
+something else on a different scale (0.0–1.0 combined score vs. bmlib's
+0–100 transparency score). Safe to rename because the feature had never run,
+so no stored value needed migrating. `TransparencyConfig` carries the old
+name forward via `_DEPRECATED_KEYS` with a log warning rather than silently
+reverting a customised value to the default; `save_config` writes the new
+name on the next save.
+
+**It informs only, on purpose, and that is not a placeholder for later.**
+Nothing filters or reranks on a transparency result — no selection query
+reads `transparency_score`, the notify matcher is untouched, and bmlib's
+`tier_downgrade_applied` is stored in `result_json` and never read back into
+a `combined_score`. A value derived from five external APIs must not be able
+to move a score the user has already acted on. Filtering and the tier
+downgrade are both plausible additive follow-ups, not oversights — do not
+"finish" this by wiring either one in without a fresh design conversation.
+
+**The bmlib pin (0.5.1) is untouched, deliberately.** The design avoids
+`TransparencyUnknownReason`, which only 0.6.0 exports, specifically so this
+feature would not force the pin. See "Environment gotcha" above and the
+open-items table for the bump as a tracked follow-up.
+
 ## The developer docs
 
 `docs/dev/` had drifted a long way behind the `publications` migration — it
@@ -142,8 +225,10 @@ exist. All six files are now written against the code as it stands:
 - **`database.md`** — rewritten around the two owners (bmlib: `publications`,
   `fulltext_sources`, `download_days`; bmnews: `scores`, `paper_tags`,
   `digests`/`digest_papers`, `paper_extras`, `notifications`), the three-way
-  join a "paper" actually is, the six migrations, the real operations
-  reference, and the per-backend test setup.
+  join a "paper" actually is, the migration list (grown since this rewrite —
+  see current count in the migration table itself rather than trusting a
+  number here), the real operations reference, and the per-backend test
+  setup.
 - **`architecture.md`** — data-flow diagram and module graph redrawn; the
   notify path and the GUI blueprints added; backend-aware SQL corrected to
   `placeholder()`/`is_sqlite()` and per-migration DDL pairs.

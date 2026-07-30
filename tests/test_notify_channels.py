@@ -401,3 +401,51 @@ class TestRendering:
         assert "<img" not in out
         assert "&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt; in melanoma" in out
         assert "&lt;img src=x onerror=alert(1)&gt;" in out
+
+
+class TestTransparencyBadge:
+    def _papers(self):
+        return [
+            {
+                "title": "Adjuvant immunotherapy in melanoma",
+                "url": "https://doi.org/10.1101/one",
+                "authors": ["Smith J"],
+                "sources": ["medrxiv"],
+                "publication_date": "2026-07-30",
+                "relevance_score": 0.9,
+                "quality_tier": "TIER_2_OBSERVATIONAL",
+                "study_design": "cohort",
+                "summary": "Summary.",
+                "transparency_risk": "medium",
+                "transparency_score": 60,
+            }
+        ]
+
+    def _render(self, medium, fmt, papers=None):
+        from pathlib import Path
+
+        from bmlib.templates import TemplateEngine
+
+        from bmnews.notify.renderer import render_notification
+
+        engine = TemplateEngine(default_dir=Path(__file__).parent.parent / "templates")
+        return render_notification(
+            papers if papers is not None else self._papers(),
+            watch_name="melanoma-trials",
+            templates=engine,
+            medium=medium,
+            fmt=fmt,
+        )
+
+    @pytest.mark.parametrize("medium", ["email", "matrix"])
+    @pytest.mark.parametrize("fmt", ["html", "text"])
+    def test_every_template_shows_the_badge(self, medium, fmt):
+        assert "MEDIUM" in self._render(medium, fmt)
+
+    @pytest.mark.parametrize("medium", ["email", "matrix"])
+    @pytest.mark.parametrize("fmt", ["html", "text"])
+    def test_unanalysed_paper_renders_no_badge(self, medium, fmt):
+        papers = self._papers()
+        papers[0]["transparency_risk"] = ""
+
+        assert "transparency" not in self._render(medium, fmt, papers=papers).lower()

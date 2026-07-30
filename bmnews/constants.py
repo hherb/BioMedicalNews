@@ -140,3 +140,22 @@ SERVER_POLL_INTERVAL_SECONDS: float = 0.05
 
 #: Truncation length for paper titles printed by ``bmnews search``.
 CLI_TITLE_TRUNCATE: int = 80
+
+# --- Transparency -----------------------------------------------------------
+
+#: How many papers one transparency run analyses. bmlib paces every outbound
+#: request 0.35 s apart across the whole analyzer, and one analysis makes four
+#: to eight of them (CrossRef, a Europe PMC search, its full text, PubMed
+#: efetch, OpenAlex, up to three ClinicalTrials.gov lookups) — so 1.4–2.8 s per
+#: paper is mandatory however many threads run. Concurrency hides per-request
+#: latency; it cannot raise that ceiling. This bounds a run to a few minutes
+#: and leaves the rest queued, exactly as ``UNSCORED_BATCH_SIZE`` does.
+TRANSPARENCY_BATCH_SIZE: int = 100
+
+#: How many times a paper whose analysis came back UNKNOWN is re-attempted
+#: before it is left alone. bmlib sets its reachability flag only on an HTTP
+#: 200, so it reports UNREACHABLE both for a network outage and for a paper
+#: indexed in none of its five APIs — the two are indistinguishable. Retrying
+#: every UNKNOWN forever would therefore re-query every unindexed preprint on
+#: every run. ``bmnews transparency --refresh`` resets the count.
+TRANSPARENCY_MAX_ATTEMPTS: int = 3

@@ -771,6 +771,59 @@ def _m006_add_fulltext_pdf_url(conn: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Migration 7: transparency analysis results
+# ---------------------------------------------------------------------------
+
+# bmnews-owned, one row per publication. ``paper_id`` is the primary key rather
+# than a surrogate id with UNIQUE(paper_id): there is exactly one result per
+# paper, and it gives the upsert its conflict target for free.
+#
+# ``result_json`` holds bmlib's whole ``TransparencyResult.to_dict()`` the way
+# ``scores.assessment_json`` holds a quality assessment, so a field bmlib adds
+# later — ``unknown_reason``, for one — needs no migration to start being
+# stored.
+#
+# ``attempts`` is what stops an unanalysable paper being re-queried forever.
+# bmlib sets its reachability flag only on an HTTP 200, so it reports
+# UNREACHABLE both for a network outage and for a paper indexed in none of its
+# five APIs; the two cannot be told apart, so "retry every UNKNOWN" has no
+# natural end. ``get_transparency_candidates`` retries only while this stays
+# under ``TRANSPARENCY_MAX_ATTEMPTS``.
+#
+# No secondary index. Both queries that mention ``risk_level`` reach a row
+# through ``paper_id`` — the candidate query joins on it from ``publications``,
+# and ``get_transparency_results`` sorts on a CASE expression no index on the
+# bare column can serve — so an index there would cost a write on every upsert
+# and be read by nothing. Add one when a query arrives that can use it.
+_M007_SQLITE = """\
+CREATE TABLE IF NOT EXISTS transparency (
+    paper_id INTEGER PRIMARY KEY REFERENCES publications(id) ON DELETE CASCADE,
+    transparency_score INTEGER NOT NULL DEFAULT 0,
+    risk_level TEXT NOT NULL DEFAULT '',
+    attempts INTEGER NOT NULL DEFAULT 1,
+    result_json TEXT NOT NULL DEFAULT '{}',
+    analyzed_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"""
+
+_M007_POSTGRESQL = """\
+CREATE TABLE IF NOT EXISTS transparency (
+    paper_id INTEGER PRIMARY KEY REFERENCES publications(id) ON DELETE CASCADE,
+    transparency_score INTEGER NOT NULL DEFAULT 0,
+    risk_level TEXT NOT NULL DEFAULT '',
+    attempts INTEGER NOT NULL DEFAULT 1,
+    result_json TEXT NOT NULL DEFAULT '{}',
+    analyzed_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+"""
+
+
+def _m007_add_transparency(conn: Any) -> None:
+    """Create the ``transparency`` table holding bmlib's analysis results."""
+    create_tables(conn, _M007_SQLITE if _is_sqlite(conn) else _M007_POSTGRESQL)
+
+
+# ---------------------------------------------------------------------------
 # Migration registry
 # ---------------------------------------------------------------------------
 
@@ -781,4 +834,5 @@ MIGRATIONS: list[Migration] = [
     Migration(4, "migrate_to_publications", _m004_migrate_to_publications),
     Migration(5, "add_notifications", _m005_add_notifications),
     Migration(6, "add_fulltext_pdf_url", _m006_add_fulltext_pdf_url),
+    Migration(7, "add_transparency", _m007_add_transparency),
 ]

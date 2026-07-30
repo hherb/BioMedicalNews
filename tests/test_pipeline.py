@@ -19,7 +19,7 @@ from click.testing import CliRunner
 
 from bmnews import pipeline
 from bmnews.cli import main
-from bmnews.config import load_config
+from bmnews.config import AppConfig, load_config
 from bmnews.db.operations import (
     get_paper_by_doi,
     get_paper_with_score,
@@ -563,3 +563,77 @@ class TestNotifyStage:
             pipeline.run_pipeline(_test_config())
 
         assert mock_digest.called
+
+
+class TestTransparencyStage:
+    """Where the transparency stage sits in `run_pipeline`."""
+
+    def _config(self, enabled=True):
+        config = AppConfig()
+        config.transparency.enabled = enabled
+        return config
+
+    def test_runs_between_scoring_and_notification(self, monkeypatch):
+        """Order matters twice: the gate reads combined_score, and both the
+        digest and the notify templates render the badge."""
+        calls = []
+        monkeypatch.setattr(pipeline, "run_sync", lambda *a, **k: calls.append("sync"))
+        monkeypatch.setattr(pipeline, "run_score", lambda *a, **k: (calls.append("score"), 1)[1])
+        monkeypatch.setattr(
+            pipeline,
+            "_run_transparency_stage",
+            lambda *a, **k: calls.append("transparency"),
+        )
+        monkeypatch.setattr(pipeline, "_run_notify_stage", lambda *a, **k: calls.append("notify"))
+        monkeypatch.setattr(pipeline, "run_digest", lambda *a, **k: calls.append("digest"))
+
+        pipeline.run_pipeline(self._config())
+
+        assert calls == ["sync", "score", "transparency", "notify", "digest"]
+
+    def test_not_gated_on_newly_scored_papers(self, monkeypatch):
+        """Loosening min_combined_score must pick up papers scored earlier,
+        and a bounded retry is still owed its next attempt."""
+        called = []
+        monkeypatch.setattr(pipeline, "run_sync", lambda *a, **k: None)
+        monkeypatch.setattr(pipeline, "run_score", lambda *a, **k: 0)
+        monkeypatch.setattr(
+            pipeline, "_run_transparency_stage", lambda *a, **k: called.append(True)
+        )
+        monkeypatch.setattr(pipeline, "_run_notify_stage", lambda *a, **k: None)
+        monkeypatch.setattr(pipeline, "run_digest", lambda *a, **k: pytest.fail("digest is gated"))
+
+        pipeline.run_pipeline(self._config())
+
+        assert called == [True]
+
+    def test_a_failure_does_not_take_the_run_down(self, monkeypatch):
+        """Sync and scoring have already paid; an unreachable CrossRef must not
+        cost the digest."""
+        reached = []
+
+        def _explode(*args, **kwargs):
+            raise RuntimeError("CrossRef is down")
+
+        monkeypatch.setattr("bmnews.transparency.service.run_transparency", _explode)
+        monkeypatch.setattr(pipeline, "run_sync", lambda *a, **k: None)
+        monkeypatch.setattr(pipeline, "run_score", lambda *a, **k: 1)
+        monkeypatch.setattr(pipeline, "_run_notify_stage", lambda *a, **k: None)
+        monkeypatch.setattr(pipeline, "run_digest", lambda *a, **k: reached.append("digest"))
+
+        pipeline.run_pipeline(self._config())
+
+        assert reached == ["digest"]
+
+    def test_disabled_config_skips_the_stage_entirely(self, monkeypatch):
+        """The stage's own try/except swallows anything a stub raises, so this
+        has to assert on a recording rather than rely on propagation."""
+        called = []
+        monkeypatch.setattr(
+            "bmnews.transparency.service.run_transparency",
+            lambda *a, **k: called.append(True),
+        )
+
+        pipeline._run_transparency_stage(self._config(enabled=False), on_progress=None)
+
+        assert called == []

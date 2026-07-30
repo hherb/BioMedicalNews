@@ -50,7 +50,7 @@ Key sections:
 | `[llm]` | Provider (`ollama` / `anthropic`), model, concurrency |
 | `[scoring]` | Relevance and combined score thresholds |
 | `[quality]` | Quality assessment tier (1–3), minimum quality tier |
-| `[transparency]` | Enable/disable, score threshold for analysis |
+| `[transparency]` | Enable/disable; `min_combined_score` (0–1) gates which papers get analysed, `score_threshold` (0–100) is bmlib's HIGH-risk cutoff |
 | `[user]` | Name, email, research interests |
 | `[email]` | SMTP server settings for digest delivery |
 
@@ -60,7 +60,7 @@ Key sections:
 bmnews/
   config.py          # TOML config loading
   cli.py             # Click CLI commands
-  pipeline.py        # Orchestrates sync (bmlib) → score → digest → deliver
+  pipeline.py        # Orchestrates sync (bmlib) → score → transparency → notify → digest
   db/
     schema.py        # Connection factory and migration entry point
     migrations.py    # Versioned migrations for SQLite and PostgreSQL

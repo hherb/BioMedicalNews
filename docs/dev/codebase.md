@@ -22,6 +22,7 @@ CLI entry point using Click. Defines the `main` group and all subcommands.
 - `score()` — score unscored papers
 - `digest(output)` — render and deliver
 - `notify(watch, count, all, dry_run, list)` — deliver watch notifications. `--all` and `--count` both set the batch size, so setting both is a `UsageError` rather than a silent choice
+- `transparency(limit, refresh, paper_id, list_only, dry_run)` — assess research integrity via `bmnews.transparency.service`. `--list` is checked before the `[transparency] enabled` guard, so stored results stay readable after the feature is switched off; `--list` combined with `--refresh`/`--dry-run` is a `UsageError`, since one means "analyse nothing" and the others mean "analyse differently"
 - `init(config_path)` — first-time setup
 - `gui(port)` — launch the desktop GUI; a missing `gui` extra is reported as an install hint, not a traceback
 - `search(query, limit)` — keyword search with direct SQL
@@ -37,11 +38,12 @@ TOML configuration loading with typed dataclass access.
 - `load_config(path)` — loads TOML, applies values onto dataclass defaults, ignores unknown keys
 - `write_default_config(path)` — writes `DEFAULT_CONFIG_TOML` if file doesn't exist
 - `save_config(config, path)` — writes the config back out (the GUI settings pane uses this)
-- `_apply_section(dc, data)` — maps dict keys to dataclass attributes
+- `_apply_section(dc, data)` — maps dict keys to dataclass attributes; also handles the rename in `_DEPRECATED_KEYS`
 
 **Design notes:**
 - Uses `tomllib` (stdlib since Python 3.11) for TOML parsing
 - Unknown config keys are silently ignored (forward compatibility). That is why `notify/watches.py` re-validates the notification tables and *warns* about keys it does not recognise — a misspelled criterion would otherwise sit in the config doing nothing
+- `_DEPRECATED_KEYS: dict[type, dict[str, str]]` maps a renamed key to its current name, per section dataclass — currently just `TransparencyConfig: {"min_score_threshold": "min_combined_score"}`. `_apply_section()` assigns only to attributes a dataclass already has, so without this map a rename would silently discard a value the user had deliberately set and fall back to the default instead of warning about it
 - `sources.source_options`, `notifications.channels` and `notifications.watches` are dicts keyed by name. That shape is forced by `save_config`: `_toml_value` stringifies list elements (an array-of-tables would round-trip as Python dict reprs) and `_write_section` emits three table levels, so anything deeper is dropped on every GUI save
 - All fields have defaults, so the app works even with an empty config
 
@@ -49,9 +51,11 @@ TOML configuration loading with typed dataclass access.
 
 Fixed behavioural values — scoring weights, page sizes, timeouts, `NOTIFY_SCAN_CHUNK`, `STRANDED_PAPERS_PATH`. Anything a *user* should be able to tune belongs in `config.py` instead. The evidence hierarchy and its scores live in `bmlib.quality`, not here.
 
+Two transparency constants: `TRANSPARENCY_BATCH_SIZE` (100) bounds one run the same way `UNSCORED_BATCH_SIZE` bounds a scoring run — bmlib paces every outbound request 0.35s apart across the whole analyzer regardless of thread count, so this caps a run to a few minutes and leaves the rest queued. `TRANSPARENCY_MAX_ATTEMPTS` (3) is the retry ceiling described in [Database](database.md#transparency) — the fixed value behind `[transparency]`'s cost gate, not itself user-tunable.
+
 ## `bmnews/metadata.py`
 
-Defensive decoding of the `paper_extras.metadata_json` blob — it comes from third-party sources and may be absent, empty, or not a dict.
+Defensive decoding of the `paper_extras.metadata_json` blob — it comes from third-party sources and may be absent, empty, or not a dict. `parse_transparency()` does the same for `transparency.result_json`, deliberately as a plain dict rather than through bmlib's `TransparencyResult.from_dict()` — that classmethod raises on an `unknown_reason` member it does not recognise, which must not stop a paper's page from rendering when a newer bmlib starts writing one the pinned version predates.
 
 ## `bmnews/templating.py`
 
@@ -70,14 +74,15 @@ Central orchestration module.
 - `run_score(config)` → `int` — scores unscored papers with LLM + quality
 - `run_digest(config, output)` → `str` — renders and delivers digest
 - `show_cached_digests(config, days)` → `str` — re-renders previous digest papers
-- `run_pipeline(config, days, show_cached)` — orchestrates all stages
+- `run_pipeline(config, days, show_cached)` — orchestrates all stages: SYNC → SCORE → TRANSPARENCY → NOTIFY → DIGEST
+- `_run_transparency_stage(config, on_progress)` — the TRANSPARENCY stage, wrapped so a failure cannot take the run down; a no-op when `[transparency] enabled = false`
 - `_run_notify_stage(config, on_progress)` — the NOTIFY stage, wrapped so a failure cannot take the run down
 
 **Design notes:**
 - Each `run_*` function opens and closes its own DB connection with `contextlib.closing`
 - `run_pipeline` short-circuits to `show_cached_digests` when `show_cached=True`
 - The `days` parameter overrides `config.sources.lookback_days` at runtime
-- DIGEST is gated on `scored > 0`; **NOTIFY is not**. A run with nothing newly scored still has a failed delivery to retry and a just-loosened watch to honour
+- DIGEST is gated on `scored > 0`; **neither TRANSPARENCY nor NOTIFY is**. A run with nothing newly scored still has a failed delivery to retry, a just-loosened watch to honour, and a paper that just crossed `min_combined_score` to analyse
 
 ## `bmnews/fetchers/`
 
@@ -130,6 +135,21 @@ Orchestrates scoring for a batch of papers.
 **Quality toggle:** when `config.quality.enabled` is false the quality stage is skipped entirely and the combined score is the relevance score alone.
 
 **Concurrency:** `ThreadPoolExecutor` when `concurrency > 1`. Errors on individual papers are logged but don't stop the batch.
+
+## `bmnews/transparency/`
+
+The research-integrity stage: select, analyse, store. Query-based like `notify/service.py` rather than callback-driven, so it survives a crash mid-run and is testable without running the scorer at all.
+
+### `service.py`
+
+- `run_transparency(config, *, refresh, paper_id, limit, dry_run, on_progress) → TransparencyReport` — the whole stage. Returns immediately with an empty report when `[transparency] enabled = false`
+- `build_settings(config) → TransparencySettings` — maps bmnews's four config fields onto bmlib's settings object; forces `enabled=True` regardless of config (the caller already checked) because a settings object claiming disabled would make bmlib hand back an UNKNOWN placeholder that then blocks the paper from ever being tried again
+- `_build_analyzer(config) → TransparencyAnalyzer` — reuses the PubMed API key from `sources.source_options.pubmed` rather than duplicating it into `[transparency]`
+- `_analyze_all(conn, analyzer, candidates, …)` — runs the pool. **One analyzer instance is shared across every worker** (bmlib's rate limit is per-instance), and **all storage happens on the calling thread** (a SQLite connection is not thread-safe) — the same shape `score_papers()` uses for its progress callback
+- `list_results(config, *, limit) → list[dict]` — read path for `bmnews transparency --list`
+- `TransparencyReport` — dataclass: `candidates`, `analyzed`, `indeterminate` (subset of `analyzed`), `exhausted` (subset of `indeterminate`, now at the attempt ceiling), `failed` (raised, so no row was written — stays queued)
+
+**Informs only.** Nothing here filters a query or re-ranks a paper; bmlib's `tier_downgrade_applied` is stored in `result_json` and never read back into a score.
 
 ## `bmnews/notify/`
 
@@ -189,7 +209,7 @@ No DDL lives here.
 
 ### `migrations.py`
 
-The six versioned migrations, each with a pair of DDL strings (SQLite / PostgreSQL). Migration 4 moved paper storage onto `bmlib.publications` and dropped bmnews's `papers` table; it is destructive and one-way.
+The seven versioned migrations, each with a pair of DDL strings (SQLite / PostgreSQL). Migration 4 moved paper storage onto `bmlib.publications` and dropped bmnews's `papers` table; it is destructive and one-way. Migration 7 adds `transparency`, keyed on `paper_id` alone since there is exactly one result per paper.
 
 ### `operations.py`
 

@@ -14,7 +14,7 @@ bmnews is a biomedical news reader with LLM-based relevance scoring. It fetches 
 ## Design philosophy
 
 - **Pure functions over classes** — database operations are stateless functions that take a connection as the first argument, not methods on ORM objects
-- **Separation of concerns** — sync, score, notify and digest are independent pipeline stages that can run separately
+- **Separation of concerns** — sync, score, transparency, notify and digest are independent pipeline stages that can run separately
 - **Configuration-driven** — behavior is controlled by TOML config, not hardcoded values
 - **Template-driven** — all LLM prompts and digest output use Jinja2 templates that users can override
 - **bmlib as foundation** — shared infrastructure (LLM abstraction, DB utilities, quality assessment, agents) lives in [bmlib](https://github.com/hherb/bmlib), keeping bmnews focused on domain logic
@@ -39,10 +39,10 @@ bmnews/
   constants.py         # Fixed behavioural values (not user-tunable)
   metadata.py          # Defensive decoding of the extras blob
   templating.py        # TEMPLATES_DIR + build_template_engine
-  pipeline.py          # Orchestrates: sync → score → notify → digest
+  pipeline.py          # Orchestrates: sync → score → transparency → notify → digest
   db/
     schema.py          # open_db + init_db (runs migrations; no DDL here)
-    migrations.py      # The six versioned migrations, per backend
+    migrations.py      # The versioned migrations, per backend (see database.md for the count)
     operations.py      # Pure-function CRUD (all SQL lives here)
   fetchers/
     __init__.py        # Registers bmnews sources into bmlib's registry
@@ -50,6 +50,8 @@ bmnews/
   scoring/
     relevance_agent.py # LLM-based relevance scoring (BaseAgent subclass)
     scorer.py          # Orchestrates relevance + quality scoring
+  transparency/
+    service.py         # run_transparency(): select, analyse, store — informs only
   notify/
     watches.py         # Watch/Channel parsing and validation
     matcher.py         # Pure (paper, watch) -> bool

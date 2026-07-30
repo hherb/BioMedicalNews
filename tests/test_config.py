@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import logging
+import tomllib
+
 import pytest
 
 from bmnews.config import AppConfig, load_config, save_config, write_default_config
@@ -245,3 +248,69 @@ class TestSaveConfig:
         text = save_config(cfg, tmp_path / "config.toml").read_text()
 
         assert "[notifications.watches.melanoma-trials]" in text
+
+
+def test_transparency_defaults():
+    config = AppConfig()
+    assert config.transparency.enabled is False
+    assert config.transparency.min_combined_score == 0.6
+    assert config.transparency.score_threshold == 40
+    assert config.transparency.concurrency == 3
+
+
+def test_renamed_min_score_threshold_carries_forward(tmp_path, caplog):
+    """The old key's value is the user's; a rename must not revert it."""
+    path = tmp_path / "config.toml"
+    path.write_text(
+        "[transparency]\nenabled = true\nmin_score_threshold = 0.85\n",
+        encoding="utf-8",
+    )
+
+    with caplog.at_level(logging.WARNING):
+        config = load_config(path)
+
+    assert config.transparency.min_combined_score == 0.85
+    assert "min_score_threshold" in caplog.text
+    assert "min_combined_score" in caplog.text
+
+
+def test_new_key_wins_when_both_are_present(tmp_path, caplog):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        "[transparency]\nmin_score_threshold = 0.85\nmin_combined_score = 0.4\n",
+        encoding="utf-8",
+    )
+
+    with caplog.at_level(logging.WARNING):
+        config = load_config(path)
+
+    assert config.transparency.min_combined_score == 0.4
+    assert "obsolete" in caplog.text
+
+
+def test_transparency_round_trips_through_save(tmp_path):
+    """save_config must emit the new key, so the old one disappears on save."""
+    config = AppConfig()
+    config.transparency.enabled = True
+    config.transparency.min_combined_score = 0.75
+    config.transparency.score_threshold = 55
+    config.transparency.concurrency = 2
+
+    path = save_config(config, tmp_path / "config.toml")
+    text = path.read_text(encoding="utf-8")
+    assert "min_combined_score = 0.75" in text
+    assert "min_score_threshold" not in text
+
+    reloaded = load_config(path)
+    assert reloaded.transparency.min_combined_score == 0.75
+    assert reloaded.transparency.score_threshold == 55
+    assert reloaded.transparency.concurrency == 2
+
+
+def test_default_config_template_parses_with_the_new_key():
+    from bmnews.config import DEFAULT_CONFIG_TOML
+
+    raw = tomllib.loads(DEFAULT_CONFIG_TOML)
+    assert "min_score_threshold" not in raw["transparency"]
+    assert raw["transparency"]["min_combined_score"] == 0.6
+    assert raw["transparency"]["score_threshold"] == 40
