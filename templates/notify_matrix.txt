@@ -3,7 +3,7 @@ Watch "{{ watch_name }}": {{ paper_count }} new paper{{ "s" if paper_count != 1 
 {% for paper in papers %}
 {{ loop.index }}. {{ paper.title }}
    {{ paper.url }}
-   {% if paper.sources %}{{ paper.sources|join(', ') }} | {% endif %}relevance {{ "%.0f"|format(paper.relevance_score * 100) }}%{% if paper.quality_tier %} | {{ paper.quality_tier }}{% endif %}
+   {% if paper.sources %}{{ paper.sources|join(', ') }} | {% endif %}relevance {{ "%.0f"|format(paper.relevance_score * 100) }}%{% if paper.quality_tier %} | {{ paper.quality_tier }}{% endif %}{% if paper.transparency_risk %} | transparency {{ paper.transparency_risk|upper }}{% endif %}
 {% if paper.summary %}   {{ paper.summary }}
 {% endif %}
 {% endfor %}

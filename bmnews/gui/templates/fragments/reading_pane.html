@@ -24,6 +24,11 @@
         {% if paper.study_design %}
         <span class="design-badge">{{ paper.study_design|upper }}</span>
         {% endif %}
+        {% if paper.transparency_risk %}
+        <span class="risk-badge risk-{{ paper.transparency_risk }}">
+            Transparency: {{ paper.transparency_risk|upper }}{% if paper.transparency_risk != 'unknown' %} {{ paper.transparency_score }}/100{% endif %}
+        </span>
+        {% endif %}
     </div>
     {% else %}
     <div class="score-section">
@@ -35,6 +40,30 @@
     <section class="summary-section">
         <h2>Summary</h2>
         <p>{{ paper.summary }}</p>
+    </section>
+    {% endif %}
+
+    {% if paper.transparency %}
+    <section class="transparency-section">
+        <h2>Research integrity</h2>
+        <ul class="transparency-findings">
+            <li>Funding:
+                {% if paper.transparency.industry_funding_detected %}industry ties detected
+                {% else %}no industry ties detected{% endif %}</li>
+            <li>Data availability: {{ paper.transparency.data_availability_level|default('unknown')|replace("_", " ") }}</li>
+            <li>COI statement:
+                {% if paper.transparency.coi_disclosed is none %}undetermined
+                {% elif paper.transparency.coi_disclosed %}disclosed
+                {% else %}absent{% endif %}</li>
+            <li>Trial registration:
+                {% if paper.transparency.trial_registered %}registered{% if paper.transparency.trial_results_compliant %}, results posted{% else %}, results not posted{% endif %}
+                {% else %}none found{% endif %}</li>
+        </ul>
+        {% if paper.transparency.risk_indicators %}
+        <ul class="risk-indicators">
+            {% for indicator in paper.transparency.risk_indicators %}<li>{{ indicator }}</li>{% endfor %}
+        </ul>
+        {% endif %}
     </section>
     {% endif %}
 

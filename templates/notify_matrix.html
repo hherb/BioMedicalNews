@@ -14,7 +14,7 @@
 {% for paper in papers %}
 <li>
 <a href="{{ paper.url|e }}"><strong>{{ paper.title|e }}</strong></a><br/>
-<em>{% if paper.sources %}{{ paper.sources|join(', ')|e }}{% endif %}{% if paper.publication_date %} &middot; {{ paper.publication_date|e }}{% endif %} &middot; relevance {{ "%.0f"|format(paper.relevance_score * 100) }}%{% if paper.quality_tier %} &middot; {{ paper.quality_tier|e }}{% endif %}</em>
+<em>{% if paper.sources %}{{ paper.sources|join(', ')|e }}{% endif %}{% if paper.publication_date %} &middot; {{ paper.publication_date|e }}{% endif %} &middot; relevance {{ "%.0f"|format(paper.relevance_score * 100) }}%{% if paper.quality_tier %} &middot; {{ paper.quality_tier|e }}{% endif %}{% if paper.transparency_risk %} &middot; transparency {{ paper.transparency_risk|upper|e }}{% endif %}</em>
 {% if paper.summary %}<br/>{{ paper.summary|e }}{% endif %}
 </li>
 {% endfor %}

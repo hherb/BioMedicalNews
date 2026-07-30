@@ -134,6 +134,21 @@ body {
     color: var(--text-muted);
 }
 
+.risk-badge {
+    display: inline-block;
+    padding: 0.15rem 0.5rem;
+    border-radius: 10px;
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+.risk-low { background: #d4edda; color: #155724; }
+.risk-medium { background: #fff3cd; color: #856404; }
+.risk-high { background: #f8d7da; color: #721c24; }
+.risk-unknown { background: #eceff1; color: #546e7a; }
+
+.transparency-findings, .risk-indicators { margin: 0.5rem 0 0 1.25rem; font-size: 0.85rem; }
+.risk-indicators { color: var(--text-muted); }
+
 .paper-detail h1 { font-size: 1.4rem; margin-bottom: 0.75rem; line-height: 1.3; }
 .paper-meta { color: var(--text-muted); margin-bottom: 1rem; display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
 .sep { color: var(--border); }
