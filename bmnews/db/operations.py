@@ -930,14 +930,16 @@ def get_transparency_candidates(
             *paper_id* names a paper.
         limit: Maximum rows to return.
         max_attempts: How many times an ``unknown`` result may be re-attempted.
-        refresh: Also select papers already holding a determinate result.
+        refresh: Also select papers already holding a determinate result, and
+            order by staleness rather than score — see below.
         paper_id: Restrict to one publication and skip the score gate — the
             user named that paper, so a gate meant to avoid spending requests
             on papers nobody will read does not apply to it.
 
     Returns:
         Rows carrying ``id``, ``doi``, ``pmid``, ``title`` and ``attempts``
-        (``None`` when no result exists yet), best combined score first.
+        (``None`` when no result exists yet). Ordered by combined score, best
+        first — except under *refresh*, which orders by staleness.
     """
     ph = _placeholder(conn)
     params: list = []
@@ -963,6 +965,25 @@ def get_transparency_candidates(
 
     params.append(limit)
 
+    # Score order is right for the normal queue: a paper drops out of it once
+    # it holds a result, so every run starts on papers the last one never saw.
+    #
+    # A refresh run has no such predicate — it selects everything above the
+    # gate — so score order would hand back the identical top-`limit` papers on
+    # every run and never reach the rest of the corpus, re-spending four to
+    # eight requests per paper to learn nothing. Least-recently-analysed first
+    # makes successive runs walk it instead: the batch just refreshed sorts to
+    # the back, and a never-analysed paper leads.
+    #
+    # NULLS FIRST is explicit because the backends disagree on the default —
+    # SQLite sorts NULLs first in ASC, PostgreSQL sorts them last — and a
+    # never-analysed paper is the one that must not be sorted to the back.
+    order = (
+        "t.analyzed_at ASC NULLS FIRST, s.combined_score DESC, p.id ASC"
+        if refresh
+        else "s.combined_score DESC, p.id ASC"
+    )
+
     rows = fetch_all(
         conn,
         f"""
@@ -971,7 +992,7 @@ def get_transparency_candidates(
         JOIN scores s ON s.paper_id = p.id
         LEFT JOIN transparency t ON t.paper_id = p.id
         WHERE {" AND ".join(conditions)}
-        ORDER BY s.combined_score DESC, p.id ASC
+        ORDER BY {order}
         LIMIT {ph}
         """,
         tuple(params),
@@ -1254,10 +1275,14 @@ def _row_to_paper(row: Any) -> dict:
             paper[column] = ""
 
     paper["metadata"] = parse_metadata(paper.get("metadata_json"))
-    # Only the paper-detail query selects the blob. Its absence therefore means
-    # "not asked for", which must not decode to the same empty dict as
-    # "analysed, nothing to report" — hence the membership test rather than
-    # an unconditional ``.get()``.
+    # Only the paper-detail query selects the blob, so the membership test is
+    # what keeps ``transparency`` off the dicts the other queries build rather
+    # than putting an empty one there. The badge columns above are handled the
+    # other way round on purpose: ``_NULLABLE_TEXT_COLUMNS`` stamps
+    # ``transparency_risk`` to "" whether the query omitted it or the paper has
+    # no row, because both mean "render no badge" and every template guards on
+    # truthiness. The blob has no such collapse available — a section rendered
+    # from `{}` would claim the paper was analysed and found clean.
     if "transparency_json" in paper:
         paper["transparency"] = parse_transparency(paper["transparency_json"])
     paper["is_open_access"] = bool(paper.get("is_open_access"))

@@ -195,8 +195,8 @@ bmnews transparency [--limit N] [--refresh] [--paper-id ID] [--list] [--dry-run]
 
 | Flag | Description |
 |------|-------------|
-| `--limit N` | Analyse at most this many papers. |
-| `--refresh` | Re-analyse papers that already hold a result, and reset their retry budget. |
+| `--limit N` | Analyse at most this many papers. Overrides the default batch of 100 in either direction; that default paces outbound requests, so raising it is a deliberate choice about how hard to hit five public APIs in one run. |
+| `--refresh` | Re-analyse papers that already hold a result, and reset their retry budget. Successive runs work through the corpus least-recently-analysed first, so re-analysing more papers than one batch holds is a matter of running it again rather than raising `--limit`. |
 | `--paper-id ID` | Restrict to one paper, ignoring the cost gate. Combine with `--refresh` to force a re-analysis of that one paper — on its own it is a no-op once a determinate result exists. |
 | `--list` | Print stored results, worst risk first; analyses nothing. Works even when `[transparency] enabled = false`, since it only reads what has already been stored. |
 | `--dry-run` | Report how many papers would be analysed; calls no external API and writes nothing. |

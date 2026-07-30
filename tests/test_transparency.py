@@ -528,6 +528,32 @@ class TestCli:
         result = self._invoke(["transparency"], config)
 
         assert "othing" in result.output
+        assert "--refresh" not in result.output, "the named-paper advice is for --paper-id only"
+
+    def test_nothing_to_do_for_a_named_paper_says_what_that_can_mean(self, db, monkeypatch):
+        """The selection inner-joins `scores`, so a paper that does not exist,
+        one not scored yet, and one already holding a result are one outcome
+        here. Naming an id is specific enough that a bare "nothing to analyse"
+        reads as a bug, so the three readings are spelled out."""
+        config, conn = db
+        paper_id = _scored(conn, doi="10.1/a", combined=0.9)
+        save_transparency(conn, paper_id=paper_id, transparency_score=82, risk_level="low")
+        _install(monkeypatch, _FakeAnalyzer())
+
+        result = self._invoke(["transparency", "--paper-id", str(paper_id)], config)
+
+        assert result.exit_code == 0
+        assert str(paper_id) in result.output
+        assert "--refresh" in result.output
+
+    def test_nothing_to_do_for_a_paper_that_does_not_exist(self, db, monkeypatch):
+        config, _ = db
+        _install(monkeypatch, _FakeAnalyzer())
+
+        result = self._invoke(["transparency", "--paper-id", "999"], config)
+
+        assert result.exit_code == 0
+        assert "999" in result.output
 
     def test_dry_run_reports_the_selection(self, db, monkeypatch):
         config, conn = db

@@ -245,7 +245,18 @@ def transparency(
         return
 
     if not report.analyzed and not report.failed:
-        click.echo("Nothing to analyse.")
+        # The selection inner-joins `scores`, so a named paper that does not
+        # exist, one not scored yet, and one already holding a determinate
+        # result all arrive here identically. Naming a paper is a specific
+        # enough request that "nothing to analyse" on its own reads as a bug,
+        # so say which three things it can mean and how to act on the likeliest.
+        if paper_id is not None:
+            click.echo(
+                f"Nothing to analyse for paper {paper_id}: it does not exist, is not "
+                "scored yet, or already holds a result — pass --refresh to redo it."
+            )
+        else:
+            click.echo("Nothing to analyse.")
         return
 
     click.echo(f"Analysed {report.analyzed} paper(s).")

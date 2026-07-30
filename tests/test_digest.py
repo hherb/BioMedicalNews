@@ -97,6 +97,19 @@ class TestTransparencyBadge:
 
         assert "LOW" in text
 
+    def test_html_escapes_the_badge(self):
+        """The digest templates render through bmlib's ``TemplateEngine``, which
+        runs with ``autoescape=False``. Today's risk value is bmnews's own enum
+        so nothing hostile can reach here, but the ``|e`` costs nothing and
+        keeps this field off the surface issue #17 already covers."""
+        engine = TemplateEngine(default_dir=TEMPLATES_DIR)
+        papers = [self._paper(transparency_risk="<script>alert(1)</script>")]
+
+        html = render_digest(papers, engine, fmt="html")
+
+        assert "<script>" not in html
+        assert "&lt;SCRIPT&gt;" in html
+
     def test_unanalysed_paper_renders_no_badge(self):
         """An empty risk reads as 'not analysed', exactly as quality_tier does."""
         engine = TemplateEngine(default_dir=TEMPLATES_DIR)

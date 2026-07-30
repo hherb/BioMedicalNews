@@ -789,6 +789,12 @@ def _m006_add_fulltext_pdf_url(conn: Any) -> None:
 # five APIs; the two cannot be told apart, so "retry every UNKNOWN" has no
 # natural end. ``get_transparency_candidates`` retries only while this stays
 # under ``TRANSPARENCY_MAX_ATTEMPTS``.
+#
+# No secondary index. Both queries that mention ``risk_level`` reach a row
+# through ``paper_id`` — the candidate query joins on it from ``publications``,
+# and ``get_transparency_results`` sorts on a CASE expression no index on the
+# bare column can serve — so an index there would cost a write on every upsert
+# and be read by nothing. Add one when a query arrives that can use it.
 _M007_SQLITE = """\
 CREATE TABLE IF NOT EXISTS transparency (
     paper_id INTEGER PRIMARY KEY REFERENCES publications(id) ON DELETE CASCADE,
@@ -798,8 +804,6 @@ CREATE TABLE IF NOT EXISTS transparency (
     result_json TEXT NOT NULL DEFAULT '{}',
     analyzed_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
-
-CREATE INDEX IF NOT EXISTS idx_transparency_risk ON transparency (risk_level);
 """
 
 _M007_POSTGRESQL = """\
@@ -811,8 +815,6 @@ CREATE TABLE IF NOT EXISTS transparency (
     result_json TEXT NOT NULL DEFAULT '{}',
     analyzed_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
-
-CREATE INDEX IF NOT EXISTS idx_transparency_risk ON transparency (risk_level);
 """
 
 

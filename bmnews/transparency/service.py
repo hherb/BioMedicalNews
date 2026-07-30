@@ -129,9 +129,14 @@ def run_transparency(
     Args:
         config: Application config.
         refresh: Re-analyse papers that already hold a determinate result, and
-            restart their retry budget.
+            restart their retry budget. Successive refresh runs work through
+            the corpus least-recently-analysed first, so one run per
+            ``limit`` papers covers it rather than redoing the same batch.
         paper_id: Restrict to one publication, ignoring the score gate.
-        limit: Cap the batch below :data:`TRANSPARENCY_BATCH_SIZE`.
+        limit: Batch size for this run, overriding
+            :data:`TRANSPARENCY_BATCH_SIZE` in **either** direction. That
+            constant paces outbound requests, so raising it past the default
+            is the caller taking the pacing decision knowingly.
         dry_run: Report the selection and stop — no analyzer is built, no
             request is made, no row is written.
         on_progress: Optional callback receiving a status message string.

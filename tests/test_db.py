@@ -1749,6 +1749,38 @@ class TestTransparency:
 
         assert [r["id"] for r in rows] == [paper_id]
 
+    def test_successive_refresh_runs_walk_the_corpus(self):
+        """A refresh run has no "not done yet" predicate to narrow it, so
+        ordering it by score would hand back the identical top-`limit` papers
+        every run — re-spending four to eight requests per paper while the
+        rest of the corpus is never reached at all."""
+        conn = _db()
+        ids = [self._scored_paper(conn, doi=f"10.1/{i}", combined=0.9 - i / 100) for i in range(4)]
+
+        first = get_transparency_candidates(conn, min_combined=0.0, limit=2, refresh=True)
+        for row in first:
+            save_transparency(conn, paper_id=row["id"], transparency_score=80, risk_level="low")
+
+        second = get_transparency_candidates(conn, min_combined=0.0, limit=2, refresh=True)
+
+        assert [r["id"] for r in second] != [r["id"] for r in first]
+        assert sorted([r["id"] for r in first] + [r["id"] for r in second]) == sorted(ids)
+
+    def test_refresh_puts_a_never_analysed_paper_first(self):
+        """Pins the explicit ``NULLS FIRST``: SQLite sorts NULLs first in ASC
+        and PostgreSQL sorts them last, so without it this passes on one
+        backend and silently strands unanalysed papers on the other. The
+        unanalysed paper scores *lower* here, so score order cannot produce
+        this answer by accident."""
+        conn = _db()
+        analysed = self._scored_paper(conn, doi="10.1/best", combined=0.95)
+        save_transparency(conn, paper_id=analysed, transparency_score=82, risk_level="low")
+        never = self._scored_paper(conn, doi="10.1/worst", combined=0.5)
+
+        rows = get_transparency_candidates(conn, min_combined=0.0, refresh=True)
+
+        assert [r["id"] for r in rows] == [never, analysed]
+
     def test_paper_id_bypasses_the_score_gate(self):
         """The user named this paper; a cost gate for papers nobody reads
         does not apply to one that was asked for by id."""

@@ -166,6 +166,13 @@ CREATE INDEX IF NOT EXISTS idx_transparency_risk ON transparency (risk_level);
 and PostgreSQL, differing only in the timestamp column, as `scores` already
 does: `analyzed_at TIMESTAMP NOT NULL DEFAULT NOW()`.
 
+> **Superseded during review.** The `idx_transparency_risk` index above was
+> dropped before merge and migration 7 ships without it. Neither query that
+> mentions `risk_level` can use it: the candidate query reaches the row through
+> `paper_id` from `publications`, and `get_transparency_results()` sorts on a
+> CASE expression no index on the bare column serves. It would have cost a
+> write on every upsert and been read by nothing.
+
 `paper_id` is the primary key directly rather than a surrogate `id` with
 `UNIQUE(paper_id)`: there is exactly one result per paper, and it gives the
 upsert its conflict target for free. It keeps the name `paper_id` like every

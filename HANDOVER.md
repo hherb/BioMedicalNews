@@ -175,6 +175,23 @@ try. A determinate result (`low`/`medium`/`high`) is never re-selected
 regardless of `attempts` — `get_transparency_candidates()`'s `risk_level`
 test fails before `attempts` is even considered.
 
+**The second selection invariant: a refresh run is ordered by staleness, not
+by score.** The normal queue narrows itself — a paper drops out of it the
+moment it holds a determinate result — so ordering that queue best-score-first
+means every run starts on papers the last one never saw. A refresh run has no
+such predicate; it selects everything above the gate. Ordered by score it
+therefore returned the *identical* top-`limit` papers on every run, re-spending
+four to eight requests per paper while the rest of the corpus was never reached
+at all — so a corpus larger than one batch could not be refreshed by any number
+of `--refresh` runs. `get_transparency_candidates()` switches to
+`t.analyzed_at ASC NULLS FIRST` when `refresh` is set, which sorts the batch
+just refreshed to the back and lets successive runs walk the corpus. **Keep
+`NULLS FIRST` explicit**: SQLite sorts NULLs first in `ASC` and PostgreSQL
+sorts them last, so dropping it passes the SQLite suite and strands
+never-analysed papers at the back of the queue on PostgreSQL only.
+`tests/test_db.py::TestTransparency::test_refresh_puts_a_never_analysed_paper_first`
+runs on both backends and is what catches that.
+
 **The config gate was renamed.** `min_score_threshold` → `min_combined_score`
 — it sat one field away from bmlib's own `score_threshold`, which means
 something else on a different scale (0.0–1.0 combined score vs. bmlib's

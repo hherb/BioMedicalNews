@@ -574,6 +574,13 @@ Then append to `MIGRATIONS`:
     Migration(7, "add_transparency", _m007_add_transparency),
 ```
 
+> **Superseded during review.** The `idx_transparency_risk` index in both DDL
+> strings above was dropped before merge; migration 7 ships without it. Neither
+> query that mentions `risk_level` can use it — the candidate query reaches the
+> row through `paper_id`, and `get_transparency_results()` sorts on a CASE
+> expression — so it would have cost a write on every upsert and been read by
+> nothing.
+
 - [ ] **Step 4: Add the operations**
 
 In `bmnews/db/operations.py`, add `TRANSPARENCY_MAX_ATTEMPTS` to the `from bmnews.constants import (...)` block, then append after `count_notifications` (before `# --- Paper extras ...` at line 832):
@@ -715,8 +722,18 @@ def get_transparency_candidates(
         tuple(params),
     )
     return [dict(row) for row in rows]
+```
 
+> **Superseded during review.** The single `ORDER BY` above shipped as two.
+> Score order is right for the normal queue, which narrows itself — a paper
+> drops out once it holds a result. A refresh run has no such predicate, so
+> score order returned the identical top-`limit` papers on every run and never
+> reached the rest of the corpus. The merged version switches to
+> `t.analyzed_at ASC NULLS FIRST, s.combined_score DESC, p.id ASC` when
+> `refresh` is set. `NULLS FIRST` is explicit because SQLite sorts NULLs first
+> in `ASC` and PostgreSQL sorts them last.
 
+```python
 def get_transparency_results(conn: Any, *, limit: int = DEFAULT_QUERY_LIMIT) -> list[dict]:
     """Read stored transparency results, worst risk first.
 

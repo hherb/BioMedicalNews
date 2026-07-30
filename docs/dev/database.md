@@ -139,9 +139,11 @@ One row per publication (`paper_id` is the primary key, `REFERENCES publications
 | `result_json` | TEXT | bmlib's whole `TransparencyResult.to_dict()` |
 | `analyzed_at` | TEXT / TIMESTAMP | Last write |
 
-**Indexes:** `risk_level`.
+**Indexes:** none beyond the primary key. Both queries that mention `risk_level` reach a row through `paper_id` — the candidate query joins on it from `publications`, and `get_transparency_results()` sorts on a CASE expression no index on the bare column can serve — so an index there would cost a write on every upsert and be read by nothing.
 
 **`attempts` exists because `UNREACHABLE` is ambiguous.** bmlib sets its "an API answered" flag only on an HTTP 200, so a paper indexed in none of its five APIs reports the same `unknown` risk as a paper analysed during a network outage — the two cannot be distinguished from the result alone. Without a ceiling, "retry every unknown result" means re-querying every unindexed preprint, on every run, forever. `get_transparency_candidates()` retries an `unknown` row only while `attempts < TRANSPARENCY_MAX_ATTEMPTS` (3); `bmnews transparency --refresh` resets it to 1 so an explicit re-analysis gets its automatic retries back rather than spending its whole budget on one attempt. A determinate result (`low` / `medium` / `high`) is never re-selected regardless of `attempts` — the `risk_level` test in the candidate query fails before `attempts` is even considered.
+
+**A refresh run is ordered by staleness, not by score.** The normal queue narrows itself — a paper drops out of it once it holds a result — so ordering it best-score-first means every run starts on papers the last one never saw. A refresh run has no such predicate: it selects everything above the gate, so score order would return the identical top-`limit` papers on every run and never reach the rest of the corpus. `get_transparency_candidates()` therefore switches to `analyzed_at ASC NULLS FIRST` when `refresh` is set, which sorts the batch just refreshed to the back and lets successive runs walk the corpus. `NULLS FIRST` is spelled out because the backends disagree on the default — SQLite sorts NULLs first in `ASC`, PostgreSQL sorts them last — and a never-analysed paper is the one that must not land at the back.
 
 `_PAPER_COLUMNS` / `_PAPER_FROM` join this table on every paper query, so every paper dict carries `transparency_risk` (`""` when unanalysed — see `_NULLABLE_TEXT_COLUMNS`) and `transparency_score` for free. Only `get_paper_with_score()` also selects `result_json` (as `transparency_json`), since that is the one place the GUI needs the full findings rather than just the badge. The notification candidate query (`_NOTIFY_PAPER_COLUMNS`) takes the two small columns but deliberately not the blob, for the same reason it skips the cached full text.
 
@@ -213,7 +215,7 @@ All functions in `db/operations.py` take a DB-API connection as the first argume
 
 | Function | Description |
 |----------|-------------|
-| `get_transparency_candidates(conn, *, min_combined=0.0, limit=100, max_attempts=3, refresh=False, paper_id=None) → list[dict]` | Scored papers still worth analysing — no result yet, or `unknown` with `attempts` under the ceiling. Returns `attempts` alongside identifiers so the caller can derive the value it is about to write without a second query per paper |
+| `get_transparency_candidates(conn, *, min_combined=0.0, limit=100, max_attempts=3, refresh=False, paper_id=None) → list[dict]` | Scored papers still worth analysing — no result yet, or `unknown` with `attempts` under the ceiling. Best combined score first, except under `refresh`, which orders by staleness so successive runs walk the corpus. Returns `attempts` alongside identifiers so the caller can derive the value it is about to write without a second query per paper |
 | `save_transparency(conn, *, paper_id, transparency_score, risk_level, result_json='{}', reset_attempts=False) → None` | Upsert one result. Increments `attempts` unless `reset_attempts` (set by `--refresh`) restarts it at 1 |
 | `get_transparency_results(conn, *, limit=100) → list[dict]` | Stored results, worst risk first — what `bmnews transparency --list` reads |
 
