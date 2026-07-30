@@ -626,9 +626,14 @@ class TestTransparencyStage:
         assert reached == ["digest"]
 
     def test_disabled_config_skips_the_stage_entirely(self, monkeypatch):
-        def _boom(*args, **kwargs):
-            raise AssertionError("must not run when disabled")
-
-        monkeypatch.setattr("bmnews.transparency.service.run_transparency", _boom)
+        """The stage's own try/except swallows anything a stub raises, so this
+        has to assert on a recording rather than rely on propagation."""
+        called = []
+        monkeypatch.setattr(
+            "bmnews.transparency.service.run_transparency",
+            lambda *a, **k: called.append(True),
+        )
 
         pipeline._run_transparency_stage(self._config(enabled=False), on_progress=None)
+
+        assert called == []
