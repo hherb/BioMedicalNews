@@ -5,17 +5,19 @@
 bmnews processes papers through a linear pipeline:
 
 ```
-┌─────────┐    ┌─────────┐    ┌─────────┐    ┌──────────┐    ┌──────────┐
-│  FETCH  │───▶│  STORE  │───▶│  SCORE  │───▶│  NOTIFY  │───▶│  DIGEST  │
-└─────────┘    └─────────┘    └─────────┘    └──────────┘    └──────────┘
-     │              │              │               │               │
- API calls      Database       LLM calls      Watch alerts     Rendering
- (httpx)        (bmlib.db)     (bmlib.llm)    (per paper)      + delivery
+┌─────────┐    ┌─────────┐    ┌─────────┐    ┌───────────────┐    ┌──────────┐    ┌──────────┐
+│  FETCH  │───▶│  STORE  │───▶│  SCORE  │───▶│  TRANSPARENCY │───▶│  NOTIFY  │───▶│  DIGEST  │
+└─────────┘    └─────────┘    └─────────┘    └───────────────┘    └──────────┘    └──────────┘
+     │              │              │                 │                 │               │
+ API calls      Database       LLM calls      5 external APIs    Watch alerts     Rendering
+ (httpx)        (bmlib.db)     (bmlib.llm)   (bmlib.transparency) (per paper)      + delivery
 ```
 
-Each stage is an independent function that can be run individually via the CLI or composed into the full pipeline with `bmnews run`. FETCH and STORE are one `bmlib.publications.sync()` call; SCORE and DIGEST live in `pipeline.py`; NOTIFY lives in `notify/service.py`.
+Each stage is an independent function that can be run individually via the CLI or composed into the full pipeline with `bmnews run`. FETCH and STORE are one `bmlib.publications.sync()` call; SCORE and DIGEST live in `pipeline.py`; TRANSPARENCY lives in `bmnews/transparency/service.py`; NOTIFY lives in `notify/service.py`.
 
-**NOTIFY is not gated on new scores**, unlike DIGEST. A run with nothing newly scored still has work to do: a delivery that failed last time is retried, and a watch whose threshold was just loosened now matches papers already stored. It is also wrapped so a failure cannot take the run down — sync and scoring have already done the expensive work by then.
+**Neither TRANSPARENCY nor NOTIFY is gated on new scores**, unlike DIGEST. A run with nothing newly scored still has work to do: a delivery that failed last time is retried, a watch whose threshold was just loosened now matches papers already stored, and a paper that just crossed `min_combined_score` after a re-score is newly eligible for analysis. Both are also wrapped so a failure cannot take the run down — sync and scoring have already done the expensive work by then, and TRANSPARENCY specifically depends on five external APIs, any of which can be down without that costing the digest.
+
+TRANSPARENCY **informs only** — its result is stored and displayed, never used to filter or re-rank. See [bmlib Integration](bmlib-integration.md#bmlibtransparency--research-integrity-analysis) for why, and for the retry ceiling that keeps an unindexed preprint from being re-queried forever.
 
 ## Data flow
 
@@ -40,6 +42,15 @@ Each stage is an independent function that can be run individually via the CLI o
                                               │
                           save_score() ──▶ scores    save_paper_tags() ──▶ paper_tags
                                               │
+                                  get_transparency_candidates()
+                                  (combined_score ≥ min_combined_score,
+                                   no result yet or unknown + attempts < 3)
+                                              │
+                                              ▼
+                                  TransparencyAnalyzer.analyze()  ◀── CrossRef, Europe PMC,
+                                              │                       PubMed, OpenAlex,
+                                  save_transparency() ──▶ transparency  ClinicalTrials.gov
+                                              │
                         ┌─────────────────────┴─────────────────────┐
                         ▼                                           ▼
               collect_matches()                          get_papers_for_digest()
@@ -54,6 +65,8 @@ Each stage is an independent function that can be run individually via the CLI o
        record_notifications() ──▶ notifications      record_digest() ──▶ digests
                                                                       + digest_papers
 ```
+
+Both `collect_matches()` and `get_papers_for_digest()` see `transparency_risk` / `transparency_score` on every paper they read (the `transparency` join rides along on `_PAPER_COLUMNS` / `_NOTIFY_PAPER_COLUMNS`), but neither reads them for selection — only the notify/digest templates render the risk badge.
 
 Papers live in **bmlib's** `publications` table; bmnews owns only the scoring and delivery tables hanging off it. There is no `papers` table — migration 4 moved storage onto bmlib and dropped it. A paper dict is a join of `publications`, `paper_extras` and (when present) `scores`, assembled in one place by `_row_to_paper()`. See [Database](database.md).
 
@@ -74,6 +87,8 @@ cli.py
         │     ├── scoring/relevance_agent.py (RelevanceAgent)
         │     │     └── bmlib.agents.BaseAgent
         │     └── bmlib.quality (QualityManager, QualityFilter)
+        ├── transparency/service.py (deferred import — run_transparency)
+        │     └── bmlib.transparency (TransparencyAnalyzer, TransparencySettings)
         ├── notify/service.py (deferred import — run_notify)
         │     ├── notify/watches.py (parse + validate)
         │     ├── notify/matcher.py (pure paper × watch → bool)
@@ -99,6 +114,7 @@ External dependencies:
   bmlib.agents        ── BaseAgent
   bmlib.quality       ── QualityManager, QualityAssessment, StudyDesign, QualityTier
   bmlib.fulltext      ── FullTextService
+  bmlib.transparency  ── TransparencyAnalyzer, TransparencyRisk, TransparencySettings
 ```
 
 ## Key design decisions
@@ -149,6 +165,7 @@ Relevance is weighted higher because users care most about topic match. Quality 
 Each pipeline stage only processes what's needed:
 - **Sync** — `download_days` records each fetched day per source, so only missing or failed days are re-fetched. Records are deduplicated by DOI *and* PMID, so a paper arriving from a second source merges rather than duplicating
 - **Score** — only scores papers without an existing score entry
+- **Transparency** — only analyses papers with no result yet, or an `unknown` one whose `attempts` has not reached the ceiling; a determinate result is never re-selected
 - **Notify** — skips papers already delivered for that watch and channel; a `failed` row stays in the derived queue and retries
 - **Digest** — only includes papers not yet linked to a digest via `digest_papers`
 
@@ -159,6 +176,8 @@ This means running `bmnews run` multiple times is safe and won't duplicate work.
 Scoring supports configurable concurrency via `ThreadPoolExecutor`:
 - `concurrency = 1` — sequential, suitable for Ollama (local LLM, one request at a time)
 - `concurrency > 1` — parallel scoring threads, suitable for API providers (Anthropic) that handle concurrent requests
+
+Transparency analysis uses the same `ThreadPoolExecutor` pattern (`transparency.concurrency`, default 3), but with one important difference: **one analyzer instance is shared across the whole pool**, because bmlib's rate limit is a lock held by the instance, not the process — a second analyzer would double the request rate against APIs that asked for one caller. Throughput is capped by that shared pacing regardless of thread count, so raising concurrency hides per-request latency rather than multiplying speed.
 
 ## Entry points
 
@@ -172,6 +191,8 @@ main (group)
   ├── digest   → pipeline.run_digest()
   ├── notify   → notify.service.run_notify()  (--watch, --count, --all,
   │                                            --dry-run, --list)
+  ├── transparency → transparency.service.run_transparency()  (--limit,
+  │                  --refresh, --paper-id, --list, --dry-run)
   ├── init     → config.write_default_config() + schema.init_db()
   ├── gui      → gui.launcher.launch()
   └── search   → direct SQL via bmlib.db.fetch_all()

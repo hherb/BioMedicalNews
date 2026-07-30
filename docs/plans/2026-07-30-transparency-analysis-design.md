@@ -1,7 +1,7 @@
 # Transparency Analysis Design
 
 **Date:** 2026-07-30
-**Status:** design only — no implementation in this document.
+**Status:** implemented — see `docs/plans/2026-07-30-transparency-analysis-plan.md`.
 
 ## Problem
 

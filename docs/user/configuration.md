@@ -189,20 +189,28 @@ min_quality_tier = "TIER_1_ANECDOTAL"
 
 ## `[transparency]`
 
-Optional transparency analysis using multiple external APIs to assess publication bias and integrity.
+Optional research-integrity analysis: whether a paper discloses its funders, carries a conflict-of-interest statement, makes its data available, and — for a registered trial — has posted its results. Not scoring rationale, and not a bias or ranking judgment: it queries CrossRef, Europe PMC, PubMed, OpenAlex and ClinicalTrials.gov and reports what it finds beside the paper.
+
+**Display only.** A result never changes which papers are selected, how they are ranked, or what reaches the digest — there is no filter and no re-scoring. It answers "should I look more closely at this one," nothing else.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `enabled` | boolean | `false` | Enable transparency analysis. Requires the `transparency` optional dependency. |
-| `min_score_threshold` | float | `0.6` | Only run transparency analysis on papers with a combined score above this threshold (saves API calls). |
+| `enabled` | boolean | `false` | Enable transparency analysis. |
+| `min_combined_score` | float | `0.6` | Only analyse papers whose *combined score* (0.0–1.0) reaches this. Each analysis costs four to eight external requests, so this is the cost gate. |
+| `score_threshold` | int | `40` | bmlib's own 0–100 cutoff: a transparency score below this reads as HIGH risk. Not the same scale as `min_combined_score` — one gates which papers are worth analysing, the other gates what an analysed paper's score means. |
+| `concurrency` | integer | `3` | Concurrent analyses. bmlib paces every outbound request across a shared rate limit regardless of thread count, so raising this hides per-request latency rather than multiplying throughput. |
 
 ```toml
 [transparency]
 enabled = false
-min_score_threshold = 0.6
+min_combined_score = 0.6
+score_threshold = 40
+concurrency = 3
 ```
 
-When enabled, queries CrossRef, EuropePMC, OpenAlex, and ClinicalTrials.gov for additional metadata about each paper's publication history, funding, and trial registration.
+> `min_score_threshold` was the name of this gate before the analyzer was wired up. An existing config using the old name still works — it is carried forward to `min_combined_score` with a warning in the log — but saving settings through the GUI (or re-running `bmnews init` over the file) writes the new name, so it is worth updating by hand.
+
+Run it with `bmnews transparency` — either as part of `bmnews run` (it sits between SCORE and NOTIFY) or on its own. See the [CLI reference](usage.md#bmnews-transparency) for the flags, including the bounded-retry behaviour for a paper that comes back indeterminate.
 
 ## `[user]`
 
@@ -399,7 +407,9 @@ min_quality_tier = "TIER_1_ANECDOTAL"
 
 [transparency]
 enabled = false
-min_score_threshold = 0.6
+min_combined_score = 0.6
+score_threshold = 40
+concurrency = 3
 
 [user]
 name = "Dr. Jane Doe"

@@ -41,15 +41,15 @@ ruff format bmnews/ tests/                          # auto-format
 
 ### Pipeline
 
-Linear pipeline with four independent stages, each runnable individually via CLI or composed with `bmnews run`:
+Linear pipeline with five independent stages, each runnable individually via CLI or composed with `bmnews run`:
 
 ```
-SYNC (bmlib.publications.sync) → SCORE (bmlib.llm) → NOTIFY (watches) → DIGEST (Jinja2 + SMTP)
+SYNC (bmlib.publications.sync) → SCORE (bmlib.llm) → TRANSPARENCY (bmlib.transparency) → NOTIFY (watches) → DIGEST (Jinja2 + SMTP)
 ```
 
-All stages are **incremental**: sync records each fetched day in `download_days` and re-fetches only the days that are missing or failed, score skips already-scored papers, notify skips papers already delivered for that watch and channel, and digest only includes papers not yet in a prior digest.
+All stages are **incremental**: sync records each fetched day in `download_days` and re-fetches only the days that are missing or failed, score skips already-scored papers, transparency skips papers with a determinate result (an indeterminate one retries up to `TRANSPARENCY_MAX_ATTEMPTS`), notify skips papers already delivered for that watch and channel, and digest only includes papers not yet in a prior digest.
 
-`run_pipeline()` gates DIGEST on `scored > 0` but **not** NOTIFY: a run with nothing newly scored still has a failed delivery to retry and a just-loosened watch to honour. NOTIFY is also wrapped so a failure cannot take the run down — the expensive stages have already finished by then.
+`run_pipeline()` gates DIGEST on `scored > 0` but **neither TRANSPARENCY nor NOTIFY**: a run with nothing newly scored still has a failed delivery to retry, a just-loosened watch to honour, and a paper that just crossed `transparency.min_combined_score` to analyse. Both stages are wrapped so a failure cannot take the run down — the expensive stages have already finished by then, and TRANSPARENCY specifically leans on five external APIs that can each be down independently of everything else.
 
 ### Directory Structure
 
@@ -155,8 +155,7 @@ bmlib is a companion library providing shared infrastructure. Key modules used:
 | `bmlib.quality` | `QualityManager`, `QualityFilter`, `QualityAssessment`, `StudyDesign`, `QualityTier`, `DESIGN_TO_TIER`, `DESIGN_TO_SCORE` — the evidence hierarchy and its scores live here, not in `bmnews.constants` |
 | `bmlib.fulltext` | `FullTextService` (3-tier: Europe PMC → Unpaywall → DOI), JATS XML parser, `FullTextError` |
 | `bmlib.publications` | `sync()` — the whole fetch-and-store cycle; `ensure_schema()`, `store_publication()`, `get_publication_by_doi/pmid()` — the `publications` table bmnews's papers live in; `register_source()`, `source_names()`, `FetchedRecord`, `SyncProgress`, `SyncReport`, `SourceDescriptor` — the registry every source goes through |
-
-**Not currently used** (see `docs/plans/` before adopting): `bmlib.transparency` (the `[transparency]` config section and extra are declared but unwired).
+| `bmlib.transparency` | `TransparencyAnalyzer`, `TransparencyRisk`, `TransparencySettings` — research-integrity analysis (funder disclosure, COI statement, data availability, trial-results reporting) via CrossRef, Europe PMC, PubMed, OpenAlex and ClinicalTrials.gov. Wired up as the TRANSPARENCY pipeline stage in `bmnews/transparency/service.py`; informs only, never filters or reranks |
 
 ### Source Fetching
 
@@ -186,8 +185,9 @@ Owned by bmnews:
 - **paper_tags** — per-paper interest tags matched during scoring
 - **paper_extras** — the leftovers bmlib has no column for: the source `extras` blob (`cited_by`), the GUI's cached full text, and the PDF that text was extracted from (`fulltext_pdf_url`, kept beside the HTML because extraction loses figures and layout). One publication can be fed by several sources, so `save_paper_metadata()` merges key by key rather than replacing the blob (a later value wins; a key it says nothing about survives).
 - **notifications** — one row per *delivered* watch notification, unique on `(watch, paper_id, channel)`. The pending queue is **not** stored: it is derived per run as "papers this watch matches now, minus those already sent", which is what makes paging idempotent and stops an edited watch from leaving orphaned queue rows. A `failed` row stays in the derived queue, so it retries. This table must stay separate from `digest_papers` — `get_papers_for_digest()` excludes papers present there and nothing else, so recording a notification in it would silently suppress that paper's digest entry.
+- **transparency** — one row per publication (`paper_id` PK, `REFERENCES publications(id) ON DELETE CASCADE`), holding `transparency_score`, `risk_level`, `attempts`, `result_json` (bmlib's whole `TransparencyResult.to_dict()`) and `analyzed_at`. `attempts` exists because bmlib's analyzer sets its "an API answered" flag only on an HTTP 200, so it reports UNREACHABLE both for a network outage AND for a paper indexed in none of its five APIs — the two are indistinguishable, so "retry every UNKNOWN" would re-query every unindexed preprint on every run forever. `get_transparency_candidates()` retries only while `attempts < TRANSPARENCY_MAX_ATTEMPTS` (3); `bmnews transparency --refresh` resets it to 1.
 
-`scores`, `paper_tags`, `digest_papers` and `notifications` keep a column named `paper_id`; it references `publications(id)`. "Paper" stays bmnews's noun for the thing — the GUI routes are `/papers/<id>`.
+`scores`, `paper_tags`, `digest_papers`, `notifications` and `transparency` keep a column named `paper_id`; it references `publications(id)`. "Paper" stays bmnews's noun for the thing — the GUI routes are `/papers/<id>`.
 
 Migrations in `db/migrations.py`:
 1. `initial_schema` — papers, scores, digests, digest_papers tables
@@ -196,6 +196,7 @@ Migrations in `db/migrations.py`:
 4. `migrate_to_publications` — replays every `papers` row through `store_publication()` so bmlib's dedupe decides identity, repoints the three bmnews-owned tables that reference a paper (`scores`, `paper_tags`, `digest_papers` — `digests` itself carries no paper reference) at the resulting ids, and drops `papers`. Where two rows collapse into one publication, the surviving score is the highest `combined_score` (the one the digest showed); tags and digest links are unioned, and metadata merges key by key with the later row winning. **This migration is destructive and one-way**: a row that can be keyed on neither DOI nor PMID cannot be represented, so it is logged at ERROR and written to `~/.bmnews/stranded-papers.json` (`constants.STRANDED_PAPERS_PATH`) before `papers` is dropped.
 5. `add_notifications` — the `notifications` table above
 6. `add_fulltext_pdf_url` — adds `paper_extras.fulltext_pdf_url`, so a PDF the text was extracted from is kept *beside* the HTML rather than instead of it (extraction loses figures, tables and layout, so the reading pane offers both). Also clears full text stored under a preprint server's own name (`_STALE_FULLTEXT_SOURCES`) — those rows hold an abstract-only rendering of a body-less JATS document — **and deletes the matching file from bmlib's disk cache**. Both halves are needed: bmlib consults its cache before the database, so clearing the row alone would have the next request served the same file and stored again under the `cached` source name, out of reach of any filter keyed on the server's name. A cache that cannot be opened is logged and skipped rather than failing the migration.
+7. `add_transparency` — the `transparency` table above
 
 Backend-aware SQL: `placeholder(conn)` (from `bmlib.db`) returns `?` (SQLite) or `%s` (PostgreSQL). Schema DDL maintained as separate SQLite and PostgreSQL strings per migration. The `sources` filter in `get_papers_filtered()` unnests a JSON array, so it is backend-specific too — `json_each` on SQLite, `json_array_elements_text` on PostgreSQL.
 
@@ -211,7 +212,7 @@ Layered: dataclass defaults → TOML file (`~/.bmnews/config.toml`) → CLI flag
 | `[llm]` | `LLMConfig` | `provider`, `model`, `temperature`, `max_tokens`, `concurrency`, `api_key`, `base_url` |
 | `[scoring]` | `ScoringConfig` | `min_relevance`, `min_combined` |
 | `[quality]` | `QualityConfig` | `enabled`, `default_tier`, `max_tier`, `min_quality_tier` |
-| `[transparency]` | `TransparencyConfig` | `enabled`, `min_score_threshold` |
+| `[transparency]` | `TransparencyConfig` | `enabled`, `min_combined_score`, `score_threshold`, `concurrency` |
 | `[user]` | `UserConfig` | `name`, `email`, `research_interests` |
 | `[email]` | `EmailConfig` | `enabled`, `smtp_*`, `from_address`, `to_address`, `subject_prefix`, `max_papers` |
 | `[notifications]` | `NotificationsConfig` | `enabled`, `channels` (dict of dicts), `watches` (dict of dicts) |
@@ -285,7 +286,7 @@ Test files:
 | File | Coverage |
 |---|---|
 | `test_config.py` | Config loading, TOML parsing, backward-compat defaults |
-| `test_db.py` | All database operations, migrations, storing/dedup, filtering, tagging, digests, paper extras, digest selection filters, notification candidate selection and batch recording (including its rollback), the v3 → v4 data migration, migration 6's cache purge, and NULL text columns decoding to strings — **run against SQLite and PostgreSQL** |
+| `test_db.py` | All database operations, migrations, storing/dedup, filtering, tagging, digests, paper extras, digest selection filters, notification candidate selection and batch recording (including its rollback), the v3 → v4 data migration, migration 6's cache purge, migration 7's `transparency` table, and NULL text columns decoding to strings — **run against SQLite and PostgreSQL** |
 | `backends.py` / `conftest.py` | Not tests: the per-backend parameterisation `test_db.py` opts into, plus the suite-wide autouse fixture that returns `bmnews.gui.jobs`' process state to idle around every test — forcing its lock open if a worker outlived the test, since one leaked job would otherwise make every later `jobs.start()` refuse |
 | `test_digest.py` | HTML/text digest rendering |
 | `test_fetchers.py` | Europe PMC fetcher + its registration in bmlib's source registry |
@@ -297,8 +298,9 @@ Test files:
 | `test_notify.py` | Every watch criterion in isolation against literal paper dicts; watch/channel parsing, validation and unknown-key warnings |
 | `test_notify_channels.py` | Channel adapters and the four templates: Matrix endpoint/auth/body shape, deterministic `txnId`, alias resolution, encrypted-room refusal, transport errors arriving as `ChannelError`, non-https homeserver refusal, HTML escaping of third-party metadata; email over mocked SMTP, including a `False` return raising |
 | `test_notify_service.py` | `run_notify` — paging with no gaps or repeats, chunk-boundary exhaustion, dedup, per-channel retry, dry run leaving `sent_total` unmoved, contradictory CLI batch sizes, and the `bmnews notify` CLI. Plus `collect_matches` directly: scanning past the chunk window, and not carrying the full-text cache. File-backed SQLite, since each run opens its own connection |
-| `test_pipeline.py` | Show-cached flag, CLI integration, `run_sync` storage via bmlib (identifiers, publication types, full-text sources, extras), source dispatch, per-source config, and the notify stage's placement (ungated, before the digest, failure-contained) |
+| `test_pipeline.py` | Show-cached flag, CLI integration, `run_sync` storage via bmlib (identifiers, publication types, full-text sources, extras), source dispatch, per-source config, and the notify and transparency stages' placement (both ungated on `scored > 0`, both before the digest, both failure-contained) |
 | `test_scoring.py` | Quality tier mapping, publication type extraction, tier floors, quality toggle, generation settings, NULL-abstract normalisation, and one failing paper not aborting the run |
+| `test_transparency.py` | The transparency stage and its CLI, analyzer mocked throughout — the combined-score gate, the attempt ceiling, `--refresh` resetting the retry budget, `--paper-id` bypassing the gate, `--dry-run` building no analyzer, a raising analysis costing only itself, and concurrency storing every result |
 
 ## Adding New Functionality
 

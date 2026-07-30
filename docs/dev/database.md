@@ -126,6 +126,25 @@ Two properties this table depends on:
 
 The unique key includes `channel` because one watch can deliver to both email and Matrix and one can succeed while the other fails — retry state is per-channel or it is wrong.
 
+### `transparency`
+
+One row per publication (`paper_id` is the primary key, `REFERENCES publications(id) ON DELETE CASCADE`), holding bmlib's research-integrity result.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `paper_id` | INTEGER → `publications(id)` | Primary key — exactly one result per paper, and it doubles as the upsert's conflict target |
+| `transparency_score` | INTEGER | bmlib's 0–100 score |
+| `risk_level` | TEXT | `low` / `medium` / `high` / `unknown` — a `TransparencyRisk` value |
+| `attempts` | INTEGER | See below |
+| `result_json` | TEXT | bmlib's whole `TransparencyResult.to_dict()` |
+| `analyzed_at` | TEXT / TIMESTAMP | Last write |
+
+**Indexes:** `risk_level`.
+
+**`attempts` exists because `UNREACHABLE` is ambiguous.** bmlib sets its "an API answered" flag only on an HTTP 200, so a paper indexed in none of its five APIs reports the same `unknown` risk as a paper analysed during a network outage — the two cannot be distinguished from the result alone. Without a ceiling, "retry every unknown result" means re-querying every unindexed preprint, on every run, forever. `get_transparency_candidates()` retries an `unknown` row only while `attempts < TRANSPARENCY_MAX_ATTEMPTS` (3); `bmnews transparency --refresh` resets it to 1 so an explicit re-analysis gets its automatic retries back rather than spending its whole budget on one attempt. A determinate result (`low` / `medium` / `high`) is never re-selected regardless of `attempts` — the `risk_level` test in the candidate query fails before `attempts` is even considered.
+
+`_PAPER_COLUMNS` / `_PAPER_FROM` join this table on every paper query, so every paper dict carries `transparency_risk` (`""` when unanalysed — see `_NULLABLE_TEXT_COLUMNS`) and `transparency_score` for free. Only `get_paper_with_score()` also selects `result_json` (as `transparency_json`), since that is the one place the GUI needs the full findings rather than just the badge. The notification candidate query (`_NOTIFY_PAPER_COLUMNS`) takes the two small columns but deliberately not the blob, for the same reason it skips the cached full text.
+
 ## Migrations
 
 `db/schema.py` has no DDL of its own: `init_db(conn)` calls `bmlib.db.run_migrations(conn, MIGRATIONS)`, which applies whatever is pending and is safe to call on every connection open. `MIGRATIONS` lives in `db/migrations.py`, each entry carrying a version, a description and a function, with a pair of DDL strings per backend.
@@ -138,6 +157,7 @@ The unique key includes `channel` because one watch can deliver to both email an
 | 4 | `migrate_to_publications` | Moves storage onto bmlib — see below |
 | 5 | `add_notifications` | `notifications` |
 | 6 | `add_fulltext_pdf_url` | `paper_extras.fulltext_pdf_url`, and clears stale preprint-server full text |
+| 7 | `add_transparency` | `transparency` — see above for the `attempts` rationale |
 
 ### Migration 4 in detail
 
@@ -188,6 +208,14 @@ All functions in `db/operations.py` take a DB-API connection as the first argume
 | `record_notification(conn, *, watch, paper_id, channel, status, error='') → None` | Record one attempt |
 | `record_notifications(conn, *, watch, paper_ids, channel, status, error='') → None` | Record a whole batch **in one transaction** |
 | `count_notifications(conn, *, watch, channel='', status='sent') → int` | How many have been delivered |
+
+### Transparency operations
+
+| Function | Description |
+|----------|-------------|
+| `get_transparency_candidates(conn, *, min_combined=0.0, limit=100, max_attempts=3, refresh=False, paper_id=None) → list[dict]` | Scored papers still worth analysing — no result yet, or `unknown` with `attempts` under the ceiling. Returns `attempts` alongside identifiers so the caller can derive the value it is about to write without a second query per paper |
+| `save_transparency(conn, *, paper_id, transparency_score, risk_level, result_json='{}', reset_attempts=False) → None` | Upsert one result. Increments `attempts` unless `reset_attempts` (set by `--refresh`) restarts it at 1 |
+| `get_transparency_results(conn, *, limit=100) → list[dict]` | Stored results, worst risk first — what `bmnews transparency --list` reads |
 
 `get_notification_candidates()` deliberately selects `_NOTIFY_PAPER_COLUMNS` rather than `_PAPER_COLUMNS`: the latter's `p.*` would drag the GUI's cached full text through a query that materialises every candidate. Its `limit` is a **scan window, never a delivery cap** — the Python matcher rejects rows afterwards, so capping here would under-deliver silently. See [the notifications section of CLAUDE.md](../../CLAUDE.md) for the full rule.
 

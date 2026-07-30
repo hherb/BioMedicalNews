@@ -50,7 +50,9 @@ When run without `--show_cached`, the pipeline executes these stages in order:
 1. **Fetch** — call enabled source APIs for papers in the lookback window
 2. **Store** — upsert papers into the database (duplicates are updated, not duplicated)
 3. **Score** — send unscored papers to the LLM for relevance scoring and quality assessment
-4. **Digest** — render and deliver (email, file, or stdout) the top papers
+4. **Transparency** — when `[transparency] enabled = true`, assess research integrity for scored papers above the cost gate (see below). Skipped entirely when disabled, and a failure here does not stop the digest.
+5. **Notify** — deliver any watch notifications that are due
+6. **Digest** — render and deliver (email, file, or stdout) the top papers
 
 ### `bmnews fetch`
 
@@ -180,6 +182,45 @@ Watches are created and edited in `~/.bmnews/config.toml` — the tab does not e
 them. A watch shown as *disabled*, or one reported as naming no configured
 channel, is not delivering anything; a watch listed as unreadable failed
 validation and is being skipped entirely, with the reason in the log.
+
+### `bmnews transparency`
+
+Assess research integrity for scored papers: funder disclosure, a conflict-of-interest statement, data availability, and — for a registered trial — whether its results were posted. Queries CrossRef, Europe PMC, PubMed, OpenAlex and ClinicalTrials.gov. A result is shown beside a paper (GUI reading pane, digest, watch notifications, `--list`) and **never** changes which papers are selected or how they rank.
+
+Configured under `[transparency]`; see the [configuration reference](configuration.md#transparency). Disabled by default — `bmnews transparency` (and the TRANSPARENCY stage of `bmnews run`) does nothing until `enabled = true`.
+
+```bash
+bmnews transparency [--limit N] [--refresh] [--paper-id ID] [--list] [--dry-run]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--limit N` | Analyse at most this many papers. |
+| `--refresh` | Re-analyse papers that already hold a result, and reset their retry budget. |
+| `--paper-id ID` | Restrict to one paper, ignoring the cost gate. Combine with `--refresh` to force a re-analysis of that one paper — on its own it is a no-op once a determinate result exists. |
+| `--list` | Print stored results, worst risk first; analyses nothing. Works even when `[transparency] enabled = false`, since it only reads what has already been stored. |
+| `--dry-run` | Report how many papers would be analysed; calls no external API and writes nothing. |
+
+Each analysis costs several external requests, so by default only papers whose combined score reaches `transparency.min_combined_score` are analysed:
+
+```bash
+# See what would be analysed, without spending any requests
+bmnews transparency --dry-run
+
+# Analyse the next batch
+bmnews transparency
+
+# Show what's been found so far
+bmnews transparency --list
+# HIGH 28/100 — Industry-Funded Trial of Drug X (10.1101/2026.01.01.11111)
+#     - No conflict-of-interest statement found
+#     - Funder not disclosed
+
+# Force a fresh look at one paper
+bmnews transparency --paper-id 42 --refresh
+```
+
+**A paper that comes back indeterminate is retried, but not forever.** bmlib can only tell "the APIs are unreachable" from "this paper is indexed nowhere" by whether any of the five ever returned an HTTP 200 — the two look identical otherwise. Left unbounded, that would mean re-querying every preprint no API indexes, on every single run, forever. So a paper is retried automatically up to three times and then left alone; `--refresh` resets that budget, which is also why it is the only way to force a second try at one paper with `--paper-id`.
 
 ### `bmnews init`
 
