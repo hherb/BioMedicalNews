@@ -1,6 +1,6 @@
 """Main orchestration pipeline.
 
-Runs the full fetch → store → score → digest → deliver cycle.
+Runs the full fetch → store → score → transparency → notify → digest cycle.
 """
 
 from __future__ import annotations
@@ -457,7 +457,7 @@ def run_pipeline(
     on_progress: Callable[[str], None] | None = None,
     on_scored: Callable[[int], None] | None = None,
 ) -> None:
-    """Execute the full pipeline: fetch → store → score → notify → digest.
+    """Execute the full pipeline: fetch → store → score → transparency → notify → digest.
 
     Args:
         config: Application config.
@@ -479,6 +479,8 @@ def run_pipeline(
     run_sync(config, on_progress=on_progress)
 
     scored = run_score(config, on_progress=on_progress, on_scored=on_scored)
+
+    _run_transparency_stage(config, on_progress=on_progress)
 
     _run_notify_stage(config, on_progress=on_progress)
 
@@ -513,3 +515,31 @@ def _run_notify_stage(config: AppConfig, *, on_progress: Callable[[str], None] |
         run_notify(config, on_progress=on_progress)
     except Exception:
         logger.exception("Notification stage failed — continuing with the digest")
+
+
+def _run_transparency_stage(
+    config: AppConfig, *, on_progress: Callable[[str], None] | None
+) -> None:
+    """Run the transparency analysis, and never let it take the run down.
+
+    Deliberately **not** gated on ``scored > 0``, for the reasons the notify
+    stage is not: loosening ``min_combined_score`` makes papers scored on an
+    earlier run newly eligible, and a bounded retry is still owed its next
+    attempt even on a run that scored nothing.
+
+    Failures are contained because sync and scoring have already done the
+    expensive work by the time this runs, and this stage depends on five
+    external APIs — five more things that can be down, none of which should
+    cost the digest that would otherwise have gone out.
+    """
+    if not config.transparency.enabled:
+        return
+
+    # Deferred like the notify stage's import: this pulls in bmlib's analyzer
+    # and an HTTP client that `bmnews fetch` should not pay for.
+    from bmnews.transparency.service import run_transparency
+
+    try:
+        run_transparency(config, on_progress=on_progress)
+    except Exception:
+        logger.exception("Transparency stage failed — continuing with the pipeline")
