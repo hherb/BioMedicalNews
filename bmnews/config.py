@@ -125,10 +125,29 @@ class QualityConfig:
 
 @dataclass
 class TransparencyConfig:
-    """Settings for exposing scoring rationale to the user."""
+    """Settings for bmlib's research-integrity analysis.
+
+    *Not* scoring rationale, which is what this docstring claimed while nothing
+    called the analyzer. :mod:`bmlib.transparency` assesses whether a paper
+    discloses its funders, carries a conflict-of-interest statement, makes its
+    data available, and — for a registered trial — has posted its results, by
+    querying CrossRef, Europe PMC, PubMed, OpenAlex and ClinicalTrials.gov.
+
+    Two fields here are thresholds and they are **not** the same threshold:
+    ``min_combined_score`` gates which papers are worth spending requests on (a
+    bmnews combined score, 0.0–1.0), while ``score_threshold`` is bmlib's cutoff
+    below which a paper's transparency reads as HIGH risk (a transparency score,
+    0–100). ``min_combined_score`` was called ``min_score_threshold`` until the
+    analyzer was wired up; see :data:`_DEPRECATED_KEYS`.
+
+    ``concurrency`` is separate from ``llm.concurrency`` because the two bound
+    different resources — an LLM endpoint and a set of rate-limited public APIs.
+    """
 
     enabled: bool = False
-    min_score_threshold: float = 0.6
+    min_combined_score: float = 0.6
+    score_threshold: int = 40
+    concurrency: int = 3
 
 
 @dataclass
@@ -197,9 +216,48 @@ class AppConfig:
     template_dir: str = ""
 
 
+#: Config keys renamed since a release, per section dataclass: ``{old: new}``.
+#: :func:`_apply_section` assigns only to attributes the dataclass already has,
+#: so without this a rename would silently discard a value the user had
+#: deliberately changed and fall back to the default.
+_DEPRECATED_KEYS: dict[type, dict[str, str]] = {
+    TransparencyConfig: {"min_score_threshold": "min_combined_score"},
+}
+
+
 def _apply_section(dc: Any, data: dict) -> None:
-    """Apply dict values onto a dataclass, ignoring unknown keys."""
+    """Apply dict values onto a dataclass, ignoring unknown keys.
+
+    A key the dataclass has renamed is carried forward to its new name with a
+    warning rather than dropped: the value belongs to the user, and silently
+    reverting it to a default is the one outcome a rename must not produce. An
+    explicitly set new key always wins, in which case the old one is leftover
+    and is reported as such.
+
+    Args:
+        dc: The section dataclass instance to populate.
+        data: The raw TOML table for that section.
+    """
+    renames = _DEPRECATED_KEYS.get(type(dc), {})
     for key, value in data.items():
+        if key in renames:
+            new_key = renames[key]
+            if new_key in data:
+                logger.warning(
+                    "Config key %r is obsolete and %r is also set — using %r. "
+                    "Remove the old key from your config file.",
+                    key,
+                    new_key,
+                    new_key,
+                )
+                continue
+            logger.warning(
+                "Config key %r has been renamed to %r; carrying the value forward. "
+                "Save your settings to update the file.",
+                key,
+                new_key,
+            )
+            key = new_key
         if hasattr(dc, key):
             # Backward compat: old configs have research_interests as a list
             if key == "research_interests" and isinstance(value, list):
@@ -436,8 +494,19 @@ max_tier = 3
 min_quality_tier = "TIER_1_ANECDOTAL"
 
 [transparency]
+# Research-integrity analysis: funder disclosure, COI statements, data
+# availability and trial-results reporting, via CrossRef, Europe PMC, PubMed,
+# OpenAlex and ClinicalTrials.gov. Display only — it never changes which
+# papers are selected or how they rank.
 enabled = false
-min_score_threshold = 0.6
+# Only analyse papers whose combined score reaches this (0.0-1.0). Each
+# analysis costs four to eight external requests, so this is the cost control.
+min_combined_score = 0.6
+# bmlib's 0-100 cutoff: a transparency score below this reads as HIGH risk.
+score_threshold = 40
+# Concurrent analyses. bmlib's shared rate limit caps real throughput, so
+# raising this hides latency rather than multiplying speed.
+concurrency = 3
 
 [user]
 name = "Your Name"
