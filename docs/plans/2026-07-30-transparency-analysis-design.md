@@ -30,7 +30,7 @@ a paper the relevance score it did.
 | Which papers | **Scored, above `min_combined_score`** | Each analysis costs four to eight external requests. Analysing papers the user will never see is the one cost that buys nothing. |
 | Re-analysis | **Never automatic; `--refresh`** | Transparency genuinely changes over time, but an age-based refresh adds recurring API cost that grows with the corpus and mutates a stored result without being asked. |
 | Retry of an indeterminate result | **Bounded by an attempt count** | See "Why not `unknown_reason`" below. |
-| bmlib pin | **Stays put** | Nothing in this design needs a bmlib symbol the pinned commit lacks. |
+| bmlib pin | **Bumped to 0.6.0 at the end, not the start** | Nothing in this design needs a symbol the pinned 0.5.1 lacks, so the implementation does not wait on a bmlib release — and the bump, when it comes, is a lock-file change that needs no code to move with it. |
 
 ## Why not `unknown_reason`
 
@@ -47,20 +47,40 @@ re-attempting every unindexed preprint on every run, four to eight requests
 each, against a corpus that only grows. The enum cannot separate the transient
 case from the permanent one because bmlib cannot either.
 
-**The pinned bmlib does not export it.** `TransparencyUnknownReason` is on
-bmlib's `origin/main` (`ced28eb`) but not in the commit `uv.lock` resolves to,
-and `uv run` re-syncs to that pin — so importing it would fail the whole suite
-at collection, the trap HANDOVER.md documents. Moving the pin would also pull in
-bmlib's `parse_json` contract change, which `bmnews.scoring.relevance_agent`
-depends on. Neither risk is worth taking for a symbol that does not solve the
-problem.
+**The pinned bmlib does not export it yet.** `TransparencyUnknownReason` is on
+bmlib's `origin/main` (`ced28eb`) but not in the commit `uv.lock` resolves to
+(`7af80d40`, 0.5.1), and `uv run` re-syncs to that pin — so importing it today
+would fail the whole suite at collection, the trap HANDOVER.md documents. This
+is the weaker of the two arguments and a temporary one: bmlib is released as
+0.6.0 when this work lands, after which the symbol is simply there.
 
 So retries are bounded by a stored attempt count instead: an outage retries a
 few times and succeeds, an unindexed paper stops after
-`TRANSPARENCY_MAX_ATTEMPTS` and displays as UNKNOWN, honestly. `unknown_reason`
-still reaches storage inside `result_json` — the blob is whatever
-`TransparencyResult.to_dict()` produced, so the key starts appearing by itself
-if the pin ever moves, with no migration and no code change.
+`TRANSPARENCY_MAX_ATTEMPTS` and displays as UNKNOWN, honestly. That choice
+follows from the first argument alone and does not expire with the pin.
+
+`unknown_reason` still reaches storage, inside `result_json` — the blob is
+whatever `TransparencyResult.to_dict()` produced, so the key starts appearing by
+itself once the pin moves to 0.6.0, with no migration and no code change. It
+becomes available for diagnosis without ever having been load-bearing.
+
+### What this means for building it now
+
+The feature is implemented against the **current pin**, with nothing stubbed and
+no local-checkout wiring: every symbol it uses — `TransparencyAnalyzer`,
+`TransparencyResult`, `TransparencyRisk`, `TransparencySettings` — is in 0.5.1,
+precisely because the design avoids the one symbol that is not. Two behaviours
+the design leans on were confirmed present in the pinned commit rather than only
+in the working copy: `_api_reachable` is a `threading.local()` and the rate
+limiter holds a `threading.Lock()`, which is what makes one analyzer shared
+across the pool safe.
+
+Bumping the pin to 0.6.0 is therefore a lock-file change at the end of this
+work, not a prerequisite for starting it, and it needs no code to move with it.
+It also does not threaten the relevance agent: bmlib's `parse_json` contract
+change (`dict | list`, with an opt-in `require_dict`) does not reach
+`bmnews.scoring.relevance_agent`, which calls `chat_json()` — still declared
+`-> dict`.
 
 ## The extra is vestigial
 
