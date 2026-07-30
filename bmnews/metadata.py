@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-__all__ = ["parse_json_object", "parse_metadata", "parse_transparency"]
+__all__ = ["parse_metadata", "parse_transparency"]
 
 
 def parse_json_object(raw: Any) -> dict:
@@ -50,9 +50,16 @@ def parse_transparency(raw: Any) -> dict:
     """Decode a stored ``transparency.result_json`` value into a dict.
 
     Deliberately **not** ``bmlib.transparency.TransparencyResult.from_dict()``.
-    That classmethod raises on an ``unknown_reason`` value it does not
-    recognise, which is right for bmlib and wrong here: a newer bmlib writing a
-    member this one has not heard of must not stop a paper's page rendering.
-    The display surfaces read plain keys, so a dict is all they need.
+    That classmethod is stricter than a display path can afford: it raises
+    ``ValueError`` if ``risk_level`` is not a value ``TransparencyRisk``
+    recognises, ``KeyError`` if ``document_id`` or ``transparency_score`` is
+    missing, and it raises out of ``datetime.fromisoformat`` on a malformed
+    ``analyzed_at``. A row this app wrote itself should never trip those, but
+    the column holds data from whatever bmlib version stored it, so a paper's
+    page must not fail to render over a decoding disagreement it had no part
+    in. (bmlib 0.6.0 also has ``from_dict`` raise on an ``unknown_reason`` it
+    does not recognise; not applicable to the 0.5.1 this project currently
+    pins, which has no such field.) The display surfaces read plain keys, so a
+    dict is all they need.
     """
     return parse_json_object(raw)

@@ -209,10 +209,11 @@ def transparency(
     if limit is not None and limit < 1:
         raise click.UsageError("--limit must be at least 1.")
     # Refusing rather than quietly ignoring: --list means "analyse nothing" and
-    # these two mean "analyse differently", so honouring one and dropping the
-    # other would do something the user did not ask for.
-    if list_only and (refresh or dry_run):
-        raise click.UsageError("--list analyses nothing; drop --refresh/--dry-run.")
+    # these three mean "analyse differently" or "analyse a specific paper", so
+    # honouring one and dropping the others would do something the user did
+    # not ask for.
+    if list_only and (refresh or dry_run or paper_id is not None):
+        raise click.UsageError("--list analyses nothing; drop --refresh/--dry-run/--paper-id.")
 
     if list_only:
         rows = service.list_results(config, limit=limit)

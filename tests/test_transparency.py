@@ -583,6 +583,25 @@ class TestCli:
 
         assert result.exit_code != 0
 
+    def test_list_refuses_dry_run(self, db):
+        """Same principle as --refresh: --dry-run means 'analyse
+        differently', which --list must not silently ignore."""
+        config, _ = db
+
+        result = self._invoke(["transparency", "--list", "--dry-run"], config)
+
+        assert result.exit_code != 0
+
+    def test_list_refuses_paper_id(self, db):
+        """--paper-id narrows what would be analysed; combined with --list it
+        must be refused rather than silently dropped, printing every stored
+        result instead of the one paper the user named."""
+        config, _ = db
+
+        result = self._invoke(["transparency", "--list", "--paper-id", "1"], config)
+
+        assert result.exit_code != 0
+
     def test_paper_id_is_passed_through(self, db, monkeypatch):
         config, conn = db
         low = _scored(conn, doi="10.1/low", combined=0.01)

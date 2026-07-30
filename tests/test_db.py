@@ -18,6 +18,7 @@ from bmlib.db import (
 )
 from bmlib.fulltext import FullTextCache
 from bmlib.fulltext.cache import sanitize_identifier
+from bmlib.transparency import TransparencyRisk
 
 from bmnews.db import migrations
 from bmnews.db.migrations import MIGRATIONS
@@ -1788,6 +1789,17 @@ class TestTransparency:
             "medium",
             "low",
         ]
+
+    def test_unknown_risk_value_is_pinned(self):
+        """``get_transparency_candidates`` hardcodes the literal ``'unknown'``
+        in SQL rather than reading it from the enum (unlike
+        ``bmnews/transparency/service.py``'s ``_UNKNOWN``, which deliberately
+        does read it from ``TransparencyRisk.UNKNOWN.value`` so a rename
+        upstream cannot silently stop matching). This pins the coupling on
+        the SQL side too: if bmlib ever renames the value, this test fails
+        loudly in CI instead of new rows silently falling out of the retry
+        queue."""
+        assert TransparencyRisk.UNKNOWN.value == "unknown"
 
 
 class TestTransparencyReadPath:

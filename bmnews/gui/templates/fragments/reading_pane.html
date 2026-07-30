@@ -50,7 +50,7 @@
             <li>Funding:
                 {% if paper.transparency.industry_funding_detected %}industry ties detected
                 {% else %}no industry ties detected{% endif %}</li>
-            <li>Data availability: {{ paper.transparency.data_availability_level|default('unknown')|replace("_", " ") }}</li>
+            <li>Data availability: {{ paper.transparency.data_availability_level|default('unknown', true)|replace("_", " ") }}</li>
             <li>COI statement:
                 {% if paper.transparency.coi_disclosed is none %}undetermined
                 {% elif paper.transparency.coi_disclosed %}disclosed
