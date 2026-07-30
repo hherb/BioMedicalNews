@@ -56,22 +56,25 @@ All stages are **incremental**: sync records each fetched day in `download_days`
 ```
 bmnews/
 ├── __init__.py          # Package version (0.3.0)
-├── cli.py               # Click CLI commands (run, fetch, score, digest, notify, init, gui, search)
+├── cli.py               # Click CLI commands (run, fetch, score, transparency, digest, notify, init, gui, search)
 ├── config.py            # TOML config loading (AppConfig + nested section dataclasses)
 ├── constants.py         # Fixed application constants (scoring weights, page sizes, timeouts)
 ├── metadata.py          # Defensive decoding of the paper_extras.metadata_json blob
-├── pipeline.py          # Orchestration: sync → score → notify → digest (progress callbacks)
+├── pipeline.py          # Orchestration: sync → score → transparency → notify → digest (progress callbacks)
 ├── templating.py        # TEMPLATES_DIR + build_template_engine (digest, notify and GUI all need them)
 ├── db/
 │   ├── schema.py        # Database connection factory (open_db, init_db)
 │   ├── operations.py    # Pure-function CRUD (all SQL lives here)
-│   └── migrations.py    # 6 versioned migrations (the 4th moves storage onto bmlib)
+│   └── migrations.py    # 7 versioned migrations (the 4th moves storage onto bmlib)
 ├── fetchers/
 │   ├── __init__.py      # Registers bmnews-supplied sources with bmlib's registry
 │   └── europepmc.py     # Europe PMC fetcher (bmlib registry calling convention)
 ├── scoring/
 │   ├── scorer.py        # Orchestrates relevance (LLM) + quality (bmlib.quality) scoring
 │   └── relevance_agent.py  # LLM-based relevance scoring agent (extends BaseAgent)
+├── transparency/        # Research-integrity analysis stage (select, analyse, store)
+│   ├── __init__.py      # Re-exports run_transparency, list_results, build_settings
+│   └── service.py       # run_transparency(): shared analyzer, calling-thread storage
 ├── digest/
 │   ├── renderer.py      # Jinja2 digest rendering (HTML + plain text)
 │   └── sender.py        # SMTP email delivery (TLS, multipart MIME)
@@ -127,6 +130,8 @@ cli.py → pipeline.py → config.py (AppConfig dataclass)
                                             + europepmc, registered by bmnews.fetchers)
                       → scoring/scorer.py → scoring/relevance_agent.py → bmlib.agents.BaseAgent
                                           → bmlib.quality.metadata_filter
+                      → transparency/service.py (deferred import) → bmlib.transparency
+                                          (TransparencyAnalyzer, TransparencySettings)
                       → digest/renderer.py → bmlib.templates.TemplateEngine
                       → digest/sender.py (SMTP)
                       → notify/service.py (deferred import) → notify/matcher.py (pure)

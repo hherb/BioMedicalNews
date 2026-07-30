@@ -18,7 +18,7 @@ bmnews [OPTIONS] COMMAND [ARGS]...
 
 ### `bmnews run`
 
-Run the full pipeline: fetch, store, score, deliver any watch notifications, and deliver a digest.
+Run the full pipeline: fetch, store, score, assess research integrity, deliver any watch notifications, and deliver a digest.
 
 ```bash
 bmnews run [--days N] [--show_cached]

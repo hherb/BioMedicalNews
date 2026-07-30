@@ -45,7 +45,7 @@ def main(ctx: click.Context, config_path: str | None, verbose: bool) -> None:
 )
 @click.pass_context
 def run(ctx: click.Context, days: int | None, show_cached: bool) -> None:
-    """Run the full pipeline: fetch → score → notify → digest."""
+    """Run the full pipeline: fetch → score → transparency → notify → digest."""
     from bmnews.pipeline import run_pipeline
 
     run_pipeline(ctx.obj["config"], days=days, show_cached=show_cached)

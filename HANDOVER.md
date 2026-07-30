@@ -208,8 +208,10 @@ exist. All six files are now written against the code as it stands:
 - **`database.md`** — rewritten around the two owners (bmlib: `publications`,
   `fulltext_sources`, `download_days`; bmnews: `scores`, `paper_tags`,
   `digests`/`digest_papers`, `paper_extras`, `notifications`), the three-way
-  join a "paper" actually is, the six migrations, the real operations
-  reference, and the per-backend test setup.
+  join a "paper" actually is, the migration list (grown since this rewrite —
+  see current count in the migration table itself rather than trusting a
+  number here), the real operations reference, and the per-backend test
+  setup.
 - **`architecture.md`** — data-flow diagram and module graph redrawn; the
   notify path and the GUI blueprints added; backend-aware SQL corrected to
   `placeholder()`/`is_sqlite()` and per-migration DDL pairs.
