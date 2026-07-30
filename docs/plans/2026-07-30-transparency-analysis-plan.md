@@ -17,7 +17,18 @@
 - **`uv` only** — never invoke `pip` directly.
 - **Build against the currently pinned bmlib (0.5.1, commit `7af80d40`).** Every symbol used exists there. Do **not** run `uv lock --upgrade-package bmlib`; the 0.6.0 bump happens after this work lands and requires no code change.
 - **Do not import `TransparencyUnknownReason`.** The pinned bmlib does not export it, and the design deliberately does not depend on it.
-- **Both database backends.** This plan touches `db/operations.py` and `db/migrations.py`, so `tests/test_db.py` must be run with a live PostgreSQL server as well as SQLite: `BMNEWS_TEST_PG_DSN=postgresql://bmnews:bmnews@localhost:5432/bmnews_test uv run pytest tests/test_db.py -v`. Without the DSN the PostgreSQL half silently skips, which is exactly the failure mode to avoid here.
+- **Both database backends.** This plan touches `db/operations.py` and `db/migrations.py`, so `tests/test_db.py` must run against a live PostgreSQL server as well as SQLite. Without `BMNEWS_TEST_PG_DSN` the PostgreSQL half **silently skips**, which is exactly the failure mode to avoid here — a green run then means only that SQLite works.
+
+  **The DSN for this machine** (verified, servers already running — do *not* start a container, and do *not* substitute the `bmnews:bmnews` credentials from CLAUDE.md's example, which is what CI uses; that role does not exist locally):
+
+  ```bash
+  # PostgreSQL 16 — the primary target
+  BMNEWS_TEST_PG_DSN=postgresql://hherb@localhost:5432/bmnews_test uv run pytest tests/test_db.py -v
+  # PostgreSQL 18 — confirmation pass
+  BMNEWS_TEST_PG_DSN=postgresql://hherb@localhost:5532/bmnews_test uv run pytest tests/test_db.py -v
+  ```
+
+  Baseline before this work: **232 passed, 0 skipped** on both. A run reporting skips for `tests/test_db.py` means the DSN did not take — fix that before trusting the result.
 - **Keyword-only arguments for writes**, `conn` first, no ORM, `_placeholder(conn)` / `_is_sqlite(conn)` for backend-aware SQL, per-migration DDL pairs.
 - **Google-style docstrings** on every public function and class; module-level `logger = logging.getLogger(__name__)`.
 - **Inform only.** No task may add a transparency filter to `get_papers_for_digest()`, a criterion to `bmnews/notify/matcher.py`, or apply `tier_downgrade_applied`. Those are explicitly out of scope.
@@ -748,15 +759,14 @@ Expected: PASS on the `sqlite` parameterisation, SKIP on `postgresql`.
 
 - [ ] **Step 6: Run the tests on PostgreSQL**
 
-This step is not optional — the DDL pair and the upsert's `EXCLUDED` casing are backend-specific and untested by SQLite alone. Start a server if you have none:
+This step is not optional — the DDL pair and the upsert's `EXCLUDED` casing are backend-specific and wholly untested by SQLite. Both servers are already running; see Global Constraints for why the DSN is not the one in CLAUDE.md.
 
 ```bash
-docker run --rm -d --name bmnews-pg -e POSTGRES_USER=bmnews -e POSTGRES_PASSWORD=bmnews \
-  -e POSTGRES_DB=bmnews_test -p 5432:5432 postgres:16
+BMNEWS_TEST_PG_DSN=postgresql://hherb@localhost:5432/bmnews_test uv run pytest tests/test_db.py -v
+BMNEWS_TEST_PG_DSN=postgresql://hherb@localhost:5532/bmnews_test uv run pytest tests/test_db.py -v
 ```
 
-Run: `BMNEWS_TEST_PG_DSN=postgresql://bmnews:bmnews@localhost:5432/bmnews_test uv run pytest tests/test_db.py -v`
-Expected: PASS on both parameterisations, no skips.
+Expected: PASS on both parameterisations with **no skips**, on both PostgreSQL 16 and 18. A skip means the DSN did not take.
 
 - [ ] **Step 7: Lint and commit**
 
@@ -1046,7 +1056,8 @@ Also extend the `_row_to_paper` docstring's summary of what it normalises:
 Run: `uv run pytest tests/test_db.py -v`
 Expected: PASS (sqlite), SKIP (postgresql).
 
-Run: `BMNEWS_TEST_PG_DSN=postgresql://bmnews:bmnews@localhost:5432/bmnews_test uv run pytest tests/test_db.py -v`
+Run: `BMNEWS_TEST_PG_DSN=postgresql://hherb@localhost:5432/bmnews_test uv run pytest tests/test_db.py -v
+BMNEWS_TEST_PG_DSN=postgresql://hherb@localhost:5532/bmnews_test uv run pytest tests/test_db.py -v`
 Expected: PASS on both.
 
 Then run the whole suite, because `_PAPER_COLUMNS` feeds the GUI and digest tests too:
@@ -2591,7 +2602,8 @@ Every command must pass. Do not proceed on a failure — fix it.
 
 ```bash
 uv run pytest tests/ -v
-BMNEWS_TEST_PG_DSN=postgresql://bmnews:bmnews@localhost:5432/bmnews_test uv run pytest tests/test_db.py -v
+BMNEWS_TEST_PG_DSN=postgresql://hherb@localhost:5432/bmnews_test uv run pytest tests/test_db.py -v
+BMNEWS_TEST_PG_DSN=postgresql://hherb@localhost:5532/bmnews_test uv run pytest tests/test_db.py -v
 uv run ruff check bmnews/ tests/
 uv run ruff format --check bmnews/ tests/
 ```
