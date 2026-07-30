@@ -10,9 +10,10 @@ from __future__ import annotations
 import json
 
 import pytest
-from bmlib.transparency import TransparencyResult, TransparencyRisk
+from bmlib.transparency import TransparencyResult, TransparencyRisk, TransparencySettings
 
 from bmnews.config import AppConfig
+from bmnews.constants import DEFAULT_CONTACT_EMAIL
 from bmnews.db.operations import (
     get_transparency_results,
     save_score,
@@ -48,6 +49,39 @@ class _FakeAnalyzer:
         return self.results.get(document_id) or _result(document_id)
 
 
+@pytest.fixture(autouse=True, scope="module")
+def _no_real_analyzer():
+    """Refuse to construct a real ``TransparencyAnalyzer`` anywhere in this
+    module.
+
+    Every path that can reach ``_build_analyzer`` today is short-circuited
+    first — a disabled config, ``dry_run``, or an empty candidate list all
+    return before construction. That is a property of the current code, not
+    a guarantee this suite can lean on: if one of those guards ever
+    regressed, the real analyzer would fire four to eight live requests per
+    paper at CrossRef, Europe PMC, PubMed, OpenAlex and ClinicalTrials.gov —
+    exactly what this suite exists to avoid. Binding the module-level name to
+    a stub that raises turns that regression into a loud test failure instead
+    of a silent network call. Individual tests still call ``_install()`` to
+    supply their own fake for the paths that *do* reach construction; this is
+    only the backstop for the ones that shouldn't.
+
+    Uses ``pytest.MonkeyPatch`` directly rather than the ``monkeypatch``
+    fixture, which is function-scoped only.
+    """
+    mp = pytest.MonkeyPatch()
+
+    def _refuse(**kwargs):
+        raise AssertionError(
+            "a real TransparencyAnalyzer would have been constructed here — "
+            "install a fake with _install() before calling run_transparency"
+        )
+
+    mp.setattr(service, "TransparencyAnalyzer", _refuse)
+    yield
+    mp.undo()
+
+
 @pytest.fixture
 def db(tmp_path):
     """A migrated file-backed database the service will reopen for itself."""
@@ -74,7 +108,21 @@ def _scored(conn, *, doi, combined, pmid=None):
 
 
 def _install(monkeypatch, analyzer):
-    monkeypatch.setattr(service, "TransparencyAnalyzer", lambda **kwargs: analyzer)
+    """Bind ``service.TransparencyAnalyzer`` to a stub returning *analyzer*.
+
+    Every constructor call is recorded and the list of kwargs is returned, so
+    a test can assert build wiring — how many times the analyzer was
+    constructed, and what it was constructed with — without hand-rolling its
+    own stub.
+    """
+    calls: list[dict] = []
+
+    def _factory(**kwargs):
+        calls.append(kwargs)
+        return analyzer
+
+    monkeypatch.setattr(service, "TransparencyAnalyzer", _factory)
+    return calls
 
 
 class TestRunTransparency:
@@ -196,15 +244,40 @@ class TestRunTransparency:
         assert report.exhausted == 1
         assert service.run_transparency(config).analyzed == 0, "queue is spent"
 
+    def test_refresh_after_exhausting_the_budget_is_not_reported_exhausted(self, db, monkeypatch):
+        """``attempts`` for the exhausted-check must come from *this* run's
+        refresh, not from the stored count a non-refresh run would have
+        produced. A paper already at the attempt ceiling that is explicitly
+        refreshed gets its budget back — reporting it exhausted here would
+        tell the user it will never be retried when it plainly will be."""
+        config, conn = db
+        paper_id = _scored(conn, doi="10.1/a", combined=0.9)
+        unknown = _result(paper_id, score=0, risk=TransparencyRisk.UNKNOWN)
+        _install(monkeypatch, _FakeAnalyzer({str(paper_id): unknown}))
+        for _ in range(3):
+            service.run_transparency(config)
+        assert get_transparency_results(conn)[0]["attempts"] == 3
+
+        report = service.run_transparency(config, refresh=True)
+
+        assert (report.indeterminate, report.exhausted) == (1, 0)
+        assert get_transparency_results(conn)[0]["attempts"] == 1
+
     def test_refresh_reanalyses_and_resets_the_budget(self, db, monkeypatch):
         config, conn = db
         paper_id = _scored(conn, doi="10.1/a", combined=0.9)
         save_transparency(conn, paper_id=paper_id, transparency_score=0, risk_level="unknown")
         save_transparency(conn, paper_id=paper_id, transparency_score=0, risk_level="unknown")
         save_transparency(conn, paper_id=paper_id, transparency_score=0, risk_level="unknown")
+        # Installed before either call: the first call selects nothing and
+        # never reaches the analyzer, but a fake must already be in place so
+        # that stays true only because the candidate query says so — not
+        # because the real TransparencyAnalyzer happens not to have been
+        # patched in yet.
+        _install(monkeypatch, _FakeAnalyzer({str(paper_id): _result(paper_id, score=70)}))
+
         assert service.run_transparency(config).analyzed == 0
 
-        _install(monkeypatch, _FakeAnalyzer({str(paper_id): _result(paper_id, score=70)}))
         report = service.run_transparency(config, refresh=True)
 
         assert report.analyzed == 1
@@ -273,22 +346,67 @@ class TestRunTransparency:
 
     def test_concurrency_greater_than_one_stores_every_result(self, db, monkeypatch):
         """Storage happens on the calling thread; a worker must never touch
-        the connection."""
+        the connection. Also checks the sibling invariant that only one
+        analyzer is ever built for the run: bmlib's rate-limit lock is
+        per-instance, so a fresh analyzer per paper (e.g. built inside the
+        submit loop) would double the request rate undetected by any count
+        of stored rows alone."""
         config, conn = db
         config.transparency.concurrency = 4
         for i in range(6):
             _scored(conn, doi=f"10.1/{i}", combined=0.9)
-        _install(monkeypatch, _FakeAnalyzer())
+        calls = _install(monkeypatch, _FakeAnalyzer())
 
         report = service.run_transparency(config)
 
         assert report.analyzed == 6
         assert len(get_transparency_results(conn)) == 6
+        assert len(calls) == 1, "exactly one analyzer must be built and shared across the pool"
+
+
+class TestBuildAnalyzer:
+    def test_email_and_pubmed_key_come_from_config(self, db, monkeypatch):
+        """The PubMed API key is read from ``sources.source_options["pubmed"]``
+        — the same NCBI credential the PubMed fetcher already takes — rather
+        than duplicated into ``[transparency]``."""
+        config, conn = db
+        _scored(conn, doi="10.1/a", combined=0.9)
+        config.user.email = "researcher@example.org"
+        config.sources.source_options["pubmed"] = {"api_key": "abc123"}
+        calls = _install(monkeypatch, _FakeAnalyzer())
+
+        service.run_transparency(config)
+
+        assert len(calls) == 1
+        assert calls[0]["email"] == "researcher@example.org"
+        assert calls[0]["pubmed_api_key"] == "abc123"
+        assert isinstance(calls[0]["settings"], TransparencySettings)
+
+    def test_email_falls_back_and_pubmed_key_is_none_when_unset(self, db, monkeypatch):
+        config, conn = db
+        _scored(conn, doi="10.1/a", combined=0.9)
+        config.user.email = ""
+
+        calls = _install(monkeypatch, _FakeAnalyzer())
+
+        service.run_transparency(config)
+
+        assert calls[0]["email"] == DEFAULT_CONTACT_EMAIL
+        assert calls[0]["pubmed_api_key"] is None
 
 
 class TestBuildSettings:
     def test_enabled_is_forced_true(self, db):
+        """``enabled`` must be hard-coded ``True`` regardless of the config
+        value, because ``run_transparency`` already returns before reaching
+        ``build_settings`` when the feature is off — passing a disabled
+        config value through here would have bmlib answer with an UNKNOWN
+        placeholder that gets stored and satisfies the 'no row yet' half of
+        the candidate query, so the paper would never be analysed once the
+        feature was switched back on."""
         config, _ = db
+        config.transparency.enabled = False
+
         assert service.build_settings(config).enabled is True
 
     def test_score_threshold_and_concurrency_are_passed_through(self, db):
@@ -326,3 +444,23 @@ class TestListResults:
 
         assert rows[0]["risk_level"] == "high"
         assert rows[0]["title"] == "Paper 10.1/a"
+
+    def test_default_limit_is_not_the_batch_size(self, db, monkeypatch):
+        """TRANSPARENCY_BATCH_SIZE paces outbound analysis requests; it has no
+        business capping a read-only listing. Left unset, the db layer's own
+        default must apply — retuning the batch size for rate-limit reasons
+        must not silently change how many rows ``--list`` shows."""
+        config, _ = db
+        captured: dict = {}
+
+        def _spy(conn, **kwargs):
+            captured.update(kwargs)
+            return []
+
+        monkeypatch.setattr(service, "get_transparency_results", _spy)
+
+        service.list_results(config)
+        assert "limit" not in captured, "an unset limit must not be forced to the batch size"
+
+        service.list_results(config, limit=5)
+        assert captured["limit"] == 5

@@ -291,6 +291,13 @@ def _analyze_all(
 def list_results(config: AppConfig, *, limit: int | None = None) -> list[dict]:
     """Read stored transparency results for reporting, worst risk first.
 
+    ``limit`` is passed through only when the caller sets it. Left unset,
+    :func:`~bmnews.db.operations.get_transparency_results` applies its own
+    default rather than borrowing :data:`TRANSPARENCY_BATCH_SIZE` — that
+    constant paces *outbound* analysis requests and has no bearing on how many
+    rows a read-only listing shows; retuning it for rate-limit reasons must
+    not silently change what ``--list`` displays.
+
     Args:
         config: Application config.
         limit: Maximum rows to return.
@@ -301,6 +308,5 @@ def list_results(config: AppConfig, *, limit: int | None = None) -> list[dict]:
     """
     with closing(open_db(config)) as conn:
         init_db(conn)
-        return get_transparency_results(
-            conn, limit=limit if limit is not None else TRANSPARENCY_BATCH_SIZE
-        )
+        kwargs: dict[str, int] = {} if limit is None else {"limit": limit}
+        return get_transparency_results(conn, **kwargs)
