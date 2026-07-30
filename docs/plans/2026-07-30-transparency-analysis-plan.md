@@ -489,7 +489,10 @@ class TestTransparency:
 
 class TestMigration7:
     def test_creates_the_transparency_table(self):
-        conn = _db()
+        # new_db(), not _db(): the latter calls init_db(), which runs *every*
+        # migration, so the table would already exist and the assertion below
+        # could never fail. This matches the file's own _v3_db()/_v5_db().
+        conn = new_db()
         run_migrations(conn, MIGRATIONS[:6])
         assert not table_exists(conn, "transparency")
 
