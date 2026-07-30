@@ -31,17 +31,21 @@ from bmnews.constants import (
     TRANSPARENCY_MAX_ATTEMPTS,
     UNSCORED_BATCH_SIZE,
 )
-from bmnews.metadata import parse_metadata
+from bmnews.metadata import parse_metadata, parse_transparency
 
 logger = logging.getLogger(__name__)
 
 _is_sqlite = is_sqlite
 _placeholder = placeholder
 
-# Every paper query selects the same three-way join, so the SELECT list and the
-# FROM clause live here rather than being retyped (and drifting) per query.
+# Every paper query selects the same join, so the SELECT list and the FROM
+# clause live here rather than being retyped (and drifting) per query. The
+# transparency columns ride along on both, which is what makes the risk badge
+# available to the digest, the GUI and the tag views without editing eight
+# queries. Only ``get_paper_with_score`` adds ``result_json`` on top.
 _PAPER_COLUMNS = """
-    p.*, e.metadata_json, e.fulltext_html, e.fulltext_source, e.fulltext_pdf_url
+    p.*, e.metadata_json, e.fulltext_html, e.fulltext_source, e.fulltext_pdf_url,
+    t.risk_level AS transparency_risk, t.transparency_score
 """
 
 _SCORE_COLUMNS = """
@@ -52,6 +56,7 @@ _SCORE_COLUMNS = """
 _PAPER_FROM = """
     FROM publications p
     LEFT JOIN paper_extras e ON e.publication_id = p.id
+    LEFT JOIN transparency t ON t.paper_id = p.id
 """
 
 
@@ -195,7 +200,8 @@ def get_paper_with_score(conn: Any, paper_id: int) -> dict | None:
     row = fetch_one(
         conn,
         f"""
-        SELECT {_PAPER_COLUMNS}, {_SCORE_COLUMNS}, s.assessment_json
+        SELECT {_PAPER_COLUMNS}, {_SCORE_COLUMNS}, s.assessment_json,
+               t.result_json AS transparency_json
         {_PAPER_FROM}
         LEFT JOIN scores s ON s.paper_id = p.id
         WHERE p.id = {ph}
@@ -594,9 +600,13 @@ def record_digest(
 # cached article into memory to answer a question that needs none of it. These
 # are exactly the columns the matcher tests, the templates render, and
 # `_row_to_paper` needs to derive the outbound URL.
+# The two transparency columns are an integer and a short enum value, so they
+# cost nothing here; ``result_json`` is deliberately left out for the same
+# reason the cached full text is.
 _NOTIFY_PAPER_COLUMNS = """
     p.id, p.doi, p.pmid, p.pmcid, p.title, p.abstract, p.journal,
-    p.publication_date, p.authors, p.sources
+    p.publication_date, p.authors, p.sources,
+    t.risk_level AS transparency_risk, t.transparency_score
 """
 
 
@@ -662,6 +672,7 @@ def get_notification_candidates(
         SELECT {_NOTIFY_PAPER_COLUMNS}, {_SCORE_COLUMNS}
         FROM publications p
         JOIN scores s ON s.paper_id = p.id
+        LEFT JOIN transparency t ON t.paper_id = p.id
         LEFT JOIN notifications n
                ON n.paper_id = p.id
               AND n.watch = {ph}
@@ -1188,7 +1199,7 @@ _JSON_LIST_COLUMNS = ("authors", "keywords", "publication_types", "sources")
 #
 # The identifiers (doi, pmid, pmcid) are deliberately absent: for those,
 # "not present" is a distinct state from "empty", and dedupe relies on it.
-_NULLABLE_TEXT_COLUMNS = ("abstract", "journal", "license")
+_NULLABLE_TEXT_COLUMNS = ("abstract", "journal", "license", "transparency_risk")
 
 
 def paper_url(paper: dict) -> str:
@@ -1224,8 +1235,9 @@ def _row_to_paper(row: Any) -> dict:
     """Convert a joined DB row into the paper dict the rest of bmnews uses.
 
     The JSON array columns become real lists, the source-specific extras blob
-    becomes a ``metadata`` dict, and the outbound ``url`` is derived from the
-    identifiers.
+    becomes a ``metadata`` dict, the transparency result blob becomes a
+    ``transparency`` dict when the query asked for it, and the outbound ``url``
+    is derived from the identifiers.
     """
     if row is None:
         return {}
@@ -1242,6 +1254,12 @@ def _row_to_paper(row: Any) -> dict:
             paper[column] = ""
 
     paper["metadata"] = parse_metadata(paper.get("metadata_json"))
+    # Only the paper-detail query selects the blob. Its absence therefore means
+    # "not asked for", which must not decode to the same empty dict as
+    # "analysed, nothing to report" — hence the membership test rather than
+    # an unconditional ``.get()``.
+    if "transparency_json" in paper:
+        paper["transparency"] = parse_transparency(paper["transparency_json"])
     paper["is_open_access"] = bool(paper.get("is_open_access"))
     paper["url"] = paper_url(paper)
     return paper

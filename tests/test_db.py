@@ -1242,7 +1242,14 @@ class TestMigrationFulltextPdfUrl:
         catalogue: every paper query selects ``e.fulltext_pdf_url``, so a
         column that is missing breaks all of them — and the check then reads
         the same on SQLite and PostgreSQL.
+
+        The shared paper query also joins the migration-7 ``transparency``
+        table now, so this helper — which runs against a connection
+        deliberately frozen at schema version 6 — applies migration 7 too.
+        That table is not what this test is about; it just has to exist for
+        the "normal paper query" to run at all.
         """
+        run_migrations(conn, MIGRATIONS[6:7])
         pid = store_paper(conn, doi="10.1/column-probe", title="Probe")
         save_fulltext(
             conn,
@@ -1781,6 +1788,82 @@ class TestTransparency:
             "medium",
             "low",
         ]
+
+
+class TestTransparencyReadPath:
+    def test_digest_papers_carry_the_risk_badge(self):
+        conn = _db()
+        paper_id = store_paper(conn, doi="10.1/a", title="A", abstract="x", source="medrxiv")
+        save_score(conn, paper_id=paper_id, relevance_score=0.9, combined_score=0.9)
+        save_transparency(conn, paper_id=paper_id, transparency_score=82, risk_level="low")
+
+        papers = get_papers_for_digest(conn, min_combined=0.0)
+
+        assert papers[0]["transparency_risk"] == "low"
+        assert papers[0]["transparency_score"] == 82
+
+    def test_unanalysed_paper_reads_as_empty_not_none(self):
+        """Templates guard on truthiness, exactly as they do for quality_tier."""
+        conn = _db()
+        paper_id = store_paper(conn, doi="10.1/a", title="A", abstract="x", source="medrxiv")
+        save_score(conn, paper_id=paper_id, relevance_score=0.9, combined_score=0.9)
+
+        papers = get_papers_for_digest(conn, min_combined=0.0)
+
+        assert papers[0]["transparency_risk"] == ""
+
+    def test_detail_query_decodes_the_result_blob(self):
+        conn = _db()
+        paper_id = store_paper(conn, doi="10.1/a", title="A", abstract="x", source="medrxiv")
+        save_transparency(
+            conn,
+            paper_id=paper_id,
+            transparency_score=30,
+            risk_level="high",
+            result_json='{"risk_indicators": ["No COI disclosure found in full text"]}',
+        )
+
+        paper = get_paper_with_score(conn, paper_id)
+
+        assert paper["transparency"]["risk_indicators"] == ["No COI disclosure found in full text"]
+
+    def test_detail_query_survives_a_malformed_blob(self):
+        """A display surface must not fail to render because of stored junk."""
+        conn = _db()
+        paper_id = store_paper(conn, doi="10.1/a", title="A", abstract="x", source="medrxiv")
+        save_transparency(
+            conn,
+            paper_id=paper_id,
+            transparency_score=0,
+            risk_level="unknown",
+            result_json="not json at all",
+        )
+
+        assert get_paper_with_score(conn, paper_id)["transparency"] == {}
+
+    def test_list_queries_do_not_carry_the_blob(self):
+        """Absent means 'not asked for', which must not read as 'analysed and
+        empty' — so only the detail query populates it."""
+        conn = _db()
+        paper_id = store_paper(conn, doi="10.1/a", title="A", abstract="x", source="medrxiv")
+        save_score(conn, paper_id=paper_id, relevance_score=0.9, combined_score=0.9)
+        save_transparency(conn, paper_id=paper_id, transparency_score=82, risk_level="low")
+
+        papers = get_papers_for_digest(conn, min_combined=0.0)
+
+        assert "transparency" not in papers[0]
+
+    def test_notification_candidates_carry_the_badge_but_not_the_blob(self):
+        conn = _db()
+        paper_id = store_paper(conn, doi="10.1/a", title="A", abstract="x", source="medrxiv")
+        save_score(conn, paper_id=paper_id, relevance_score=0.9, combined_score=0.9)
+        save_transparency(conn, paper_id=paper_id, transparency_score=82, risk_level="low")
+
+        papers = get_notification_candidates(conn, watch="w", channel="c")
+
+        assert papers[0]["transparency_risk"] == "low"
+        assert "transparency" not in papers[0]
+        assert "fulltext_html" not in papers[0]
 
 
 class TestMigration7:
