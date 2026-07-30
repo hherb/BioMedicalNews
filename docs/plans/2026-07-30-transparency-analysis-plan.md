@@ -1890,12 +1890,22 @@ class TestTransparencyStage:
         assert reached == ["digest"]
 
     def test_disabled_config_skips_the_stage_entirely(self, monkeypatch):
-        def _boom(*args, **kwargs):
-            raise AssertionError("must not run when disabled")
+        """Assert on a recording, NOT on a raising stub.
 
-        monkeypatch.setattr("bmnews.transparency.service.run_transparency", _boom)
+        The stage wraps its call in `except Exception` by design, so it swallows
+        an AssertionError from a stub exactly as it swallows an httpx error — a
+        raising-stub test therefore passes whether or not the enabled gate
+        exists at all. Verified: deleting the gate leaves such a test green.
+        """
+        called = []
+        monkeypatch.setattr(
+            "bmnews.transparency.service.run_transparency",
+            lambda *a, **k: called.append(True),
+        )
 
         pipeline._run_transparency_stage(self._config(enabled=False), on_progress=None)
+
+        assert called == []
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
