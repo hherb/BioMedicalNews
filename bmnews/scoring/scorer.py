@@ -42,7 +42,7 @@ def score_papers(
     quality_tier: int = QUALITY_TIER_LLM_CLASSIFIER,
     temperature: float = DEFAULT_TEMPERATURE,
     max_tokens: int = DEFAULT_MAX_TOKENS,
-    progress_callback: Callable[[int, int, dict], None] | None = None,
+    progress_callback: Callable[[int, int, dict | None], None] | None = None,
 ) -> list[dict]:
     """Score a list of papers for relevance and quality.
 
@@ -61,7 +61,10 @@ def score_papers(
         progress_callback: Optional ``callback(current, total, result)`` invoked
             after each paper. It is always called on the calling thread — even
             when *concurrency* > 1 — so callbacks may safely touch a database
-            connection that is not shared across threads.
+            connection that is not shared across threads. It fires once per
+            paper *including* the ones that failed to score, which is what
+            makes ``current`` reach ``total``; ``result`` is None for those,
+            so a callback that stores it must check before doing so.
 
     Returns:
         List of dicts with scoring results, each containing:
@@ -95,12 +98,17 @@ def score_papers(
             # stranded every paper queued behind them — and it is the branch
             # local-Ollama users run. The concurrent branch below already
             # logged and carried on; the two now agree.
+            result = None
             try:
                 result = _score_single(paper, agent, quality_mgr, quality_filter, interests)
             except Exception:
                 logger.exception("Error scoring paper %s", paper.get("doi", "?"))
-                continue
-            results.append(result)
+            else:
+                results.append(result)
+            # Reported for a failure too, with result None. The bar only ever
+            # moves forward, so skipping the update here would leave a run
+            # whose last paper failed reporting n-1/n with nothing left to
+            # correct it.
             if progress_callback:
                 progress_callback(i + 1, total, result)
     else:
@@ -119,15 +127,18 @@ def score_papers(
             }
             for future in as_completed(futures):
                 paper = futures[future]
-                # Count every finished paper, including failures, so progress
-                # still reaches total/total when some papers error out.
+                # Count *and report* every finished paper, including failures,
+                # so progress still reaches total/total when some error out.
+                # Reporting only the successes is how this used to strand the
+                # GUI at n-1/n whenever the last completion was a failure.
                 completed += 1
+                result = None
                 try:
                     result = future.result()
                 except Exception:
                     logger.exception("Error scoring paper %s", paper.get("doi", "?"))
-                    continue
-                results.append(result)
+                else:
+                    results.append(result)
                 if progress_callback:
                     progress_callback(completed, total, result)
 

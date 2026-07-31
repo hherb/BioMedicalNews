@@ -434,8 +434,8 @@ class TestOnePaperCannotAbortTheRun:
 
         assert sorted(r["paper_id"] for r in results) == [1, 3]
 
-    def test_progress_still_reaches_the_total(self):
-        """A skipped paper must not strand the GUI's progress bar."""
+    def _run_capturing_progress(self, papers, concurrency):
+        """Score *papers*, returning every ``(current, total, result)`` reported."""
         from unittest.mock import MagicMock, patch
 
         from bmnews.scoring.scorer import score_papers
@@ -450,14 +450,62 @@ class TestOnePaperCannotAbortTheRun:
         seen = []
         with patch("bmnews.scoring.scorer.RelevanceAgent", return_value=agent):
             score_papers(
-                papers=self._papers(),
+                papers=papers,
                 llm=None,
                 model="ollama:x",
                 template_engine=None,
                 interests="oncology",
-                concurrency=1,
+                concurrency=concurrency,
                 quality_enabled=False,
-                progress_callback=lambda current, total, result: seen.append((current, total)),
+                progress_callback=lambda current, total, result: seen.append(
+                    (current, total, result)
+                ),
             )
+        return seen
 
-        assert seen[-1] == (3, 3)
+    def test_progress_still_reaches_the_total(self):
+        """A skipped paper must not strand the GUI's progress bar."""
+        seen = self._run_capturing_progress(self._papers(), concurrency=1)
+
+        assert seen[-1][:2] == (3, 3)
+
+    def test_progress_reaches_the_total_when_the_last_paper_fails(self):
+        """The bar only moves forward, so nothing later can correct it.
+
+        A failure on the final paper is the case that strands it permanently:
+        the run ends with the status bar still reporting 2/3 and no further
+        call coming to fix it.
+        """
+        papers = [
+            {"id": 1, "title": "First", "abstract": "a"},
+            {"id": 2, "title": "Second", "abstract": "b"},
+            {"id": 3, "title": "boom", "abstract": "c"},
+        ]
+
+        seen = self._run_capturing_progress(papers, concurrency=1)
+
+        assert seen[-1][:2] == (3, 3)
+
+    def test_progress_reaches_the_total_when_every_paper_fails_concurrently(self):
+        """Order-independent version of the same guarantee.
+
+        ``as_completed`` decides the order, so "the last paper" is not a thing
+        a test can pin concurrently — every paper failing makes the assertion
+        deterministic, and a batch reporting nothing at all is the worst case.
+        """
+        papers = [{"id": i, "title": "boom", "abstract": "x"} for i in (1, 2, 3)]
+
+        seen = self._run_capturing_progress(papers, concurrency=3)
+
+        assert [s[:2] for s in seen] == [(1, 3), (2, 3), (3, 3)]
+
+    def test_a_failed_paper_reports_no_result(self):
+        """Progress for a failure must carry ``None``, not a half-built dict.
+
+        ``pipeline._score_progress`` saves whatever it is handed when it is a
+        dict, so the guard that keeps an unscoreable paper out of ``scores``
+        is this value being None.
+        """
+        seen = self._run_capturing_progress(self._papers(), concurrency=1)
+
+        assert [s[2] is None for s in seen] == [False, True, False]
