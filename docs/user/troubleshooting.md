@@ -149,6 +149,16 @@ The exit code is 1, so a cron job or shell script can test for it. A usage
 mistake (an unknown flag, or `--all` together with `--count`) exits 2 instead
 and prints the command's usage.
 
+A broken config file reads the same way, naming whichever command you typed:
+
+```
+Error: score failed: TOMLDecodeError: Expected '=' after a key in a key/value pair (at line 4, column 6)
+```
+
+The line and column are into `~/.bmnews/config.toml`, or whatever `-c` named.
+`-v` gives the traceback for this one too — nothing has been read yet at that
+point, so the config's own `log_level` has no say in it.
+
 ## Getting more help
 
 - Run any command with `-v` for verbose debug output

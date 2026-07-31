@@ -225,6 +225,11 @@ def _analyze_all(
     ``on_progress`` fires once per finished paper whatever the outcome, so the
     count it reports reaches ``total``.
 
+    Only the *first* storage failure of a run is logged with its traceback:
+    every paper shares one connection, so a dropped one fails all of them
+    identically and a batch of tracebacks would bury the cause rather than
+    show it. The rest are logged at WARNING and counted.
+
     Args:
         conn: DB-API connection, used only from this thread.
         analyzer: The shared analyzer.
@@ -240,6 +245,7 @@ def _analyze_all(
     """
     total = len(candidates)
     analyzed = indeterminate = exhausted = failed = done = 0
+    storage_failures = 0
 
     with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
         futures = {
@@ -285,11 +291,28 @@ def _analyze_all(
                     # here discarded the report for everything already stored
                     # — after the pool had waited out every analysis still
                     # running, several external requests each, to produce it.
-                    logger.exception(
-                        "Storing the transparency result for paper %s failed — it stays queued",
-                        paper["id"],
-                    )
                     failed += 1
+                    storage_failures += 1
+                    # Traceback for the first only. Every paper shares this one
+                    # connection, so a dropped one fails all of them the same
+                    # way: one traceback names the cause, a batch of them
+                    # buries it in the log a user is asked to attach to a bug
+                    # report. A raising *analysis* keeps its own traceback
+                    # every time — those are independent interactions with
+                    # five APIs and need not share a cause.
+                    if storage_failures == 1:
+                        logger.exception(
+                            "Storing the transparency result for paper %s failed — it stays "
+                            "queued. Further storage failures this run are logged without "
+                            "their traceback.",
+                            paper["id"],
+                        )
+                    else:
+                        logger.warning(
+                            "Storing the transparency result for paper %s failed too — it "
+                            "stays queued",
+                            paper["id"],
+                        )
                 else:
                     analyzed += 1
                     if risk == _UNKNOWN:

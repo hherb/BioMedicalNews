@@ -59,6 +59,50 @@ class TestAnUnexpectedFailure:
 
         assert any(record.exc_info for record in caplog.records)
 
+    def test_a_config_that_will_not_load_is_reported_the_same_way(self, tmp_path):
+        """``load_config`` runs in the group callback, which the wrapper covers too.
+
+        Click sets ``invoked_subcommand`` before invoking the group callback,
+        so the message still names the command the user typed.
+        """
+        bad = tmp_path / "bad.toml"
+        bad.write_text("this is not = valid toml [[[\n")
+
+        from bmnews.cli import main
+
+        result = CliRunner().invoke(main, ["-c", str(bad), "score"])
+
+        assert result.exit_code == 1
+        assert "Error: score failed: TOMLDecodeError" in result.output
+        assert "Traceback" not in result.output
+
+    def test_the_traceback_survives_a_failure_before_the_config_loads(self, monkeypatch, tmp_path):
+        """``-v`` must configure logging *before* ``load_config`` can raise.
+
+        Configuring it afterwards left the root logger at WARNING for exactly
+        the failure whose message tells the user to re-run with ``-v``: the
+        DEBUG record was dropped and the traceback went nowhere, so the advice
+        the message gives was false.
+
+        Run against the real handler, not ``caplog`` — ``caplog`` installs its
+        own and would pass the record whichever order the code used, which is
+        the whole thing under test. The root logger is emptied first because
+        ``basicConfig`` is a no-op once any handler is installed, and pytest
+        has installed several.
+        """
+        bad = tmp_path / "bad.toml"
+        bad.write_text("this is not = valid toml [[[\n")
+        root = logging.getLogger()
+        monkeypatch.setattr(root, "handlers", [])
+        monkeypatch.setattr(root, "level", logging.WARNING)
+
+        from bmnews.cli import main
+
+        result = CliRunner().invoke(main, ["-v", "-c", str(bad), "score"])
+
+        assert "Traceback" in result.stderr
+        assert "TOMLDecodeError" in result.stderr
+
     @pytest.mark.parametrize(
         ("args", "target"),
         [
@@ -69,6 +113,8 @@ class TestAnUnexpectedFailure:
             (["notify"], "bmnews.notify.service.run_notify"),
             (["transparency"], "bmnews.transparency.service.run_transparency"),
             (["search", "cancer"], "bmnews.db.operations.get_papers_filtered"),
+            (["init"], "bmnews.cli.write_default_config"),
+            (["gui"], "bmnews.gui.launcher.launch"),
         ],
     )
     def test_every_command_is_covered(self, monkeypatch, tmp_path, args, target):
@@ -76,7 +122,9 @@ class TestAnUnexpectedFailure:
 
         The point of doing it at the group is that a command added later
         cannot forget it, so this asserts across the commands rather than on
-        the one that prompted the change.
+        the one that prompted the change. All nine are listed anyway: an
+        exception is cheaper than the argument about which of them "counts",
+        and a command dropping off this list is then a visible deletion.
         """
         monkeypatch.setattr(target, _boom)
         config = AppConfig()
@@ -92,10 +140,13 @@ class TestAnUnexpectedFailure:
 class TestWhatTheWrapperLeavesAlone:
     """Deliberate exits have to survive it.
 
-    ``click.exceptions.Exit`` and ``click.Abort`` are both ``RuntimeError``
-    subclasses, so a bare ``except Exception`` swallows them — which would turn
-    ``notify``'s "every delivery failed" exit into a spurious error message and
-    lose the exit code a cron job reads.
+    ``click.exceptions.Exit`` and ``click.Abort`` derive from ``RuntimeError``
+    and ``ClickException`` from ``Exception`` directly, so a bare
+    ``except Exception`` swallows all three — which would turn ``notify``'s
+    "every delivery failed" exit into a spurious error message and lose the
+    exit code a cron job reads. Narrowing the passthrough to ``RuntimeError``
+    would keep two of the three and quietly lose ``ClickException``, so the
+    usage-error case below is doing real work rather than restating click.
     """
 
     def _run(self, body):

@@ -240,19 +240,37 @@ only *after* `ThreadPoolExecutor.__exit__` had waited out every analysis still
 in flight, several external requests each. It is now caught per paper and
 counted in `failed` alongside a raising analysis, which is honest: neither
 wrote a row, so both stay queued. Nothing bails out mid-batch any more, so
-`cancel_futures` has nothing left to cancel — that is why it is absent.
+`cancel_futures` has nothing left to cancel — that is why it is absent. Only
+the *first* storage failure of a run keeps its traceback; every paper shares
+one connection, so a dropped one fails all of them for the same reason and a
+batch of tracebacks hides the cause rather than showing it. The rest log at
+WARNING, and all of them are still counted.
 
 **The CLI reports a failure rather than a traceback**, via
 `_CleanFailureGroup` on the `main` group rather than a decorator per command,
 so a command added later cannot forget it. The user gets
 `Error: <command> failed: <type>: <message>`, exit code 1, and a pointer to
 `bmnews -v`; the traceback is logged with `exc_info` at DEBUG, so it is demoted
-rather than lost. **The three exceptions it re-raises are the whole trap**:
-`ClickException`, `click.exceptions.Exit` and `click.Abort` are all
-`RuntimeError` subclasses, so a bare `except Exception` swallows them — that
-would flatten a `UsageError`'s exit code 2 into 1 (reporting a typo as a crash)
-and drop the exit code `notify` sets when every delivery failed, which is the
-only signal a cron job has.
+rather than lost.
+
+**The three exceptions it re-raises are the whole trap**, and they do *not*
+share a base class: `ClickException` derives straight from `Exception`, while
+`click.exceptions.Exit` and `click.Abort` derive from `RuntimeError`. A bare
+`except Exception` catches all three — but so would narrowing the passthrough
+to `except RuntimeError`, which is the tempting-looking simplification and
+drops `ClickException`. Losing it flattens a `UsageError`'s exit code 2 into 1
+(reporting a typo as a crash); losing `Exit` drops the exit code `notify` sets
+when every delivery failed, which is the only signal a cron job has.
+
+**Logging is configured before the config is read**, and the order is
+load-bearing rather than incidental. `load_config()` raises on a malformed
+TOML and `_CleanFailureGroup` catches that too — so configuring logging after
+it left the root logger at WARNING for exactly the failure whose own message
+says to re-run with `-v`, and the DEBUG traceback reached no handler. It
+bootstraps at WARNING (DEBUG under `-v`) and only takes `log_level` from the
+config once that has loaded: bootstrapping at INFO instead would print
+`load_config`'s own "Loading config from …" line to someone whose config asked
+for WARNING.
 
 ## The developer docs
 

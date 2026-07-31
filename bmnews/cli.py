@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import sys
 from contextlib import closing
 from typing import Any
 
@@ -24,13 +23,19 @@ class _CleanFailureGroup(click.Group):
     forget it — and so ``score``, ``digest`` and ``transparency``, which each
     drive external services that fail in their own ways, answer alike.
 
-    Only an *unanticipated* exception is converted. The three that must pass
-    through are all ``RuntimeError`` subclasses, so a bare ``except Exception``
-    swallows them: ``ClickException`` already carries a message and its own
-    exit code (``UsageError`` exits 2, and flattening that to 1 would report a
-    typo as a crash), while ``Exit`` and ``Abort`` are how a command asks to
-    stop — losing ``Exit`` would drop ``notify``'s "every delivery failed"
-    code, which is the only thing a cron job has to go on.
+    Only an *unanticipated* exception is converted. Three have to be re-raised
+    explicitly, because a bare ``except Exception`` catches every one of them:
+    ``ClickException`` derives from ``Exception`` directly, and ``Exit`` and
+    ``Abort`` from ``RuntimeError`` — so **narrowing this to
+    ``except RuntimeError: raise`` would silently drop ``ClickException``**.
+    ``ClickException`` already carries a message and its own exit code
+    (``UsageError`` exits 2, and flattening that to 1 would report a typo as a
+    crash), while ``Exit`` and ``Abort`` are how a command asks to stop —
+    losing ``Exit`` would drop ``notify``'s "every delivery failed" code, which
+    is the only thing a cron job has to go on.
+
+    ``SystemExit`` and ``KeyboardInterrupt`` need no clause: both derive from
+    ``BaseException``, so ``except Exception`` never sees them.
 
     The traceback is demoted, not discarded: it is logged with ``exc_info`` at
     DEBUG, so ``bmnews -v`` still prints the whole thing for a bug report.
@@ -74,17 +79,30 @@ class _CleanFailureGroup(click.Group):
 def main(ctx: click.Context, config_path: str | None, verbose: bool) -> None:
     """BioMedical News Reader — discover relevant preprints."""
     ctx.ensure_object(dict)
-    config = load_config(config_path)
-    ctx.obj["config"] = config
 
-    # getattr on a lowercase name silently falls back to INFO, so normalise.
-    configured = getattr(logging, str(config.log_level).upper(), logging.INFO)
-    level = logging.DEBUG if verbose else configured
+    # Handlers first, config second. `load_config` raises on a malformed TOML
+    # and _CleanFailureGroup catches that too, so configuring logging after it
+    # left the root logger at WARNING for the one failure whose own message
+    # tells the user to re-run with -v — the traceback went nowhere.
+    #
+    # WARNING rather than INFO until the config is read: `load_config` logs
+    # which file it took at INFO, and bootstrapping any lower would print that
+    # to someone whose config asks for WARNING. It reached no handler before
+    # this reordering either, so suppressing it keeps the output unchanged.
     logging.basicConfig(
-        level=level,
+        level=logging.DEBUG if verbose else logging.WARNING,
         format="%(asctime)s %(name)s %(levelname)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+
+    config = load_config(config_path)
+    ctx.obj["config"] = config
+
+    if not verbose:
+        # getattr on a lowercase name silently falls back to INFO, so normalise.
+        # Set on the root logger directly: basicConfig is a no-op once the call
+        # above has installed a handler, so it cannot raise the level here.
+        logging.getLogger().setLevel(getattr(logging, str(config.log_level).upper(), logging.INFO))
 
 
 @main.command()
@@ -356,7 +374,9 @@ def gui(ctx: click.Context, port: int | None) -> None:
     except ImportError as e:
         click.echo(f"GUI dependencies not installed ({e}).")
         click.echo("Run: uv pip install 'bmnews[gui]'")
-        sys.exit(1)
+        # ctx.exit, not sys.exit: the same deliberate-exit route `notify` uses,
+        # so there is one answer to "how does a command set its exit code".
+        ctx.exit(1)
 
 
 @main.command()

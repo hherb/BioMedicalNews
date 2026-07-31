@@ -8,6 +8,7 @@ ClinicalTrials.gov per paper.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 
 import pytest
@@ -265,6 +266,33 @@ class TestRunTransparency:
         service.run_transparency(config)
 
         assert get_transparency_results(conn) == []
+
+    def test_only_the_first_storage_failure_carries_a_traceback(self, db, monkeypatch, caplog):
+        """Every paper shares one connection, so they share one cause.
+
+        A dropped connection fails all of them identically; a traceback each
+        buries the cause in the log a user is asked to attach to a bug report.
+        Each failure is still logged and still counted — only the repeated
+        traceback goes.
+        """
+        config, conn = db
+        ids = [
+            _scored(conn, doi="10.1/one", combined=0.9),
+            _scored(conn, doi="10.1/two", combined=0.8),
+            _scored(conn, doi="10.1/three", combined=0.7),
+        ]
+        _install(monkeypatch, _FakeAnalyzer())
+        _fail_save_for(monkeypatch, *ids)
+
+        with caplog.at_level(logging.DEBUG, logger="bmnews.transparency.service"):
+            report = service.run_transparency(config)
+
+        # "Storing" picks out the two write-failure messages; a failed analysis
+        # logs "Transparency analysis failed" and the summary "Transparency:".
+        storage = [r for r in caplog.records if "Storing" in r.getMessage()]
+        assert report.failed == 3
+        assert len(storage) == 3
+        assert [bool(r.exc_info) for r in storage] == [True, False, False]
 
     def test_progress_reaches_the_total_when_analyses_fail(self, db, monkeypatch):
         """The same guarantee ``score_papers`` carries: the bar only moves
