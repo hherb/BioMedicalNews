@@ -104,6 +104,21 @@ def documented_migrations(text: str) -> set[tuple[int, str]] | None:
     return None
 
 
+def documented_test_files(text: str) -> set[str] | None:
+    """Extract the *.py names from testing.md's fenced ``tests/`` listing.
+
+    The listing is the fenced code block whose first non-blank line is
+    exactly ``tests/``. Trailing comments are ignored. Returns None when no
+    such block exists, so the caller fails loudly rather than vacuously.
+    """
+    for block in re.findall(r"```[^\n]*\n(.*?)```", text, flags=re.DOTALL):
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        if lines and lines[0] == "tests/":
+            names = (line.split()[0] for line in lines[1:])
+            return {name for name in names if name.endswith(".py")}
+    return None
+
+
 class TestIterInlineCode:
     def test_yields_tokens_with_line_numbers(self):
         text = "first `a/b.py` and `c/d.py`\nsecond `e.py`\n"
@@ -168,6 +183,30 @@ class TestDocumentedMigrations:
         assert documented_migrations(other_table) is None
 
 
+TESTS_DOC = """\
+## Test structure
+
+```
+tests/
+  backends.py         # Not a test: helper
+  test_cli.py         # The CLI
+  test_db.py          # Every DB operation
+```
+"""
+
+
+class TestDocumentedTestFiles:
+    def test_extracts_py_names_from_the_tests_block(self):
+        assert documented_test_files(TESTS_DOC) == {"backends.py", "test_cli.py", "test_db.py"}
+
+    def test_returns_none_without_the_block(self):
+        assert documented_test_files("no fenced block here\n") is None
+
+    def test_ignores_fenced_blocks_that_are_not_the_listing(self):
+        text = "```\nsome other example\n```\n\n" + TESTS_DOC
+        assert documented_test_files(text) == {"backends.py", "test_cli.py", "test_db.py"}
+
+
 class TestDocsMatchCode:
     """The three live checks: docs/dev against the real tree."""
 
@@ -203,4 +242,20 @@ class TestDocsMatchCode:
             f"database.md's migration table is out of step with MIGRATIONS — "
             f"in code but not documented: {sorted(missing_from_doc)}; "
             f"documented but not in code: {sorted(gone_from_code)}"
+        )
+
+    def test_test_file_listing_matches_tests_dir(self):
+        text = (DOCS_DEV / "testing.md").read_text(encoding="utf-8")
+        documented = documented_test_files(text)
+        assert documented is not None, (
+            "fenced `tests/` listing not found in testing.md — "
+            "removing the block is itself drift"
+        )
+        actual = {p.name for p in (REPO_ROOT / "tests").glob("*.py")} - {"__init__.py"}
+        undocumented = actual - documented
+        gone_from_tree = documented - actual
+        assert documented == actual, (
+            f"testing.md's test-file listing is out of step with tests/ — "
+            f"in tests/ but not documented: {sorted(undocumented)}; "
+            f"documented but not in tests/: {sorted(gone_from_tree)}"
         )

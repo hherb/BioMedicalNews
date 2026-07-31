@@ -117,7 +117,7 @@ templates/                     # Email digest + notification + LLM prompt templa
 ├── relevance_system.txt       # LLM system prompt for relevance scoring
 └── relevance_scoring.txt      # LLM user prompt (paper title, abstract, interests)
 
-tests/                         # Test suite (14 files)
+tests/                         # Test suite (17 files)
 docs/plans/                    # Implementation design documents and plans
 bmlib_patch/                   # bmlib source archive and patch files
 ```
@@ -298,6 +298,7 @@ Test files:
 | `test_db.py` | All database operations, migrations, storing/dedup, filtering, tagging, digests, paper extras, digest selection filters, notification candidate selection and batch recording (including its rollback), the v3 → v4 data migration, migration 6's cache purge, migration 7's `transparency` table, transparency candidate selection (including a refresh run walking the corpus rather than redoing one batch, which pins the backend-divergent `NULLS FIRST`), and NULL text columns decoding to strings — **run against SQLite and PostgreSQL** |
 | `backends.py` / `conftest.py` | Not tests: the per-backend parameterisation `test_db.py` opts into, plus the suite-wide autouse fixture that returns `bmnews.gui.jobs`' process state to idle around every test — forcing its lock open if a worker outlived the test, since one leaked job would otherwise make every later `jobs.start()` refuse |
 | `test_digest.py` | HTML/text digest rendering |
+| `test_docs.py` | The docs/dev drift backstop — backticked repo paths exist (allowlist for worked examples like `newsource.py`), `database.md`'s migration table matches `MIGRATIONS`, `testing.md`'s test listing matches `tests/`; parsers pinned against fixture strings |
 | `test_fetchers.py` | Europe PMC fetcher + its registration in bmlib's source registry |
 | `test_fulltext_integration.py` | Fulltext service integration (Europe PMC/Unpaywall/DOI) |
 | `test_gui_app.py` | Flask blueprints, HTMX responses, paper queries, pipeline status, the View PDF button, and the outbound-URL scheme allowlist |
