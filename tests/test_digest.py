@@ -65,6 +65,46 @@ class TestRenderDigest:
         assert "[Custom]" in text
 
 
+class TestThirdPartyMetadataEscaping:
+    """Issue #17: the digest templates render through bmlib's ``TemplateEngine``,
+    which runs with ``autoescape=False``, and titles, summaries and author
+    lists arrive from third-party preprint metadata."""
+
+    def _hostile_paper(self):
+        return {
+            "title": '<script>alert("t")</script> & Drug X',
+            "url": 'https://doi.org/10.1/a"><script>alert("u")</script>',
+            "authors": ["Smith <script>alert('a')</script> J", "Jones A"],
+            "publication_date": "2026-<b>07</b>-30",
+            "sources": ["med<i>rxiv</i>"],
+            "summary": 'Found <script>alert("s")</script> a large effect.',
+            "relevance_score": 0.9,
+            "quality_tier": "TIER_2_<b>OBSERVATIONAL</b>",
+            "study_design": "co<b>hort</b>",
+        }
+
+    def test_html_escapes_every_third_party_field(self):
+        engine = TemplateEngine(default_dir=TEMPLATES_DIR)
+
+        html = render_digest([self._hostile_paper()], engine, fmt="html")
+
+        assert "<script>" not in html
+        assert "<b>" not in html
+        assert "<i>" not in html
+        assert "&lt;script&gt;" in html
+
+    def test_text_render_stays_raw(self):
+        """The plain-text digest is a text/plain MIME part: HTML entities there
+        would be literal noise, exactly as in the ``notify_*.txt`` templates."""
+        engine = TemplateEngine(default_dir=TEMPLATES_DIR)
+
+        text = render_digest([self._hostile_paper()], engine, fmt="text")
+
+        assert '<script>alert("t")</script> & Drug X' in text
+        assert "&amp;" not in text
+        assert "&lt;" not in text
+
+
 class TestTransparencyBadge:
     def _paper(self, **overrides):
         paper = {
