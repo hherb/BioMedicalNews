@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import sys
 from contextlib import closing
+from typing import Any
 
 import click
 
@@ -13,8 +14,59 @@ from bmnews.config import load_config, write_default_config
 from bmnews.constants import CLI_TITLE_TRUNCATE, DEFAULT_PAGE_SIZE
 from bmnews.metadata import parse_transparency
 
+logger = logging.getLogger(__name__)
 
-@click.group()
+
+class _CleanFailureGroup(click.Group):
+    """A group whose commands report a failure instead of a traceback.
+
+    Done once here rather than per command so a command added later cannot
+    forget it — and so ``score``, ``digest`` and ``transparency``, which each
+    drive external services that fail in their own ways, answer alike.
+
+    Only an *unanticipated* exception is converted. The three that must pass
+    through are all ``RuntimeError`` subclasses, so a bare ``except Exception``
+    swallows them: ``ClickException`` already carries a message and its own
+    exit code (``UsageError`` exits 2, and flattening that to 1 would report a
+    typo as a crash), while ``Exit`` and ``Abort`` are how a command asks to
+    stop — losing ``Exit`` would drop ``notify``'s "every delivery failed"
+    code, which is the only thing a cron job has to go on.
+
+    The traceback is demoted, not discarded: it is logged with ``exc_info`` at
+    DEBUG, so ``bmnews -v`` still prints the whole thing for a bug report.
+    """
+
+    def invoke(self, ctx: click.Context) -> Any:
+        """Invoke the subcommand, converting an unhandled exception.
+
+        Args:
+            ctx: The group's context. ``invoked_subcommand`` is already set by
+                the time anything under it can raise, so it names the command
+                in the message.
+
+        Returns:
+            Whatever the subcommand returned.
+
+        Raises:
+            click.ClickException: Wrapping any exception the command did not
+                handle itself.
+        """
+        try:
+            return super().invoke(ctx)
+        except (click.ClickException, click.exceptions.Exit, click.Abort):
+            raise
+        except Exception as exc:
+            name = ctx.invoked_subcommand or ctx.info_name or "bmnews"
+            logger.debug("%s failed", name, exc_info=True)
+            # The type alone when there is no message: "Error: score failed: "
+            # tells the user nothing, and a bare raise is not that rare.
+            detail = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+            raise click.ClickException(
+                f"{name} failed: {detail}\nRun `bmnews -v {name}` for the full traceback."
+            ) from exc
+
+
+@click.group(cls=_CleanFailureGroup)
 @click.option("-c", "--config", "config_path", default=None, help="Path to config file.")
 @click.option("-v", "--verbose", is_flag=True, help="Enable debug logging.")
 @click.version_option(version=__version__)
