@@ -59,6 +59,27 @@ def is_path_candidate(token: str) -> bool:
     return token.endswith("/") or token.endswith(_PATH_EXTENSIONS)
 
 
+# Worked examples the docs tell a reader to create; they do not exist by design.
+# Anything added here needs the same justification. `newsource.py` is the
+# add-a-fetcher example in contributing.md and bmlib-integration.md.
+KNOWN_FICTIONAL_PATHS = frozenset({"bmnews/fetchers/newsource.py"})
+
+
+def path_bases() -> list[Path]:
+    """Directories a documented path may be relative to.
+
+    The repo root, ``bmnews/``, and every direct subpackage of ``bmnews/`` —
+    computed from the tree, not hardcoded, so a new subpackage needs no edit
+    here. This resolves the docs' package-relative shorthand.
+    """
+    package_root = REPO_ROOT / "bmnews"
+    bases = [REPO_ROOT, package_root]
+    for child in sorted(package_root.iterdir()):
+        if child.is_dir() and (child / "__init__.py").exists():
+            bases.append(child)
+    return bases
+
+
 class TestIterInlineCode:
     def test_yields_tokens_with_line_numbers(self):
         text = "first `a/b.py` and `c/d.py`\nsecond `e.py`\n"
@@ -86,3 +107,36 @@ class TestIsPathCandidate:
         assert not is_path_candidate("n-1/n")  # slash, but no path-like ending
         assert not is_path_candidate("https://api.example.org/search")  # ':' fails the charset
         assert not is_path_candidate("provider:model")  # no slash and ':' anyway
+
+
+class TestPathBases:
+    def test_includes_root_package_and_subpackages(self):
+        bases = path_bases()
+        assert REPO_ROOT in bases
+        assert REPO_ROOT / "bmnews" in bases
+        # Computed from the tree, so the docs' package-relative shorthand
+        # (`db/operations.py`, `channels/`) resolves without per-token rules.
+        assert REPO_ROOT / "bmnews" / "db" in bases
+        assert REPO_ROOT / "bmnews" / "notify" in bases
+
+
+class TestDocsMatchCode:
+    """The three live checks: docs/dev against the real tree."""
+
+    def test_backticked_paths_exist(self):
+        bases = path_bases()
+        failures = []
+        for doc in sorted(DOCS_DEV.glob("*.md")):
+            for line_no, token in iter_inline_code(doc.read_text(encoding="utf-8")):
+                if not is_path_candidate(token):
+                    continue
+                if token.startswith(("bmlib/", "~")):
+                    continue  # a different repo; a user-home runtime file
+                if token in KNOWN_FICTIONAL_PATHS:
+                    continue
+                if not any((base / token).exists() for base in bases):
+                    failures.append(f"{doc.name}:{line_no}: `{token}`")
+        assert not failures, (
+            "docs/dev references paths that do not exist — fix the doc, or add a "
+            "worked example to KNOWN_FICTIONAL_PATHS:\n" + "\n".join(failures)
+        )
