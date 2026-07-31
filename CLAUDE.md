@@ -57,6 +57,8 @@ All stages are **incremental**: sync records each fetched day in `download_days`
 bmnews/
 ├── __init__.py          # Package version (0.3.0)
 ├── cli.py               # Click CLI commands (run, fetch, score, transparency, digest, notify, init, gui, search)
+│                        # `_CleanFailureGroup` reports an unhandled exception as `Error: <cmd> failed: …`
+│                        # (exit 1, traceback logged at DEBUG) — on the group, so no command can forget it
 ├── config.py            # TOML config loading (AppConfig + nested section dataclasses)
 ├── constants.py         # Fixed application constants (scoring weights, page sizes, timeouts)
 ├── metadata.py          # Defensive decoding of the paper_extras.metadata_json blob
@@ -290,6 +292,7 @@ The desktop GUI (pywebview + Flask + HTMX) is documented in `bmnews/gui/CLAUDE.m
 Test files:
 | File | Coverage |
 |---|---|
+| `test_cli.py` | The CLI itself rather than any one command: an unhandled exception reported as `Error: <command> failed: …` with exit code 1 and no traceback, the traceback still logged with `exc_info`, every command covered because the handling sits on the group — and what must survive it, namely a command's own `ctx.exit()` code, a `UsageError`'s exit 2, and an `Abort` |
 | `test_config.py` | Config loading, TOML parsing, backward-compat defaults |
 | `test_db.py` | All database operations, migrations, storing/dedup, filtering, tagging, digests, paper extras, digest selection filters, notification candidate selection and batch recording (including its rollback), the v3 → v4 data migration, migration 6's cache purge, migration 7's `transparency` table, transparency candidate selection (including a refresh run walking the corpus rather than redoing one batch, which pins the backend-divergent `NULLS FIRST`), and NULL text columns decoding to strings — **run against SQLite and PostgreSQL** |
 | `backends.py` / `conftest.py` | Not tests: the per-backend parameterisation `test_db.py` opts into, plus the suite-wide autouse fixture that returns `bmnews.gui.jobs`' process state to idle around every test — forcing its lock open if a worker outlived the test, since one leaked job would otherwise make every later `jobs.start()` refuse |
@@ -304,8 +307,8 @@ Test files:
 | `test_notify_channels.py` | Channel adapters and the four templates: Matrix endpoint/auth/body shape, deterministic `txnId`, alias resolution, encrypted-room refusal, transport errors arriving as `ChannelError`, non-https homeserver refusal, HTML escaping of third-party metadata; email over mocked SMTP, including a `False` return raising |
 | `test_notify_service.py` | `run_notify` — paging with no gaps or repeats, chunk-boundary exhaustion, dedup, per-channel retry, dry run leaving `sent_total` unmoved, contradictory CLI batch sizes, and the `bmnews notify` CLI. Plus `collect_matches` directly: scanning past the chunk window, and not carrying the full-text cache. File-backed SQLite, since each run opens its own connection |
 | `test_pipeline.py` | Show-cached flag, CLI integration, `run_sync` storage via bmlib (identifiers, publication types, full-text sources, extras), source dispatch, per-source config, and the notify and transparency stages' placement (both ungated on `scored > 0`, both before the digest, both failure-contained) |
-| `test_scoring.py` | Quality tier mapping, publication type extraction, tier floors, quality toggle, generation settings, NULL-abstract normalisation, and one failing paper not aborting the run |
-| `test_transparency.py` | The transparency stage and its CLI, analyzer mocked throughout — the combined-score gate, the attempt ceiling, `--refresh` resetting the retry budget, `--paper-id` bypassing the gate and reporting what an empty selection for a named paper can mean, `--dry-run` building no analyzer, a raising analysis costing only itself, and concurrency storing every result |
+| `test_scoring.py` | Quality tier mapping, publication type extraction, tier floors, quality toggle, generation settings, NULL-abstract normalisation, one failing paper not aborting the run, and progress reaching `total/total` when papers fail (including the last one, which nothing later can correct) with `result` None for those |
+| `test_transparency.py` | The transparency stage and its CLI, analyzer mocked throughout — the combined-score gate, the attempt ceiling, `--refresh` resetting the retry budget, `--paper-id` bypassing the gate and reporting what an empty selection for a named paper can mean, `--dry-run` building no analyzer, a raising analysis costing only itself, a raising *storage* write costing only itself (report still returned, row absent so it retries), progress reaching `total/total` through either failure, and concurrency storing every result |
 
 ## Adding New Functionality
 

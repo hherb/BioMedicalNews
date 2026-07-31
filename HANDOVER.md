@@ -13,6 +13,8 @@
 | bmlib pin → 0.6.0 | **Open, not urgent.** Every symbol the transparency stage uses exists in the pinned 0.5.1; the design avoids `TransparencyUnknownReason`, which only 0.6.0 exports. Bumping needs `uv lock --upgrade-package bmlib` and no code change — `unknown_reason` then starts appearing inside `result_json` on its own, since the whole `TransparencyResult.to_dict()` blob is stored. |
 | Digest templates don't escape metadata | **Open.** `templates/digest_email.html` / `digest_text.txt` interpolate `paper.title`, `paper.summary` and the author list unescaped, unlike the four `notify_*` templates. Found while adding the transparency badge; unrelated to it. [Issue #17](https://github.com/hherb/BioMedicalNews/issues/17). |
 | Reading pane shows literal `None` for a missing date | **Open.** `publication_date` is a date column, not text, so it was left out of `_NULLABLE_TEXT_COLUMNS` — a `NULL` reaches `reading_pane.html` unguarded. Pre-existing, unrelated to transparency. [Issue #18](https://github.com/hherb/BioMedicalNews/issues/18). |
+| Transparency: mid-batch storage failure ([#19](https://github.com/hherb/BioMedicalNews/issues/19)) | **Done.** Contained per paper — see below. |
+| Progress callback skips failed papers ([#20](https://github.com/hherb/BioMedicalNews/issues/20)) | **Done.** Both call sites now report every finished paper — see below. |
 
 ## Environment gotcha
 
@@ -214,6 +216,43 @@ downgrade are both plausible additive follow-ups, not oversights — do not
 `TransparencyUnknownReason`, which only 0.6.0 exports, specifically so this
 feature would not force the pin. See "Environment gotcha" above and the
 open-items table for the bump as a tracked follow-up.
+
+## Failure containment (issues #19 and #20)
+
+Three fixes, all about a failure costing more than itself. Nothing here is a
+feature; the invariants are worth keeping straight because each undoes a bug
+that looked like working code.
+
+**A failed paper still reports progress.** `score_papers`'s `except` branch
+`continue`d past `progress_callback`, and `_analyze_all()` — which had copied
+the shape — did the same. The bar only ever moves forward, so a failure on the
+*last* completion left the GUI reporting `n-1/n` with nothing coming to correct
+it. Both now report every finished paper. The scorer passes `result=None` for a
+failure, which is safe only because `pipeline._score_progress` already tests
+`isinstance(result, dict)` before storing anything — **keep that guard**, it is
+what stops an unscoreable paper reaching `scores`.
+
+**A storage failure costs only its own paper.** `save_transparency()` runs on
+the calling thread inside the `as_completed()` loop, so a lock timeout or a
+dropped connection escaped `run_transparency()` and discarded the whole run's
+`TransparencyReport` — describing rows that were already committed — and did it
+only *after* `ThreadPoolExecutor.__exit__` had waited out every analysis still
+in flight, several external requests each. It is now caught per paper and
+counted in `failed` alongside a raising analysis, which is honest: neither
+wrote a row, so both stay queued. Nothing bails out mid-batch any more, so
+`cancel_futures` has nothing left to cancel — that is why it is absent.
+
+**The CLI reports a failure rather than a traceback**, via
+`_CleanFailureGroup` on the `main` group rather than a decorator per command,
+so a command added later cannot forget it. The user gets
+`Error: <command> failed: <type>: <message>`, exit code 1, and a pointer to
+`bmnews -v`; the traceback is logged with `exc_info` at DEBUG, so it is demoted
+rather than lost. **The three exceptions it re-raises are the whole trap**:
+`ClickException`, `click.exceptions.Exit` and `click.Abort` are all
+`RuntimeError` subclasses, so a bare `except Exception` swallows them — that
+would flatten a `UsageError`'s exit code 2 into 1 (reporting a typo as a crash)
+and drop the exit code `notify` sets when every delivery failed, which is the
+only signal a cron job has.
 
 ## The developer docs
 

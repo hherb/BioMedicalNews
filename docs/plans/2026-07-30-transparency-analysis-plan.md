@@ -2732,6 +2732,20 @@ Full suite and both lint checks pass.
 - Bump bmlib to 0.6.0 and `uv lock --upgrade-package bmlib`. No code change.
 - Issue filed for the pre-existing lack of escaping in the digest templates,
   found while adding the badge but unrelated to it.
+- **Done (2026-08-01, branch `fix/progress-and-error-containment`):** issues
+  [#19](https://github.com/hherb/BioMedicalNews/issues/19) and
+  [#20](https://github.com/hherb/BioMedicalNews/issues/20), both raised against
+  the code below. `_analyze_all()` now catches a `save_transparency()` failure
+  per paper and counts it in `failed` rather than letting it escape — which
+  used to discard a report describing rows already committed, and only after
+  the pool's exit had waited out every analysis still in flight. Its
+  `on_progress` and `score_papers`'s `progress_callback` now both fire for a
+  failed paper too (with `result=None` in the scorer's case), so the count
+  reaches `total`; the shape this plan copied from `score_papers` carried that
+  bug, and the comment above it claimed otherwise. The CLI's third point was
+  settled group-wide rather than per command: `_CleanFailureGroup`. **The
+  `_analyze_all()` source quoted in Task 4 below therefore predates the fix** —
+  read `bmnews/transparency/service.py` for the current shape.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 EOF

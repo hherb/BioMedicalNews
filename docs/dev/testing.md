@@ -34,6 +34,7 @@ The tests create and drop their own schemas, so give them a scratch database, no
 tests/
   backends.py         # Not a test: per-backend parameterisation for test_db.py
   conftest.py         # Not a test: the db_backend fixture + the autouse GUI-jobs reset
+  test_cli.py         # The CLI itself: unexpected failures reported, deliberate exits kept
   test_config.py      # Config loading, TOML parsing, backward-compat defaults
   test_db.py          # Every DB operation and migration — both backends
   test_digest.py      # HTML/text digest rendering
@@ -48,6 +49,7 @@ tests/
   test_notify_service.py   # run_notify paging, dedup, retry, dry run, CLI
   test_pipeline.py    # run_sync storage, source dispatch, notify stage placement
   test_scoring.py     # Quality tier mapping, pub type extraction, tier floors
+  test_transparency.py     # The transparency stage and its CLI, analyzer mocked throughout
 ```
 
 ## Test patterns

@@ -124,6 +124,31 @@ bmnews search ""
 
 This shows all stored papers with their scores.
 
+## A command stopped with `Error: ... failed:`
+
+**Symptom:** a command ends with a line like
+
+```
+Error: score failed: OperationalError: database is locked
+Run `bmnews -v score` for the full traceback.
+```
+
+That is bmnews reporting a failure it did not anticipate. The name before
+`failed:` is the command, and the rest is the underlying error — here, another
+process (usually the GUI) was holding the database.
+
+**What to do:**
+- Re-run the command. Every stage is incremental, so a run that stopped part
+  way keeps what it had already stored: scoring skips papers it has scored,
+  transparency skips papers holding a result, and notifications are not
+  re-sent.
+- If it happens again, run it once with `-v` — the full traceback goes to the
+  log at debug level — and include that output when filing an issue.
+
+The exit code is 1, so a cron job or shell script can test for it. A usage
+mistake (an unknown flag, or `--all` together with `--count`) exits 2 instead
+and prints the command's usage.
+
 ## Getting more help
 
 - Run any command with `-v` for verbose debug output
