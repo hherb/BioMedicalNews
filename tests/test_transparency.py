@@ -8,6 +8,7 @@ ClinicalTrials.gov per paper.
 from __future__ import annotations
 
 import json
+import sqlite3
 
 import pytest
 from bmlib.transparency import TransparencyResult, TransparencyRisk, TransparencySettings
@@ -105,6 +106,24 @@ def _scored(conn, *, doi, combined, pmid=None):
     )
     save_score(conn, paper_id=paper_id, relevance_score=0.9, combined_score=combined)
     return paper_id
+
+
+def _fail_save_for(monkeypatch, *failing_ids):
+    """Make ``save_transparency`` raise for these papers and work for the rest.
+
+    Stands in for the mid-batch write failures that are real here — a SQLite
+    lock timeout while the GUI holds the database, or a dropped PostgreSQL
+    connection — none of which a test can provoke honestly on demand.
+    """
+    real_save = service.save_transparency
+    failing = set(failing_ids)
+
+    def _save(conn, *, paper_id, **kwargs):
+        if paper_id in failing:
+            raise sqlite3.OperationalError("database is locked")
+        real_save(conn, paper_id=paper_id, **kwargs)
+
+    monkeypatch.setattr(service, "save_transparency", _save)
 
 
 def _install(monkeypatch, analyzer):
@@ -216,6 +235,70 @@ class TestRunTransparency:
         service.run_transparency(config)
 
         assert get_transparency_results(conn) == []
+
+    def test_a_storage_failure_costs_only_its_own_paper(self, db, monkeypatch):
+        """A write that raises mid-batch must not discard the whole run.
+
+        The rows written before it are already committed and the analyses
+        still outstanding have already been paid for in external requests, so
+        letting the exception escape ``run_transparency`` threw away a report
+        describing work that had actually happened — and left the caller
+        unable to tell how much.
+        """
+        config, conn = db
+        bad = _scored(conn, doi="10.1/bad", combined=0.9)
+        good = _scored(conn, doi="10.1/good", combined=0.8)
+        _install(monkeypatch, _FakeAnalyzer())
+        _fail_save_for(monkeypatch, bad)
+
+        report = service.run_transparency(config)
+
+        assert (report.analyzed, report.failed) == (1, 1)
+        assert [r["paper_id"] for r in get_transparency_results(conn)] == [good]
+
+    def test_a_storage_failure_leaves_no_row_so_it_retries(self, db, monkeypatch):
+        config, conn = db
+        bad = _scored(conn, doi="10.1/bad", combined=0.9)
+        _install(monkeypatch, _FakeAnalyzer())
+        _fail_save_for(monkeypatch, bad)
+
+        service.run_transparency(config)
+
+        assert get_transparency_results(conn) == []
+
+    def test_progress_reaches_the_total_when_analyses_fail(self, db, monkeypatch):
+        """The same guarantee ``score_papers`` carries: the bar only moves
+        forward, so a failure that skips its update strands it there.
+
+        Every paper fails on purpose — ``as_completed`` decides the order, so a
+        single failure among successes only strands the bar when it happens to
+        land last, which is not a thing a test can pin.
+        """
+        config, conn = db
+        ids = [
+            _scored(conn, doi="10.1/one", combined=0.9),
+            _scored(conn, doi="10.1/two", combined=0.8),
+        ]
+        _install(monkeypatch, _FakeAnalyzer(raises=[str(i) for i in ids]))
+        messages = []
+
+        service.run_transparency(config, on_progress=messages.append)
+
+        assert messages[-1] == "Analysing transparency 2/2..."
+
+    def test_progress_reaches_the_total_when_storage_fails(self, db, monkeypatch):
+        config, conn = db
+        ids = [
+            _scored(conn, doi="10.1/one", combined=0.9),
+            _scored(conn, doi="10.1/two", combined=0.8),
+        ]
+        _install(monkeypatch, _FakeAnalyzer())
+        _fail_save_for(monkeypatch, *ids)
+        messages = []
+
+        service.run_transparency(config, on_progress=messages.append)
+
+        assert messages[-1] == "Analysing transparency 2/2..."
 
     def test_unknown_result_is_reported_indeterminate(self, db, monkeypatch):
         config, conn = db
