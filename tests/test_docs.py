@@ -248,8 +248,7 @@ class TestDocsMatchCode:
         text = (DOCS_DEV / "testing.md").read_text(encoding="utf-8")
         documented = documented_test_files(text)
         assert documented is not None, (
-            "fenced `tests/` listing not found in testing.md — "
-            "removing the block is itself drift"
+            "fenced `tests/` listing not found in testing.md — removing the block is itself drift"
         )
         actual = {p.name for p in (REPO_ROOT / "tests").glob("*.py")} - {"__init__.py"}
         undocumented = actual - documented
