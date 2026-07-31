@@ -10,11 +10,10 @@
 | `docs/dev/` drift | **Done.** All six files rewritten against the current code ([issue #11](https://github.com/hherb/BioMedicalNews/issues/11)). |
 | `bmlib.transparency` | **Done.** Wired up as a fifth pipeline stage, informs only — see below. |
 | `docs/dev/` drift detection | **Open.** The rewrite above was verified by hand, and nothing in CI fails when a rename rots it again — [issue #16](https://github.com/hherb/BioMedicalNews/issues/16). |
-| bmlib pin → 0.6.0 | **Open, not urgent.** Every symbol the transparency stage uses exists in the pinned 0.5.1; the design avoids `TransparencyUnknownReason`, which only 0.6.0 exports. Bumping needs `uv lock --upgrade-package bmlib` and no code change — `unknown_reason` then starts appearing inside `result_json` on its own, since the whole `TransparencyResult.to_dict()` blob is stored. |
-| Digest templates don't escape metadata | **Open.** `templates/digest_email.html` / `digest_text.txt` interpolate `paper.title`, `paper.summary` and the author list unescaped, unlike the four `notify_*` templates. Found while adding the transparency badge; unrelated to it. [Issue #17](https://github.com/hherb/BioMedicalNews/issues/17). |
-| Reading pane shows literal `None` for a missing date | **Open.** `publication_date` is a date column, not text, so it was left out of `_NULLABLE_TEXT_COLUMNS` — a `NULL` reaches `reading_pane.html` unguarded. Pre-existing, unrelated to transparency. [Issue #18](https://github.com/hherb/BioMedicalNews/issues/18). |
-| Transparency: mid-batch storage failure ([#19](https://github.com/hherb/BioMedicalNews/issues/19)) | **Done.** Contained per paper — see below. |
-| Progress callback skips failed papers ([#20](https://github.com/hherb/BioMedicalNews/issues/20)) | **Done.** Both call sites now report every finished paper — see below. |
+| bmlib pin → 0.6.0 | **Done — on this machine, which turned out to be the only place a pin exists.** The local lock moved to 0.6.0 (`ec6683a9`) on 2026-08-01, suite green, no code change. `uv.lock` is gitignored, so there was no repo-level pin to move and CI has been resolving bmlib *main* all along — [issue #25](https://github.com/hherb/BioMedicalNews/issues/25) tracks whether that should change. |
+| Digest templates don't escape metadata | **Fixed, PR open.** `digest_email.html` escapes every interpolation and carries the notify templates' explanatory comment ([PR #23](https://github.com/hherb/BioMedicalNews/pull/23), closes [#17](https://github.com/hherb/BioMedicalNews/issues/17)). `digest_text.txt` deliberately stays raw: it is a text/plain MIME part, matching `notify_email.txt`/`notify_matrix.txt` — the issue's premise that all four notify templates escape was wrong, only the HTML ones do. A test pins each half. |
+| Reading pane shows literal `None` for a missing date | **Fixed, PR open.** Both `reading_pane.html` *and* `paper_card.html` (identical defect, found while fixing) now guard the date with `{% if %}`, as the `journal` line beside it already did ([PR #24](https://github.com/hherb/BioMedicalNews/pull/24), closes [#18](https://github.com/hherb/BioMedicalNews/issues/18)). The issue's option 2, deliberately: `_row_to_paper()` keeps leaving a date-semantic NULL as `None` for Python readers. |
+| `uv.lock` untracked ↔ CI tests bmlib main | **Open, needs a decision.** Track the lock (`uv sync --locked` in CI), pin in `pyproject.toml`, or keep CI-as-canary and live with per-machine pins — [issue #25](https://github.com/hherb/BioMedicalNews/issues/25). Looks like a deliberate tandem-development choice, so it was lodged rather than changed. |
 
 ## Environment gotcha
 
@@ -27,16 +26,22 @@ the whole suite fails at import. The fix is to move the pin:
 uv lock --upgrade-package bmlib
 ```
 
-That is what unblocked the suite this session: the lock sat at bmlib 0.2.1
-(`e227ec14`) while `db/operations.py` had already started importing
-`bmlib.db.is_sqlite`, which only exists from 0.5.x.
+**The pin is per-machine, not the repo's.** `.gitignore` ignores `uv.lock`
+(line 141), and CI installs with `uv pip install -e`, resolving
+`bmlib @ git+…` at whatever bmlib main is that day — so everything above
+describes only the checkout you are sitting in, and a bmlib-main breakage
+surfaces on whichever CI run happens next, not on a pin bump. That came to
+light on 2026-08-01 while executing the tracked "bump the pin to 0.6.0"
+follow-up, which therefore turned out to be a purely local operation:
+this machine now runs 0.6.0 (`ec6683a9`), suite green, nothing to commit.
+[Issue #25](https://github.com/hherb/BioMedicalNews/issues/25) holds the
+track-the-lock / pin-in-pyproject / status-quo decision.
 
-**The pin is still 0.5.1, deliberately, as of the transparency stage.** Every
-`bmlib.transparency` symbol the stage uses — `TransparencyAnalyzer`,
-`TransparencyRisk`, `TransparencySettings` — exists in 0.5.1. The design
-avoids `TransparencyUnknownReason`, which only 0.6.0 exports, specifically so
-this feature would not force the pin to move. Bumping to 0.6.0 is still a
-reasonable follow-up (see below), but nothing about transparency requires it.
+With 0.6.0, bmlib's `TransparencyResult.to_dict()` includes
+`unknown_reason`, so it starts appearing inside `transparency.result_json`
+on newly analysed papers — stored with the rest of the blob, read by
+nothing. The transparency stage still avoids `TransparencyUnknownReason`
+itself, so it keeps working on either side of the bump.
 
 ## The notification service
 
@@ -212,10 +217,10 @@ to move a score the user has already acted on. Filtering and the tier
 downgrade are both plausible additive follow-ups, not oversights — do not
 "finish" this by wiring either one in without a fresh design conversation.
 
-**The bmlib pin (0.5.1) is untouched, deliberately.** The design avoids
-`TransparencyUnknownReason`, which only 0.6.0 exports, specifically so this
-feature would not force the pin. See "Environment gotcha" above and the
-open-items table for the bump as a tracked follow-up.
+**The design avoids `TransparencyUnknownReason` deliberately** — it only
+exists from bmlib 0.6.0, and the stage was shaped so the feature would
+never force the pin to move. The local pin has since moved to 0.6.0 anyway;
+see "Environment gotcha" above for what that does and does not mean.
 
 ## Failure containment (issues #19 and #20)
 
