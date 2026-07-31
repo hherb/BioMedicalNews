@@ -4,8 +4,10 @@
     <div class="paper-meta">
         <span class="authors">{{ paper.authors|join('; ') }}</span>
         <span class="sep">&middot;</span>
+        {% if paper.publication_date %}
         <span class="date">{{ paper.publication_date }}</span>
         <span class="sep">&middot;</span>
+        {% endif %}
         {% if paper.journal %}
         <span class="journal-name">{{ paper.journal }}</span>
         <span class="sep">&middot;</span>

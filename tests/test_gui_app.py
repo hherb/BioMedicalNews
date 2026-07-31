@@ -216,6 +216,42 @@ def test_reading_pane_omits_transparency_when_unanalysed(app):
     assert "Research integrity" not in body
 
 
+def test_reading_pane_hides_a_missing_publication_date(app):
+    """Issue #18: ``publication_date`` carries date semantics, so
+    ``_row_to_paper`` leaves a NULL as ``None`` rather than stamping it to
+    ``""`` the way ``_NULLABLE_TEXT_COLUMNS`` does — the template has to
+    guard the date line itself, or Jinja prints the literal string "None"."""
+    conn = app.config["BMNEWS_DB"]
+    paper_id = store_paper(
+        conn, doi="10.1/nodate", title="Undated paper", abstract="Abstract", source="medrxiv"
+    )
+
+    body = app.test_client().get(f"/papers/{paper_id}").get_data(as_text=True)
+
+    assert "Undated paper" in body
+    assert "None" not in body
+
+
+def test_paper_card_hides_a_missing_publication_date(app):
+    conn = app.config["BMNEWS_DB"]
+    paper_id = store_paper(
+        conn, doi="10.1/nodate", title="Undated paper", abstract="Abstract", source="medrxiv"
+    )
+    save_score(
+        conn,
+        paper_id=paper_id,
+        relevance_score=0.9,
+        combined_score=0.9,
+        study_design="rct",
+        quality_tier="TIER_4_EXPERIMENTAL",
+    )
+
+    body = app.test_client().get("/papers").get_data(as_text=True)
+
+    assert "Undated paper" in body
+    assert "None" not in body
+
+
 class TestSettingsRoute:
     def test_settings_page(self, client):
         resp = client.get("/settings")

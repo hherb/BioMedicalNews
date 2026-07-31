@@ -11,10 +11,14 @@ Package root. Defines `__version__`.
 CLI entry point using Click. Defines the `main` group and all subcommands.
 
 **Key patterns:**
-- `@click.group()` on `main()` with global options (`--config`, `--verbose`, `--version`)
+- `@click.group(cls=_CleanFailureGroup)` on `main()` with global options (`--config`, `--verbose`, `--version`)
 - Config is loaded in `main()` and stored in `ctx.obj["config"]` for subcommands
 - Lazy imports: each command imports pipeline functions inside the function body, keeping startup fast
 - Each command is thin — it calls pipeline functions and reports results
+- **Logging is configured before `load_config()` runs**, at WARNING (DEBUG under `-v`), and only takes `log_level` from the config afterwards. `load_config()` raises on a malformed TOML and `_CleanFailureGroup` catches that too, so configuring logging after it left the root logger at WARNING for exactly the failure whose message says to re-run with `-v` — the traceback reached no handler. WARNING rather than INFO for the bootstrap, because `load_config()` logs which file it took at INFO and a config asking for WARNING should not see it
+- `_CleanFailureGroup.invoke()` converts an exception no command handled into a `ClickException`: the user sees `Error: <command> failed: <type>: <message>` and exit code 1, and the traceback is logged with `exc_info` at DEBUG so `bmnews -v` still prints it. It lives on the group, not on each command, so a command added later cannot forget it
+- `ClickException`, `click.exceptions.Exit` and `click.Abort` pass through untouched, and they share no base class: `ClickException` derives straight from `Exception`, `Exit` and `Abort` from `RuntimeError`. A bare `except Exception` catches all three — and so does narrowing the passthrough to `except RuntimeError`, which looks like a simplification and drops `ClickException`, flattening `UsageError`'s exit code 2 into 1 and dropping the exit code `notify` sets when every delivery failed. `SystemExit` and `KeyboardInterrupt` need no clause, being `BaseException` subclasses
+- Commands set a deliberate exit code with `ctx.exit()`, never `sys.exit()` — one route, so the passthrough above has one thing to protect
 
 **Commands:**
 - `run(days, show_cached)` — full pipeline or cached display
@@ -125,7 +129,7 @@ LLM-based relevance scoring and quality assessment.
 
 Orchestrates scoring for a batch of papers.
 
-- `score_papers(papers, llm, model, template_engine, interests, concurrency, quality_enabled, quality_tier, temperature, max_tokens, progress_callback)` — main entry point
+- `score_papers(papers, llm, model, template_engine, interests, concurrency, quality_enabled, quality_tier, temperature, max_tokens, progress_callback)` — main entry point. `progress_callback(current, total, result)` fires once per paper on the calling thread, **including** the papers that failed to score — that is what makes `current` reach `total`, and a failure on the last one used to strand a status bar at `n-1/n` for good. `result` is `None` for those, which is why `pipeline._score_progress` checks `isinstance(result, dict)` before storing anything
 - `_score_single(...)` — scores one paper: relevance via `RelevanceAgent.score()`, quality via `bmlib.quality.QualityManager`, then `RELEVANCE_WEIGHT * relevance + QUALITY_WEIGHT * quality`
 - `_build_quality_filter(max_tier)` — clamps the assessment depth (1 = metadata only, 2 = LLM classifier, 3 = deep analysis)
 - `_extract_pub_types(paper)` — reads `publications.publication_types`, which is what feeds Tier-1 classification
@@ -145,9 +149,9 @@ The research-integrity stage: select, analyse, store. Query-based like `notify/s
 - `run_transparency(config, *, refresh, paper_id, limit, dry_run, on_progress) → TransparencyReport` — the whole stage. Returns immediately with an empty report when `[transparency] enabled = false`
 - `build_settings(config) → TransparencySettings` — maps bmnews's four config fields onto bmlib's settings object; forces `enabled=True` regardless of config (the caller already checked) because a settings object claiming disabled would make bmlib hand back an UNKNOWN placeholder that then blocks the paper from ever being tried again
 - `_build_analyzer(config) → TransparencyAnalyzer` — reuses the PubMed API key from `sources.source_options.pubmed` rather than duplicating it into `[transparency]`
-- `_analyze_all(conn, analyzer, candidates, …)` — runs the pool. **One analyzer instance is shared across every worker** (bmlib's rate limit is per-instance), and **all storage happens on the calling thread** (a SQLite connection is not thread-safe) — the same shape `score_papers()` uses for its progress callback
+- `_analyze_all(conn, analyzer, candidates, …)` — runs the pool. **One analyzer instance is shared across every worker** (bmlib's rate limit is per-instance), and **all storage happens on the calling thread** (a SQLite connection is not thread-safe) — the same shape `score_papers()` uses for its progress callback. Neither the analysis nor the write can take the run down: both are caught per paper and counted in `failed`, because a storage error escaping this loop discarded a report describing rows already committed, and only after the pool's exit had waited out every analysis still in flight (several external requests each). `on_progress` fires once per finished paper whatever the outcome, so its count reaches `total`. Only the **first** storage failure of a run keeps its traceback — every paper shares one connection, so a dropped one fails all of them for one reason and a batch of tracebacks buries it; the rest log at WARNING and are still counted. A raising *analysis* keeps its traceback every time, those being independent interactions with five APIs
 - `list_results(config, *, limit) → list[dict]` — read path for `bmnews transparency --list`
-- `TransparencyReport` — dataclass: `candidates`, `analyzed`, `indeterminate` (subset of `analyzed`), `exhausted` (subset of `indeterminate`, now at the attempt ceiling), `failed` (raised, so no row was written — stays queued)
+- `TransparencyReport` — dataclass: `candidates`, `analyzed`, `indeterminate` (subset of `analyzed`), `exhausted` (subset of `indeterminate`, now at the attempt ceiling), `failed` (the analysis raised, or it succeeded and the write raised — either way no row was written, so the paper stays queued)
 
 **Informs only.** Nothing here filters a query or re-ranks a paper; bmlib's `tier_downgrade_applied` is stored in `result_json` and never read back into a score.
 

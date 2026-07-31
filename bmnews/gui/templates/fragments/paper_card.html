@@ -8,7 +8,9 @@
         {% for source in paper.sources %}
         <span class="source-badge source-{{ source }}">{{ source }}</span>
         {% endfor %}
+        {% if paper.publication_date %}
         <span class="date">{{ paper.publication_date }}</span>
+        {% endif %}
     </div>
     <div class="card-score">
         {% if paper.combined_score is not none %}

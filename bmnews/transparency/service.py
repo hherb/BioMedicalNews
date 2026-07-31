@@ -58,7 +58,10 @@ class TransparencyReport:
         analyzed: Results stored, determinate or not.
         indeterminate: Subset of ``analyzed`` that came back UNKNOWN.
         exhausted: Subset of ``indeterminate`` now at the attempt ceiling.
-        failed: Analyses that raised. No row was written, so they retry.
+        failed: Papers this run could not record — the analysis raised, or it
+            succeeded and the write did. Either way no row was written, so
+            they retry; the two are one count because the caller's response to
+            both is the same.
     """
 
     candidates: int = 0
@@ -212,8 +215,20 @@ def _analyze_all(
     SQLite connection is not safe to touch from another thread. This mirrors
     ``score_papers``, whose progress callback carries the same guarantee.
 
-    A paper whose analysis raises is logged and skipped, leaving no row — so it
-    returns to the queue next run, exactly as an unscoreable paper does.
+    A paper this run cannot record is logged and counted in ``failed``, leaving
+    no row — so it returns to the queue next run, exactly as an unscoreable
+    paper does. That covers the write as well as the analysis: a storage error
+    escaping this loop would discard a report describing rows that are already
+    committed, and would do it only after the pool's exit had waited out every
+    analysis still in flight.
+
+    ``on_progress`` fires once per finished paper whatever the outcome, so the
+    count it reports reaches ``total``.
+
+    Only the *first* storage failure of a run is logged with its traceback:
+    every paper shares one connection, so a dropped one fails all of them
+    identically and a batch of tracebacks would bury the cause rather than
+    show it. The rest are logged at WARNING and counted.
 
     Args:
         conn: DB-API connection, used only from this thread.
@@ -230,6 +245,7 @@ def _analyze_all(
     """
     total = len(candidates)
     analyzed = indeterminate = exhausted = failed = done = 0
+    storage_failures = 0
 
     with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
         futures = {
@@ -252,28 +268,61 @@ def _analyze_all(
                     paper["id"],
                 )
                 failed += 1
-                continue
+            else:
+                risk = result.risk_level.value
+                # Derived rather than read back: this is exactly what
+                # save_transparency is about to write, and a second query per
+                # paper to learn it would be pure overhead.
+                attempts = 1 if refresh else (paper.get("attempts") or 0) + 1
 
-            risk = result.risk_level.value
-            # Derived rather than read back: this is exactly what
-            # save_transparency is about to write, and a second query per
-            # paper to learn it would be pure overhead.
-            attempts = 1 if refresh else (paper.get("attempts") or 0) + 1
+                try:
+                    save_transparency(
+                        conn,
+                        paper_id=paper["id"],
+                        transparency_score=result.transparency_score,
+                        risk_level=risk,
+                        result_json=json.dumps(result.to_dict()),
+                        reset_attempts=refresh,
+                    )
+                except Exception:
+                    # Counted with the analyses that raised, for the same
+                    # reason: no row was written, so the paper stays queued.
+                    # Letting a lock timeout or a dropped connection escape
+                    # here discarded the report for everything already stored
+                    # — after the pool had waited out every analysis still
+                    # running, several external requests each, to produce it.
+                    failed += 1
+                    storage_failures += 1
+                    # Traceback for the first only. Every paper shares this one
+                    # connection, so a dropped one fails all of them the same
+                    # way: one traceback names the cause, a batch of them
+                    # buries it in the log a user is asked to attach to a bug
+                    # report. A raising *analysis* keeps its own traceback
+                    # every time — those are independent interactions with
+                    # five APIs and need not share a cause.
+                    if storage_failures == 1:
+                        logger.exception(
+                            "Storing the transparency result for paper %s failed — it stays "
+                            "queued. Further storage failures this run are logged without "
+                            "their traceback.",
+                            paper["id"],
+                        )
+                    else:
+                        logger.warning(
+                            "Storing the transparency result for paper %s failed too — it "
+                            "stays queued",
+                            paper["id"],
+                        )
+                else:
+                    analyzed += 1
+                    if risk == _UNKNOWN:
+                        indeterminate += 1
+                        if attempts >= TRANSPARENCY_MAX_ATTEMPTS:
+                            exhausted += 1
 
-            save_transparency(
-                conn,
-                paper_id=paper["id"],
-                transparency_score=result.transparency_score,
-                risk_level=risk,
-                result_json=json.dumps(result.to_dict()),
-                reset_attempts=refresh,
-            )
-            analyzed += 1
-            if risk == _UNKNOWN:
-                indeterminate += 1
-                if attempts >= TRANSPARENCY_MAX_ATTEMPTS:
-                    exhausted += 1
-
+            # Reported for a failure too. The bar only ever moves forward, so
+            # skipping the update here left a run whose last completion failed
+            # reporting n-1/n with nothing coming to correct it.
             if on_progress:
                 on_progress(f"Analysing transparency {done}/{total}...")
 

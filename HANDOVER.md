@@ -222,6 +222,61 @@ exists from bmlib 0.6.0, and the stage was shaped so the feature would
 never force the pin to move. The local pin has since moved to 0.6.0 anyway;
 see "Environment gotcha" above for what that does and does not mean.
 
+## Failure containment (issues #19 and #20)
+
+Three fixes, all about a failure costing more than itself. Nothing here is a
+feature; the invariants are worth keeping straight because each undoes a bug
+that looked like working code.
+
+**A failed paper still reports progress.** `score_papers`'s `except` branch
+`continue`d past `progress_callback`, and `_analyze_all()` — which had copied
+the shape — did the same. The bar only ever moves forward, so a failure on the
+*last* completion left the GUI reporting `n-1/n` with nothing coming to correct
+it. Both now report every finished paper. The scorer passes `result=None` for a
+failure, which is safe only because `pipeline._score_progress` already tests
+`isinstance(result, dict)` before storing anything — **keep that guard**, it is
+what stops an unscoreable paper reaching `scores`.
+
+**A storage failure costs only its own paper.** `save_transparency()` runs on
+the calling thread inside the `as_completed()` loop, so a lock timeout or a
+dropped connection escaped `run_transparency()` and discarded the whole run's
+`TransparencyReport` — describing rows that were already committed — and did it
+only *after* `ThreadPoolExecutor.__exit__` had waited out every analysis still
+in flight, several external requests each. It is now caught per paper and
+counted in `failed` alongside a raising analysis, which is honest: neither
+wrote a row, so both stay queued. Nothing bails out mid-batch any more, so
+`cancel_futures` has nothing left to cancel — that is why it is absent. Only
+the *first* storage failure of a run keeps its traceback; every paper shares
+one connection, so a dropped one fails all of them for the same reason and a
+batch of tracebacks hides the cause rather than showing it. The rest log at
+WARNING, and all of them are still counted.
+
+**The CLI reports a failure rather than a traceback**, via
+`_CleanFailureGroup` on the `main` group rather than a decorator per command,
+so a command added later cannot forget it. The user gets
+`Error: <command> failed: <type>: <message>`, exit code 1, and a pointer to
+`bmnews -v`; the traceback is logged with `exc_info` at DEBUG, so it is demoted
+rather than lost.
+
+**The three exceptions it re-raises are the whole trap**, and they do *not*
+share a base class: `ClickException` derives straight from `Exception`, while
+`click.exceptions.Exit` and `click.Abort` derive from `RuntimeError`. A bare
+`except Exception` catches all three — but so would narrowing the passthrough
+to `except RuntimeError`, which is the tempting-looking simplification and
+drops `ClickException`. Losing it flattens a `UsageError`'s exit code 2 into 1
+(reporting a typo as a crash); losing `Exit` drops the exit code `notify` sets
+when every delivery failed, which is the only signal a cron job has.
+
+**Logging is configured before the config is read**, and the order is
+load-bearing rather than incidental. `load_config()` raises on a malformed
+TOML and `_CleanFailureGroup` catches that too — so configuring logging after
+it left the root logger at WARNING for exactly the failure whose own message
+says to re-run with `-v`, and the DEBUG traceback reached no handler. It
+bootstraps at WARNING (DEBUG under `-v`) and only takes `log_level` from the
+config once that has loaded: bootstrapping at INFO instead would print
+`load_config`'s own "Loading config from …" line to someone whose config asked
+for WARNING.
+
 ## The developer docs
 
 `docs/dev/` had drifted a long way behind the `publications` migration — it
