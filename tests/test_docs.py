@@ -80,6 +80,30 @@ def path_bases() -> list[Path]:
     return bases
 
 
+_MIGRATION_HEADER = re.compile(r"^\|\s*#\s*\|\s*Name\s*\|")
+_MIGRATION_ROW = re.compile(r"^\|\s*(\d+)\s*\|\s*`([^`]+)`\s*\|")
+
+
+def documented_migrations(text: str) -> set[tuple[int, str]] | None:
+    """Parse (version, name) pairs from database.md's migration table.
+
+    Anchored on the ``| # | Name |`` header; rows are read until the first
+    line that is not a migration row. Returns None when no such table exists,
+    so the caller fails loudly rather than passing vacuously.
+    """
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if _MIGRATION_HEADER.match(line):
+            pairs = set()
+            for row in lines[index + 2 :]:  # skip the |---|---| separator line
+                match = _MIGRATION_ROW.match(row)
+                if not match:
+                    break
+                pairs.add((int(match.group(1)), match.group(2)))
+            return pairs
+    return None
+
+
 class TestIterInlineCode:
     def test_yields_tokens_with_line_numbers(self):
         text = "first `a/b.py` and `c/d.py`\nsecond `e.py`\n"
@@ -120,6 +144,30 @@ class TestPathBases:
         assert REPO_ROOT / "bmnews" / "notify" in bases
 
 
+MIGRATION_DOC = """\
+## Migrations
+
+| # | Name | What it does |
+|---|------|--------------|
+| 1 | `initial_schema` | The original tables |
+| 2 | `add_paper_tags` | `paper_tags` |
+
+Prose after the table must not be parsed as rows.
+"""
+
+
+class TestDocumentedMigrations:
+    def test_parses_version_name_pairs_and_stops_at_table_end(self):
+        assert documented_migrations(MIGRATION_DOC) == {
+            (1, "initial_schema"),
+            (2, "add_paper_tags"),
+        }
+
+    def test_returns_none_without_the_header(self):
+        other_table = "| Column | Type |\n|---|---|\n| `id` | INTEGER |\n"
+        assert documented_migrations(other_table) is None
+
+
 class TestDocsMatchCode:
     """The three live checks: docs/dev against the real tree."""
 
@@ -139,4 +187,20 @@ class TestDocsMatchCode:
         assert not failures, (
             "docs/dev references paths that do not exist — fix the doc, or add a "
             "worked example to KNOWN_FICTIONAL_PATHS:\n" + "\n".join(failures)
+        )
+
+    def test_migration_table_matches_migrations(self):
+        text = (DOCS_DEV / "database.md").read_text(encoding="utf-8")
+        documented = documented_migrations(text)
+        assert documented is not None, (
+            "migration table (header `| # | Name |`) not found in database.md — "
+            "renaming the header is itself drift"
+        )
+        actual = {(m.version, m.name) for m in MIGRATIONS}
+        missing_from_doc = actual - documented
+        gone_from_code = documented - actual
+        assert documented == actual, (
+            f"database.md's migration table is out of step with MIGRATIONS — "
+            f"in code but not documented: {sorted(missing_from_doc)}; "
+            f"documented but not in code: {sorted(gone_from_code)}"
         )
