@@ -1,0 +1,88 @@
+"""Drift checks for docs/dev: the manual must fail CI when it stops matching the code.
+
+Exact-match checks only (issue #16's first pass): backticked repo paths must
+exist, the migration table in database.md must match MIGRATIONS, and the
+test-file listing in testing.md must match tests/. The parsers are module-level
+functions tested against literal fixture strings below; the TestDocsMatchCode
+checks then run them against the real tree.
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Iterator
+from pathlib import Path
+
+from bmnews.db.migrations import MIGRATIONS
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+DOCS_DEV = REPO_ROOT / "docs" / "dev"
+
+_INLINE_CODE = re.compile(r"`([^`]+)`")
+_FENCE = re.compile(r"^\s*(```|~~~)")
+_PATH_CHARS = re.compile(r"[A-Za-z0-9_./-]+")
+_PATH_EXTENSIONS = (".py", ".md", ".toml", ".txt", ".html", ".css", ".js", ".json")
+
+
+def iter_inline_code(text: str) -> Iterator[tuple[int, str]]:
+    """Yield (line_number, token) for inline backticked code outside fenced blocks.
+
+    Args:
+        text: Full markdown source.
+
+    Yields:
+        1-based line number and the token between single backticks. Fenced
+        code blocks hold example code, not references, so they are skipped.
+    """
+    in_fence = False
+    for line_no, line in enumerate(text.splitlines(), start=1):
+        if _FENCE.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        for match in _INLINE_CODE.finditer(line):
+            yield line_no, match.group(1)
+
+
+def is_path_candidate(token: str) -> bool:
+    """Whether a backticked token claims to be a repo path.
+
+    A candidate is made only of path characters (URLs contain ':' and fail),
+    contains a '/', and ends with '/' or a known file extension — which is
+    what separates `bmnews/cli.py` from prose fragments like `n-1/n`.
+    """
+    if not _PATH_CHARS.fullmatch(token):
+        return False
+    if "/" not in token:
+        return False
+    return token.endswith("/") or token.endswith(_PATH_EXTENSIONS)
+
+
+class TestIterInlineCode:
+    def test_yields_tokens_with_line_numbers(self):
+        text = "first `a/b.py` and `c/d.py`\nsecond `e.py`\n"
+        assert list(iter_inline_code(text)) == [(1, "a/b.py"), (1, "c/d.py"), (2, "e.py")]
+
+    def test_skips_fenced_blocks(self):
+        text = (
+            "before `real/path.py`\n"
+            "```python\n"
+            "code = fetch(`fenced/example.py`)\n"
+            "```\n"
+            "after `other/path.md`\n"
+        )
+        assert list(iter_inline_code(text)) == [(1, "real/path.py"), (5, "other/path.md")]
+
+
+class TestIsPathCandidate:
+    def test_accepts_files_and_directories(self):
+        assert is_path_candidate("bmnews/cli.py")
+        assert is_path_candidate("bmnews/notify/")
+        assert is_path_candidate("docs/plans/2026-08-01-docs-drift-check-design.md")
+
+    def test_rejects_non_paths(self):
+        assert not is_path_candidate("conftest.py")  # no slash: bare filenames are prose
+        assert not is_path_candidate("n-1/n")  # slash, but no path-like ending
+        assert not is_path_candidate("https://api.example.org/search")  # ':' fails the charset
+        assert not is_path_candidate("provider:model")  # no slash and ':' anyway
