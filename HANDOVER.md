@@ -10,32 +10,36 @@
 | `docs/dev/` drift | **Done.** All six files rewritten against the current code ([issue #11](https://github.com/hherb/BioMedicalNews/issues/11)). |
 | `bmlib.transparency` | **Done.** Wired up as a fifth pipeline stage, informs only — see below. |
 | `docs/dev/` drift detection | **Done, merged.** `tests/test_docs.py` fails the ordinary suite (and so CI) when the docs drift — see "The docs drift backstop" below ([PR #27](https://github.com/hherb/BioMedicalNews/pull/27), closed [#16](https://github.com/hherb/BioMedicalNews/issues/16)), plus a follow-up PR closing the review's six findings. |
-| bmlib pin → 0.6.0 | **Done — on this machine, which turned out to be the only place a pin exists.** The local lock moved to 0.6.0 (`ec6683a9`) on 2026-08-01, suite green, no code change. `uv.lock` is gitignored, so there was no repo-level pin to move and CI has been resolving bmlib *main* all along — [issue #25](https://github.com/hherb/BioMedicalNews/issues/25) tracks whether that should change. |
+| bmlib version pin | **Done.** `pyproject.toml` pins `bmlib @ git+…@v0.6.0` — now the repository's only pin, and the first one CI has ever had. Closes [issue #25](https://github.com/hherb/BioMedicalNews/issues/25); see "Environment gotcha" below. |
 | Digest templates don't escape metadata | **Done, merged.** `digest_email.html` escapes every interpolation and carries the notify templates' explanatory comment ([PR #23](https://github.com/hherb/BioMedicalNews/pull/23), closed [#17](https://github.com/hherb/BioMedicalNews/issues/17)). `digest_text.txt` deliberately stays raw: it is a text/plain MIME part, matching `notify_email.txt`/`notify_matrix.txt` — the issue's premise that all four notify templates escape was wrong, only the HTML ones do. A test pins each half. |
 | Reading pane shows literal `None` for a missing date | **Done, merged.** Both `reading_pane.html` *and* `paper_card.html` (identical defect, found while fixing) now guard the date with `{% if %}`, as the `journal` line beside it already did ([PR #24](https://github.com/hherb/BioMedicalNews/pull/24), closed [#18](https://github.com/hherb/BioMedicalNews/issues/18)). The issue's option 2, deliberately: `_row_to_paper()` keeps leaving a date-semantic NULL as `None` for Python readers. |
-| `uv.lock` untracked ↔ CI tests bmlib main | **Decided 2026-08-01, not yet implemented.** The user chose: pin bmlib in `pyproject.toml` (`bmlib @ git+…@vX.Y.Z`) — coarser than a tracked lock, no lock churn, and bumping bmlib becomes an explicit one-line PR. Recorded on [issue #25](https://github.com/hherb/BioMedicalNews/issues/25); implementing it (pyproject edit + checking what CI needs) is a small next-session task. |
 
 ## Environment gotcha
 
-`uv.lock` pins bmlib **by commit**, and `uv run` re-syncs to that pin — so
-installing a newer bmlib by hand is silently undone on the next `uv run`.
-When bmnews starts using a bmlib symbol that does not exist yet in the pin,
-the whole suite fails at import. The fix is to move the pin:
+bmlib is pinned **by tag** in `pyproject.toml` (`@v0.6.0`), and `uv run`
+re-syncs to whatever `uv.lock` resolved that tag to — so installing a newer
+bmlib by hand is silently undone on the next `uv run`. When bmnews starts
+using a bmlib symbol the tag predates, the whole suite fails at import. Move
+the pin rather than installing around it:
 
 ```bash
+# edit pyproject.toml: @v0.6.0 -> @v0.7.0
 uv lock --upgrade-package bmlib
 ```
 
-**The pin is per-machine, not the repo's.** `.gitignore` ignores `uv.lock`
-(line 141), and CI installs with `uv pip install -e`, resolving
-`bmlib @ git+…` at whatever bmlib main is that day — so everything above
-describes only the checkout you are sitting in, and a bmlib-main breakage
-surfaces on whichever CI run happens next, not on a pin bump. That came to
-light on 2026-08-01 while executing the tracked "bump the pin to 0.6.0"
-follow-up, which therefore turned out to be a purely local operation:
-this machine now runs 0.6.0 (`ec6683a9`), suite green, nothing to commit.
-[Issue #25](https://github.com/hherb/BioMedicalNews/issues/25) holds the
-track-the-lock / pin-in-pyproject / status-quo decision.
+Until 2026-08-01 there was **no repo-level pin at all**: `.gitignore` ignores
+`uv.lock` (line 141) and CI installs with `uv pip install -e`, so
+`bmlib @ git+…` resolved to whatever bmlib main was that day — per machine and
+per CI run. The tag is what every checkout now shares. One property to keep in
+mind, since it is where a tag is weaker than a tracked lock: a git tag is
+mutable, so a re-pointed `v0.6.0` would be picked up silently. CI's weekly
+cron is the backstop for that, and for the rest of the tree — httpx, click,
+jinja2, bmlib's own dependencies and the dev tools are all still unpinned and
+resolved fresh on every run.
+
+Pinning moved this machine from bmlib main's `ec6683a9` back to the v0.6.0 tag
+commit `a1ba661c` (the nine commits between them are transparency refactors
+internal to bmlib). Suite green on both backends without them.
 
 With 0.6.0, bmlib's `TransparencyResult.to_dict()` includes
 `unknown_reason`, so it starts appearing inside `transparency.result_json`

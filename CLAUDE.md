@@ -151,7 +151,9 @@ gui/ → app.py (Flask factory) → routes/ (papers, settings, pipeline blueprin
 
 ### bmlib Integration
 
-bmlib is a companion library providing shared infrastructure. Key modules used:
+bmlib is a companion library providing shared infrastructure. It is pinned to a released tag in `pyproject.toml` (`bmlib @ git+…@v0.6.0`), which is the repository's only pin — `uv.lock` is gitignored, so an unpinned git dependency would resolve per machine and per CI run. Bumping bmlib means editing that line and re-running `uv lock --upgrade-package bmlib`, as its own reviewable change.
+
+Key modules used:
 
 | bmlib module | bmnews usage |
 |---|---|

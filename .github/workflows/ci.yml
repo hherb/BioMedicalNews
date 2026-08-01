@@ -4,11 +4,15 @@ on:
   push:
     branches: [main]
   pull_request:
-  # bmlib is depended on as ``bmlib @ git+https://github.com/hherb/bmlib.git``
-  # with no pinned rev, so it tracks that repo's main branch. CI here is
-  # therefore not hermetic: a push to bmlib can break bmnews with no change to
-  # bmnews at all. This scheduled run surfaces that within a week instead of at
-  # the start of the next unrelated pull request.
+  # bmlib is pinned to a released tag in pyproject.toml, so a push to bmlib no
+  # longer reaches CI on its own. Everything else still does: the jobs below
+  # install with `uv pip install -e` and no lock file (uv.lock is gitignored),
+  # so httpx, click, jinja2, bmlib's own dependencies and the dev tools are all
+  # resolved fresh on every run. A release of any of them can break bmnews with
+  # no change to bmnews at all, and this scheduled run surfaces that within a
+  # week instead of at the start of the next unrelated pull request. It also
+  # covers the one way bmlib can still move under the pin: a git tag is
+  # mutable, so a re-pointed v0.6.0 would be picked up silently.
   schedule:
     - cron: "17 6 * * 1"
   workflow_dispatch:
