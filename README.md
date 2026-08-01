@@ -18,7 +18,8 @@ Built on [bmlib](https://github.com/hherb/bmlib) — a shared library for LLM ab
 ## Quick start
 
 ```bash
-# Install
+# Install (the venv is not optional: uv pip install refuses without one)
+uv venv && source .venv/bin/activate    # Windows: .venv\Scripts\activate
 uv pip install -e ".[dev]"
 
 # Initialise database and config

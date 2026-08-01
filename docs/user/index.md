@@ -34,7 +34,9 @@ BioMedical News (`bmnews`) is a command-line tool that fetches biomedical prepri
 ## Quick taste
 
 ```bash
-uv venv && source .venv/bin/activate
+git clone https://github.com/hherb/BioMedicalNews.git
+cd BioMedicalNews
+uv venv && source .venv/bin/activate    # Windows: .venv\Scripts\activate
 uv pip install -e ".[ollama]"
 bmnews init
 # Edit ~/.bmnews/config.toml — set your research interests

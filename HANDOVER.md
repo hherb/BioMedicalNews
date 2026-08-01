@@ -162,10 +162,20 @@ backticked paths in `docs/dev/*.md` must exist (resolved against the repo
 root, `bmnews/`, or any direct subpackage of `bmnews/`, computed from the
 tree — that is what lets shorthand like `db/operations.py` and `channels/`
 resolve); `database.md`'s migration table must match `MIGRATIONS` by
-`(version, name)` in both directions; and both test-file listings —
+`(version, name)` in both directions; both test-file listings —
 `testing.md`'s fenced `tests/` block and `CLAUDE.md`'s table plus its
 `# Test suite (N test modules)` count — must match `tests/*.py`, likewise in
-both directions.
+both directions; and the `bmnews, version X` sample output in
+`docs/user/installation.md` must match `bmnews.__version__`, which is what
+`click`'s `version_option` prints.
+
+That last check is the only one reaching outside `docs/dev/`, added because
+the string had already drifted — it claimed 0.1.0 against a package at 0.3.0
+— and a release bumps `__version__` with no reason to think of a doc. The
+*path* scan deliberately stays on `docs/dev/`: `docs/user/*.md` yields zero
+path candidates today, and `index.md` exists in both directories while
+failure lines carry only `doc.name`, so widening it means fixing the message
+format first ([issue #30](https://github.com/hherb/BioMedicalNews/issues/30)).
 
 **Nothing here is allowed to pass vacuously**, and that is the property to
 preserve if you touch the module. A missing table header, listing block or
@@ -357,7 +367,10 @@ it was not a search-and-replace: `uv pip install` **refuses to install without
 an active virtual environment**, where `pip` would simply have gone ahead, so
 every install path in those files grew a `uv venv` + activate step (or the
 `uv run` alternative) that the pip version did not need. Keep that step if you
-rewrite them.
+rewrite them — including in `README.md`, which review caught still carrying a
+bare `uv pip install -e ".[dev]"`: it had been converted to uv earlier without
+the venv step, so the repo's own front page held the one command the `docs/user/`
+rewrite existed to stop handing people.
 
 ## Reference: how the `publications` migration was resolved
 

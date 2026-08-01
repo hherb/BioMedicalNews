@@ -2,10 +2,14 @@
 
 ## Prerequisites
 
-- **[uv](https://docs.astral.sh/uv/)** — the package installer this project uses:
+- **[uv](https://docs.astral.sh/uv/)** — the package installer this project uses.
+  Install it whichever way you prefer to trust — `brew install uv`, `pipx install uv`,
+  your distribution's package, or Astral's own script:
   ```bash
   curl -LsSf https://astral.sh/uv/install.sh | sh
   ```
+  See [Astral's installation page](https://docs.astral.sh/uv/getting-started/installation/)
+  for the full list.
 - **Python 3.11 or later** — check with `python3 --version`. You do not have to
   install one yourself: `uv venv --python 3.11` fetches a suitable Python if
   your system has none.

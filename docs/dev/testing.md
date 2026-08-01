@@ -38,7 +38,7 @@ tests/
   test_config.py      # Config loading, TOML parsing, backward-compat defaults
   test_db.py          # Every DB operation and migration — both backends
   test_digest.py      # HTML/text digest rendering
-  test_docs.py        # Docs drift: paths exist, migration + both test listings match
+  test_docs.py        # Docs drift: paths exist, migration + test listings + version match
   test_fetchers.py    # Europe PMC fetcher + its registration in bmlib's registry
   test_fulltext_integration.py  # Fulltext service (Europe PMC/Unpaywall/DOI)
   test_gui_app.py     # Flask blueprints, HTMX responses, URL-scheme allowlist
