@@ -11,7 +11,7 @@ bmlib is installed as a Git dependency:
 ```toml
 # pyproject.toml
 dependencies = [
-    "bmlib @ git+https://github.com/hherb/bmlib.git",
+    "bmlib @ git+https://github.com/hherb/bmlib.git@v0.6.0",
 ]
 ```
 
@@ -26,7 +26,15 @@ transparency = ["bmlib[transparency]"]
 gui = ["pywebview>=5.0", "flask>=3.0"]
 ```
 
-> **`uv.lock` pins bmlib by commit, and `uv run` re-syncs to that pin** — so installing a newer bmlib by hand is silently undone on the next `uv run`. When bmnews starts using a bmlib symbol the pin predates, the whole suite fails at import. Move the pin with `uv lock --upgrade-package bmlib`.
+**The version is pinned to a released tag, and that is the only pin the repository has.** `uv.lock` is gitignored, so an unpinned git dependency would be resolved afresh per machine and on every CI run — no two checkouts necessarily on the same bmlib, and a push to bmlib able to break bmnews with no change here. Bumping bmlib is therefore an edit to `pyproject.toml`, reviewable as its own one-line pull request:
+
+```bash
+# 1. edit pyproject.toml: @v0.6.0 -> @v0.7.0
+uv lock --upgrade-package bmlib   # 2. re-resolve the local lock to the new tag
+uv run pytest tests/ -q           # 3. the suite is what says the bump is safe
+```
+
+> **`uv run` re-syncs bmlib to whatever `uv.lock` resolved the tag to** — so installing a newer bmlib by hand is silently undone on the next `uv run`. When bmnews starts using a bmlib symbol the pinned tag predates, the whole suite fails at import; the fix is to move the pin above, not to install around it.
 
 ## bmlib modules used by bmnews
 
@@ -303,6 +311,6 @@ cd bmlib && uv pip install -e ".[dev]"
 cd ../BioMedicalNews && uv pip install -e ".[dev]"
 ```
 
-Changes to bmlib are then reflected in bmnews without reinstalling — but note the lock-file caveat above: `uv run` re-syncs bmlib to the commit `uv.lock` pins, undoing an editable install. Use `uv lock --upgrade-package bmlib` when the pin needs to move.
+Changes to bmlib are then reflected in bmnews without reinstalling — but note the caveat above: `uv run` re-syncs bmlib to the commit `uv.lock` resolved the pinned tag to, undoing an editable install. Work through `uv pip install -e` alone while developing both, and move the pin in `pyproject.toml` once the bmlib change is released.
 
 Always use `uv` to install or upgrade packages in this project; do not call `pip` directly.

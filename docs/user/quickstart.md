@@ -6,7 +6,8 @@ Get your first digest in 5 minutes.
 
 ```bash
 cd BioMedicalNews
-pip install -e ".[ollama]"
+uv venv && source .venv/bin/activate    # Windows: .venv\Scripts\activate
+uv pip install -e ".[ollama]"
 bmnews init
 ```
 

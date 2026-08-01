@@ -2729,7 +2729,11 @@ Full suite and both lint checks pass.
 
 ## Follow-ups
 
-- Bump bmlib to 0.6.0 and `uv lock --upgrade-package bmlib`. No code change.
+- **Done (2026-08-01):** bump bmlib to 0.6.0. No code change, as expected. The
+  bump also turned up that `uv.lock` is gitignored, so the pin it moved was
+  per-machine and CI had been resolving bmlib main all along —
+  [issue #25](https://github.com/hherb/BioMedicalNews/issues/25), closed by
+  pinning the tag in `pyproject.toml`.
 - Issue filed for the pre-existing lack of escaping in the digest templates,
   found while adding the badge but unrelated to it.
 - **Done (2026-08-01, branch `fix/progress-and-error-containment`):** issues

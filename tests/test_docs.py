@@ -2,10 +2,16 @@
 
 Exact-match checks only (issue #16's first pass): backticked repo paths in
 ``docs/dev/`` must exist, the migration table in database.md must match
-MIGRATIONS, and both test-file listings — testing.md's and CLAUDE.md's — must
-match ``tests/``. The parsers *and* the path scan are module-level functions
-tested against literal fixtures below; the TestDocsMatchCode checks then run
-them against the real tree.
+MIGRATIONS, both test-file listings — testing.md's and CLAUDE.md's — must
+match ``tests/``, and the version installation.md tells a user to expect must
+match the one the CLI prints. The parsers *and* the path scan are module-level
+functions tested against literal fixtures below; the TestDocsMatchCode checks
+then run them against the real tree.
+
+The version check is the only one reaching into ``docs/user/``; the path scan
+stays on ``docs/dev/`` (issue #30). It exists because that string had already
+drifted once — it claimed 0.1.0 against a package at 0.3.0 — and a release
+bumps ``__version__`` with no reason to think of a doc.
 
 Every parser returns None rather than an empty result when its anchor is
 missing, and the scan reports an unclosed fence: a check that cannot find what
@@ -19,10 +25,12 @@ from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from bmnews import __version__
 from bmnews.db.migrations import MIGRATIONS
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DOCS_DEV = REPO_ROOT / "docs" / "dev"
+DOCS_USER = REPO_ROOT / "docs" / "user"
 CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
 
 _INLINE_CODE = re.compile(r"`([^`]+)`")
@@ -172,6 +180,7 @@ _MIGRATION_HEADER = re.compile(r"^\|\s*#\s*\|\s*Name\s*\|")
 _MIGRATION_ROW = re.compile(r"^\|\s*(\d+)\s*\|\s*`([^`]+)`\s*\|")
 _TEST_TABLE_HEADER = re.compile(r"^\|\s*File\s*\|")
 _TEST_COUNT = re.compile(r"# Test suite \((\d+) test modules\)")
+_VERSION_CLAIM = re.compile(r"`bmnews, version ([^`]+)`")
 
 
 def documented_migrations(text: str) -> set[tuple[int, str]] | None:
@@ -249,6 +258,18 @@ def documented_test_count(text: str) -> int | None:
     """
     match = _TEST_COUNT.search(text)
     return int(match.group(1)) if match else None
+
+
+def documented_version(text: str) -> str | None:
+    """Read the version installation.md tells a user ``bmnews --version`` prints.
+
+    Matches the backticked ``bmnews, version X`` sample output — click's
+    ``version_option`` format, fed from ``bmnews.__version__``. Returns None
+    when no such string is present, so deleting or rewording the sample fails
+    rather than silently retiring the check.
+    """
+    match = _VERSION_CLAIM.search(text)
+    return match.group(1) if match else None
 
 
 class TestIterInlineCode:
@@ -425,6 +446,16 @@ class TestDocumentedTestCount:
         assert documented_test_count("tests/    # The test suite\n") is None
 
 
+class TestDocumentedVersion:
+    def test_reads_the_claimed_version(self):
+        text = "You should see `bmnews, version 1.2.3` (or the current version).\n"
+        assert documented_version(text) == "1.2.3"
+
+    def test_returns_none_without_the_sample_output(self):
+        # Prose alone must not satisfy the check: there is nothing to compare.
+        assert documented_version("Check the version with `bmnews --version`.\n") is None
+
+
 class TestDocsMatchCode:
     """The live checks: the docs against the real tree."""
 
@@ -488,4 +519,16 @@ class TestDocsMatchCode:
         actual = len([name for name in actual_test_files() if name.startswith("test_")])
         assert documented == actual, (
             f"CLAUDE.md says {documented} test modules; tests/ holds {actual}"
+        )
+
+    def test_installation_version_matches_package(self):
+        text = (DOCS_USER / "installation.md").read_text(encoding="utf-8")
+        documented = documented_version(text)
+        assert documented is not None, (
+            "`bmnews, version X` sample output not found in installation.md — "
+            "removing it is itself drift"
+        )
+        assert documented == __version__, (
+            f"installation.md says `bmnews, version {documented}`; the CLI prints "
+            f"{__version__} — bump the doc with the package"
         )

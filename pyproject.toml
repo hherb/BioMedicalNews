@@ -23,10 +23,15 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Medical Science Apps.",
 ]
 dependencies = [
-    # Needs bmlib with backend-aware bmlib.publications (hherb/bmlib#28): the
+    # Pinned to a released tag, not tracking main. `uv.lock` is gitignored, so
+    # an unpinned git dependency is resolved afresh per machine and on every CI
+    # run — a push to bmlib could break bmnews with no change here, and no two
+    # checkouts were necessarily on the same bmlib. The tag makes a bmlib bump
+    # an explicit one-line change in this file (issue #25). v0.6.0 carries the
+    # backend-aware bmlib.publications bmnews needs (hherb/bmlib#28): the
     # publications schema, Publication.pmcid, and transaction() nesting on
-    # PostgreSQL. Tracks main, so that PR must land first.
-    "bmlib @ git+https://github.com/hherb/bmlib.git",
+    # PostgreSQL.
+    "bmlib @ git+https://github.com/hherb/bmlib.git@v0.6.0",
     "httpx>=0.25",
     "click>=8.0",
     "jinja2>=3.1",
