@@ -176,14 +176,19 @@ the string had already drifted — it claimed 0.1.0 against a package at 0.3.0
 **Failure lines are repo-relative** (`docs/dev/database.md:152:`) rather than
 bare names, because `index.md` exists in *both* docs directories and
 `CLAUDE.md` is a third scannable file — a bare name does not say which file to
-fix. `doc_label()` does that, falling back to the bare name outside the repo,
-which is what the fixtures scan and what has no relative form to report.
+fix. `doc_label()` does that, falling back to the *absolute* path outside the
+repo — which is what the fixtures scan and what has no relative form to report.
+Absolute rather than bare, because two `seeded.md` fixtures in different
+temporary directories would collide precisely the way the two `index.md` files
+do.
 
 The *path* scan itself deliberately stays on `docs/dev/`, and
 [issue #30](https://github.com/hherb/BioMedicalNews/issues/30)'s other half —
 widening the glob to `docs/user/` — is closed as won't-fix. `docs/user/*.md`
 yields **zero** path candidates (measured: its `~/.bmnews/…` references fail
-the charset on `~` before `SKIPPED_PREFIXES` is consulted, and the rest are
+the charset on `~` before `SKIPPED_PREFIXES` is consulted — which also means
+the `"~"` entry in that list can never fire, and is now commented as the belt
+to the charset's braces rather than as what does the work — and the rest are
 CLI commands), so scanning it would check nothing — and folding a
 permanently-empty tree in would weaken `assert scan.checked`, the module's
 no-vacuous-pass guard, since `docs/dev/` alone keeps that aggregate non-zero

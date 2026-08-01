@@ -185,11 +185,16 @@ Scope argument above still holds against it.
 `unresolved_paths()` reported `f"{doc.name}:{line_no}"`, which cannot say which
 file to fix: `index.md` exists in **both** `docs/dev/` and `docs/user/`, and
 `CLAUDE.md` is a third scannable file. Failure lines now carry the path
-relative to the repo root, via `doc_label()`, falling back to the bare name for
-a file outside the repo — which is what the fixtures scan, and what has no
-repo-relative form to report. The unclosed-fence line uses the same label, and
-is pinned separately (patching a stand-in repo root, since a fixture file
-otherwise has no relative form) so a partial revert cannot pass.
+relative to the repo root, via `doc_label()`, falling back to the **absolute**
+path for a file outside the repo — which is what the fixtures scan, and what
+has no repo-relative form to report. Absolute rather than bare: two `seeded.md`
+fixtures under different temporary directories would collide exactly the way
+the two `index.md` files this function exists to separate do, and a fallback
+whose shape is chosen for short test assertions is the tail wagging the dog.
+The unclosed-fence line uses the same label, and is pinned separately (patching
+a stand-in repo root, since a fixture file otherwise has no relative form) so a
+partial revert cannot pass; the path-failure line is pinned against the *real*
+`REPO_ROOT`, which the stand-in cannot cover.
 
 **The glob was deliberately not widened, and issue #30 closes as won't-fix on
 that half.** Two reasons, the second being the one that matters:
@@ -197,7 +202,12 @@ that half.** Two reasons, the second being the one that matters:
 1. `docs/user/*.md` yields **zero** path candidates — measured, not assumed.
    Its `~/.bmnews/config.toml` references fail the charset on `~` before
    `SKIPPED_PREFIXES` is even consulted, and the rest are CLI commands. So
-   scanning it would check nothing today.
+   scanning it would check nothing today. (That measurement has a corollary
+   worth writing down: the `"~"` entry in `SKIPPED_PREFIXES` can never fire,
+   since no token containing `~` survives `_PATH_CHARS` to reach it. It stays,
+   commented as such — it is the belt to that charset's braces should
+   `_PATH_CHARS` ever widen — but it is not what keeps home paths unchecked,
+   and `CLAUDE.md` no longer says it is.)
 2. Folding a permanently-empty tree into the scan **weakens the
    `assert scan.checked` guard**, which is the module's central no-vacuous-pass
    property. The guard is an aggregate: `docs/dev/` alone keeps it non-zero, so

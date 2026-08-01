@@ -112,6 +112,11 @@ KNOWN_FICTIONAL_PATHS = frozenset({"bmnews/fetchers/newsource.py"})
 # files would otherwise be checked against whatever bmlib version this machine
 # resolved), user-home runtime files, and GUI routes like `/watches/` — leading
 # slash, so "does it exist" is the wrong question and "fix the doc" the wrong advice.
+# The "~" entry never actually fires: `is_path_candidate` rejects a token holding
+# a "~" on the _PATH_CHARS charset before this list is consulted. It is kept as
+# the belt to that charset's braces — widen _PATH_CHARS and home paths would
+# otherwise start being checked against the repo — and named here because that is
+# where a reader looks for why `~/.bmnews/config.toml` goes unchecked.
 SKIPPED_PREFIXES = ("bmlib/", "~", "/")
 
 
@@ -141,14 +146,18 @@ def doc_label(doc: Path) -> str:
         doc: A markdown file the scan found a problem in.
 
     Returns:
-        The path relative to the repo root, ``/``-separated, or the bare name
-        for a file outside the repo — which is what the fixtures below scan,
-        and what has no repo-relative form to report.
+        The path relative to the repo root, ``/``-separated. A file outside the
+        repo — which is what the fixtures below scan, and what has no
+        repo-relative form to report — falls back to its absolute path, not its
+        bare name: two fixtures named ``seeded.md`` under different temporary
+        directories would otherwise be as indistinguishable as the two
+        ``index.md`` files this function exists to tell apart.
     """
+    resolved = doc.resolve()
     try:
-        return doc.resolve().relative_to(REPO_ROOT).as_posix()
+        return resolved.relative_to(REPO_ROOT).as_posix()
     except ValueError:
-        return doc.name
+        return resolved.as_posix()
 
 
 @dataclass(frozen=True)
@@ -361,9 +370,14 @@ class TestDocLabel:
         assert doc_label(DOCS_DEV / "index.md") == "docs/dev/index.md"
         assert doc_label(DOCS_USER / "index.md") == "docs/user/index.md"
 
-    def test_falls_back_to_the_bare_name_outside_the_repo(self, tmp_path):
-        # tmp_path has no repo-relative form; a failure line still has to read.
-        assert doc_label(tmp_path / "seeded.md") == "seeded.md"
+    def test_falls_back_to_the_absolute_path_outside_the_repo(self, tmp_path):
+        # tmp_path has no repo-relative form; a failure line still has to name
+        # one file. Absolute rather than bare, so two fixtures called seeded.md
+        # do not collide the way the two index.md files above would.
+        label = doc_label(tmp_path / "seeded.md")
+        assert label != "seeded.md", "a bare name cannot tell two fixtures apart either"
+        assert Path(label).is_absolute() and label.endswith("/seeded.md")
+        assert tmp_path.name in label
 
 
 class TestUnresolvedPaths:
@@ -374,9 +388,18 @@ class TestUnresolvedPaths:
         doc.write_text(body, encoding="utf-8")
         return doc
 
+    def _label(self, doc: Path) -> str:
+        """What a fixture file outside the repo is named in a failure line.
+
+        The exact form is pinned by TestDocLabel; spelling it out again in
+        every assertion below would bury which *line and token* they are about.
+        """
+        return doc.resolve().as_posix()
+
     def test_failure_lines_name_the_file_relative_to_the_repo(self):
-        # A real repo file, with no bases at all so every candidate fails —
-        # which is what makes the label observable without seeding drift.
+        # The real REPO_ROOT, which is the half a stand-in root cannot pin (see
+        # the fence test below): a real repo file, with no bases at all so every
+        # candidate fails, making the label observable without seeding drift.
         scan = unresolved_paths([DOCS_DEV / "database.md"], [])
         assert scan.checked, "database.md yielded no path candidates to label"
         assert all(line.startswith("docs/dev/database.md:") for line in scan.failures), (
@@ -386,7 +409,7 @@ class TestUnresolvedPaths:
     def test_reports_only_the_missing_path_with_file_and_line(self, tmp_path):
         doc = self._doc(tmp_path, "real `bmnews/cli.py`\nmade up `bmnews/nope.py`\n")
         scan = unresolved_paths([doc], [REPO_ROOT])
-        assert scan.failures == ["seeded.md:2: `bmnews/nope.py`"]
+        assert scan.failures == [f"{self._label(doc)}:2: `bmnews/nope.py`"]
         assert scan.checked == 2
 
     def test_passes_clean_docs(self, tmp_path):
@@ -405,19 +428,20 @@ class TestUnresolvedPaths:
         doc = self._doc(tmp_path, "create `bmnews/fetchers/newsource.py`\n")
         assert unresolved_paths([doc], [REPO_ROOT]).failures == []
         assert unresolved_paths([doc], [REPO_ROOT], allowlist=frozenset()).failures == [
-            "seeded.md:1: `bmnews/fetchers/newsource.py`"
+            f"{self._label(doc)}:1: `bmnews/fetchers/newsource.py`"
         ]
 
     def test_unclosed_fence_is_a_failure(self, tmp_path):
         doc = self._doc(tmp_path, "`bmnews/cli.py`\n```\nstuff\n\n`bmnews/nope.py`\n")
         scan = unresolved_paths([doc], [REPO_ROOT])
         assert scan.failures == [
-            "seeded.md: unclosed code fence — every path below it goes unchecked"
+            f"{self._label(doc)}: unclosed code fence — every path below it goes unchecked"
         ]
 
     def test_unclosed_fence_line_carries_the_repo_relative_label(self, tmp_path, monkeypatch):
-        # The fence failure names its file the same way a path failure does;
-        # a stand-in repo root is what gives a fixture file a relative form.
+        # The fence failure names its file the same way a path failure does.
+        # A stand-in repo root, because that is the only way a fixture file has
+        # a relative form at all; the path test above covers the real root.
         monkeypatch.setattr(f"{__name__}.REPO_ROOT", tmp_path.resolve())
         nested = tmp_path / "docs" / "dev"
         nested.mkdir(parents=True)
