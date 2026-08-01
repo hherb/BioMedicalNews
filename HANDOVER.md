@@ -9,7 +9,7 @@
 | Notification service | **Done.** CLI, pipeline stage, and the GUI watches pane — see below. |
 | `docs/dev/` drift | **Done.** All six files rewritten against the current code ([issue #11](https://github.com/hherb/BioMedicalNews/issues/11)). |
 | `bmlib.transparency` | **Done.** Wired up as a fifth pipeline stage, informs only — see below. |
-| `docs/dev/` drift detection | **Done, PR open.** `tests/test_docs.py` fails the ordinary suite (and so CI) when docs/dev drifts — see "The docs drift backstop" below ([PR #27](https://github.com/hherb/BioMedicalNews/pull/27), closes [#16](https://github.com/hherb/BioMedicalNews/issues/16)). |
+| `docs/dev/` drift detection | **Done, merged.** `tests/test_docs.py` fails the ordinary suite (and so CI) when the docs drift — see "The docs drift backstop" below ([PR #27](https://github.com/hherb/BioMedicalNews/pull/27), closed [#16](https://github.com/hherb/BioMedicalNews/issues/16)), plus a follow-up PR closing the review's six findings. |
 | bmlib pin → 0.6.0 | **Done — on this machine, which turned out to be the only place a pin exists.** The local lock moved to 0.6.0 (`ec6683a9`) on 2026-08-01, suite green, no code change. `uv.lock` is gitignored, so there was no repo-level pin to move and CI has been resolving bmlib *main* all along — [issue #25](https://github.com/hherb/BioMedicalNews/issues/25) tracks whether that should change. |
 | Digest templates don't escape metadata | **Done, merged.** `digest_email.html` escapes every interpolation and carries the notify templates' explanatory comment ([PR #23](https://github.com/hherb/BioMedicalNews/pull/23), closed [#17](https://github.com/hherb/BioMedicalNews/issues/17)). `digest_text.txt` deliberately stays raw: it is a text/plain MIME part, matching `notify_email.txt`/`notify_matrix.txt` — the issue's premise that all four notify templates escape was wrong, only the HTML ones do. A test pins each half. |
 | Reading pane shows literal `None` for a missing date | **Done, merged.** Both `reading_pane.html` *and* `paper_card.html` (identical defect, found while fixing) now guard the date with `{% if %}`, as the `journal` line beside it already did ([PR #24](https://github.com/hherb/BioMedicalNews/pull/24), closed [#18](https://github.com/hherb/BioMedicalNews/issues/18)). The issue's option 2, deliberately: `_row_to_paper()` keeps leaving a date-semantic NULL as `None` for Python readers. |
@@ -153,21 +153,36 @@ escape their own interpolations, because bmlib's `TemplateEngine` runs with
 
 Design: `docs/plans/2026-08-01-docs-drift-check-design.md`. Plan:
 `docs/plans/2026-08-01-docs-drift-check-plan.md`. `tests/test_docs.py` runs in
-the ordinary suite, so CI gets it for free. Three exact-match checks: inline
+the ordinary suite, so CI gets it for free. Exact-match checks only: inline
 backticked paths in `docs/dev/*.md` must exist (resolved against the repo
 root, `bmnews/`, or any direct subpackage of `bmnews/`, computed from the
 tree — that is what lets shorthand like `db/operations.py` and `channels/`
 resolve); `database.md`'s migration table must match `MIGRATIONS` by
-`(version, name)` in both directions; `testing.md`'s fenced `tests/` listing
-must match `tests/*.py` in both directions. A missing table header or listing
-block *fails* rather than passing vacuously.
+`(version, name)` in both directions; and both test-file listings —
+`testing.md`'s fenced `tests/` block and `CLAUDE.md`'s table plus its
+`# Test suite (N test modules)` count — must match `tests/*.py`, likewise in
+both directions.
+
+**Nothing here is allowed to pass vacuously**, and that is the property to
+preserve if you touch the module. A missing table header, listing block or
+count comment fails; an unclosed fence in a scanned file fails (it would
+otherwise hide every path below it); a path scan that resolved *no* candidate
+at all fails. The path scan lives in `unresolved_paths()` rather than in the
+test body precisely so its skip rules and allowlist are themselves pinned by
+tests — inline, a broadened skip could have retired the check in silence.
 
 Two knobs to know about. `KNOWN_FICTIONAL_PATHS` in `tests/test_docs.py` is
 the allowlist for worked examples the docs tell a reader to create
 (`bmnews/fetchers/newsource.py`) — a new worked example either names real
-files or goes in there with a comment. And adding a migration or a test file
-now requires touching `database.md` / `testing.md` respectively; that is the
-point, not an inconvenience. The symbol-resolution check from issue #16
+files or goes in there with a comment. `SKIPPED_PREFIXES` beside it holds the
+three things that look like repo paths and are not: `bmlib/` (another repo),
+`~` (user-home runtime files) and a leading `/` (GUI routes such as
+`/watches/`). And adding a migration or a test file now requires touching
+`database.md` / `testing.md` **and `CLAUDE.md`'s table** respectively; that is
+the point, not an inconvenience — `CLAUDE.md` was the file whose count had
+already gone stale (14 against a suite of 17), which is why the review pulled
+it into scope even though the original design had left it out. Its backticked
+*paths* are still unchecked, deliberately. The symbol-resolution check from issue #16
 (backticked `function()` names resolving to `def`s) was deliberately deferred
 as needing heuristics — file a fresh, narrower issue if it turns out to be
 wanted; do not bolt it onto the exact-match module without one.
