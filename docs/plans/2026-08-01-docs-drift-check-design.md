@@ -179,3 +179,47 @@ Six findings from the review of the merged PR, all addressed in the follow-up:
 Deliberately **not** changed: check 1 still does not run over `CLAUDE.md`'s
 backticked paths — that is the widening that needs a wider allowlist, and the
 Scope argument above still holds against it.
+
+## Revision 2026-08-02: unambiguous failure lines (issue #30)
+
+`unresolved_paths()` reported `f"{doc.name}:{line_no}"`, which cannot say which
+file to fix: `index.md` exists in **both** `docs/dev/` and `docs/user/`, and
+`CLAUDE.md` is a third scannable file. Failure lines now carry the path
+relative to the repo root, via `doc_label()`, falling back to the **absolute**
+path for a file outside the repo — which is what the fixtures scan, and what
+has no repo-relative form to report. Absolute rather than bare: two `seeded.md`
+fixtures under different temporary directories would collide exactly the way
+the two `index.md` files this function exists to separate do, and a fallback
+whose shape is chosen for short test assertions is the tail wagging the dog.
+The unclosed-fence line uses the same label, and is pinned separately (patching
+a stand-in repo root, since a fixture file otherwise has no relative form) so a
+partial revert cannot pass; the path-failure line is pinned against the *real*
+`REPO_ROOT`, which the stand-in cannot cover.
+
+**The glob was deliberately not widened, and issue #30 closes as won't-fix on
+that half.** Two reasons, the second being the one that matters:
+
+1. `docs/user/*.md` yields **zero** path candidates — measured, not assumed.
+   Its `~/.bmnews/config.toml` references fail the charset on `~` before
+   `SKIPPED_PREFIXES` is even consulted, and the rest are CLI commands. So
+   scanning it would check nothing today. (That measurement has a corollary
+   worth writing down: the `"~"` entry in `SKIPPED_PREFIXES` can never fire,
+   since no token containing `~` survives `_PATH_CHARS` to reach it. It stays,
+   commented as such — it is the belt to that charset's braces should
+   `_PATH_CHARS` ever widen — but it is not what keeps home paths unchecked,
+   and `CLAUDE.md` no longer says it is.)
+2. Folding a permanently-empty tree into the scan **weakens the
+   `assert scan.checked` guard**, which is the module's central no-vacuous-pass
+   property. The guard is an aggregate: `docs/dev/` alone keeps it non-zero, so
+   the `docs/user/` half could stop being scanned — a bad glob, a renamed
+   directory — with nothing to notice. Future-proofing that blinds a live guard
+   is a bad trade for zero present coverage.
+
+The format fix has standalone value regardless, which is why it was worth doing
+without the widening: every scan failure now names its file unambiguously.
+
+Worth knowing if this is revisited: **`CLAUDE.md` yields 27 path candidates and
+all 27 resolve against the current bases and allowlist**. The Scope argument
+above — that widening needs a wider allowlist — is therefore not true of
+`CLAUDE.md` as it stands today, whatever else argues for leaving it out. That
+is a fresh design conversation, not a follow-on from this change.

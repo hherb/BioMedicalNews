@@ -9,7 +9,7 @@
 | Notification service | **Done.** CLI, pipeline stage, and the GUI watches pane — see below. |
 | `docs/dev/` drift | **Done.** All six files rewritten against the current code ([issue #11](https://github.com/hherb/BioMedicalNews/issues/11)). |
 | `bmlib.transparency` | **Done.** Wired up as a fifth pipeline stage, informs only — see below. |
-| `docs/dev/` drift detection | **Done, merged.** `tests/test_docs.py` fails the ordinary suite (and so CI) when the docs drift — see "The docs drift backstop" below ([PR #27](https://github.com/hherb/BioMedicalNews/pull/27), closed [#16](https://github.com/hherb/BioMedicalNews/issues/16)), plus a follow-up PR closing the review's six findings. |
+| `docs/dev/` drift detection | **Done, merged.** `tests/test_docs.py` fails the ordinary suite (and so CI) when the docs drift — see "The docs drift backstop" below ([PR #27](https://github.com/hherb/BioMedicalNews/pull/27), closed [#16](https://github.com/hherb/BioMedicalNews/issues/16)), plus a follow-up PR closing the review's six findings. Scan failures now name their file repo-relative; [#30](https://github.com/hherb/BioMedicalNews/issues/30)'s glob widening closed as won't-fix, with the measurement behind that recorded below. |
 | bmlib version pin | **Done.** `pyproject.toml` pins `bmlib @ git+…@v0.6.0` — now the repository's only pin, and the first one CI has ever had. Closes [issue #25](https://github.com/hherb/BioMedicalNews/issues/25); see "Environment gotcha" below. |
 | Digest templates don't escape metadata | **Done, merged.** `digest_email.html` escapes every interpolation and carries the notify templates' explanatory comment ([PR #23](https://github.com/hherb/BioMedicalNews/pull/23), closed [#17](https://github.com/hherb/BioMedicalNews/issues/17)). `digest_text.txt` deliberately stays raw: it is a text/plain MIME part, matching `notify_email.txt`/`notify_matrix.txt` — the issue's premise that all four notify templates escape was wrong, only the HTML ones do. A test pins each half. |
 | Reading pane shows literal `None` for a missing date | **Done, merged.** Both `reading_pane.html` *and* `paper_card.html` (identical defect, found while fixing) now guard the date with `{% if %}`, as the `journal` line beside it already did ([PR #24](https://github.com/hherb/BioMedicalNews/pull/24), closed [#18](https://github.com/hherb/BioMedicalNews/issues/18)). The issue's option 2, deliberately: `_row_to_paper()` keeps leaving a date-semantic NULL as `None` for Python readers. |
@@ -171,11 +171,35 @@ both directions; and the `bmnews, version X` sample output in
 
 That last check is the only one reaching outside `docs/dev/`, added because
 the string had already drifted — it claimed 0.1.0 against a package at 0.3.0
-— and a release bumps `__version__` with no reason to think of a doc. The
-*path* scan deliberately stays on `docs/dev/`: `docs/user/*.md` yields zero
-path candidates today, and `index.md` exists in both directories while
-failure lines carry only `doc.name`, so widening it means fixing the message
-format first ([issue #30](https://github.com/hherb/BioMedicalNews/issues/30)).
+— and a release bumps `__version__` with no reason to think of a doc.
+
+**Failure lines are repo-relative** (`docs/dev/database.md:152:`) rather than
+bare names, because `index.md` exists in *both* docs directories and
+`CLAUDE.md` is a third scannable file — a bare name does not say which file to
+fix. `doc_label()` does that, falling back to the *absolute* path outside the
+repo — which is what the fixtures scan and what has no relative form to report.
+Absolute rather than bare, because two `seeded.md` fixtures in different
+temporary directories would collide precisely the way the two `index.md` files
+do.
+
+The *path* scan itself deliberately stays on `docs/dev/`, and
+[issue #30](https://github.com/hherb/BioMedicalNews/issues/30)'s other half —
+widening the glob to `docs/user/` — is closed as won't-fix. `docs/user/*.md`
+yields **zero** path candidates (measured: its `~/.bmnews/…` references fail
+the charset on `~` before `SKIPPED_PREFIXES` is consulted — which also means
+the `"~"` entry in that list can never fire, and is now commented as the belt
+to the charset's braces rather than as what does the work — and the rest are
+CLI commands), so scanning it would check nothing — and folding a
+permanently-empty tree in would weaken `assert scan.checked`, the module's
+no-vacuous-pass guard, since `docs/dev/` alone keeps that aggregate non-zero
+while the other half quietly stopped being scanned. One measurement worth
+keeping if this is revisited: `CLAUDE.md` yields 27 candidates and **all 27
+already resolve**, so the design's "widening needs a wider allowlist" argument
+does not hold against `CLAUDE.md` as it stands. That is
+[issue #32](https://github.com/hherb/BioMedicalNews/issues/32) — open, and a
+design decision rather than a defect: the Scope argument's *other* half (this
+backstop covers the developer manual, and `CLAUDE.md` is agent instructions)
+survives the measurement even though the allowlist one does not.
 
 **Nothing here is allowed to pass vacuously**, and that is the property to
 preserve if you touch the module. A missing table header, listing block or
