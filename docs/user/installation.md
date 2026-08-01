@@ -2,19 +2,31 @@
 
 ## Prerequisites
 
-- **Python 3.11 or later** — check with `python3 --version`
-- **pip** or **uv** — Python package installer
+- **[uv](https://docs.astral.sh/uv/)** — the package installer this project uses:
+  ```bash
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  ```
+- **Python 3.11 or later** — check with `python3 --version`. You do not have to
+  install one yourself: `uv venv --python 3.11` fetches a suitable Python if
+  your system has none.
 - **An LLM provider** — either Ollama (local, free) or an Anthropic API key
 
 ## Install bmnews
 
-Clone the repository and install in editable mode:
+Clone the repository, create a virtual environment, and install in editable mode:
 
 ```bash
 git clone https://github.com/hherb/BioMedicalNews.git
 cd BioMedicalNews
-pip install -e .
+uv venv                      # creates .venv/
+source .venv/bin/activate    # Windows: .venv\Scripts\activate
+uv pip install -e .
 ```
+
+The virtual environment is not optional: unlike `pip`, `uv pip install` refuses
+to install without one rather than writing into your system Python. If you would
+rather not activate it, prefix commands with `uv run` instead — `uv run bmnews
+init` works from the project directory with no activation at all.
 
 ### Optional dependency groups
 
@@ -22,29 +34,29 @@ Install only what you need:
 
 ```bash
 # Ollama support (local LLM)
-pip install -e ".[ollama]"
+uv pip install -e ".[ollama]"
 
 # Anthropic Claude support (API)
-pip install -e ".[anthropic]"
+uv pip install -e ".[anthropic]"
 
 # PostgreSQL backend (instead of SQLite)
-pip install -e ".[postgresql]"
+uv pip install -e ".[postgresql]"
 
 # Desktop GUI (pywebview + Flask) — needed for `bmnews gui`
-pip install -e ".[gui]"
+uv pip install -e ".[gui]"
 
 # Transparency analysis (research-integrity checks via bmlib). This extra
 # resolves to httpx>=0.25, which bmnews already requires as a core
 # dependency — it installs nothing new. It exists as a marker for the
 # feature rather than a real dependency boundary; enable it in config with
 # [transparency] enabled = true, no extra install needed.
-pip install -e ".[transparency]"
+uv pip install -e ".[transparency]"
 
 # Development tools (pytest, ruff)
-pip install -e ".[dev]"
+uv pip install -e ".[dev]"
 
 # Everything
-pip install -e ".[all]"
+uv pip install -e ".[all]"
 ```
 
 ### Verify installation
@@ -53,7 +65,7 @@ pip install -e ".[all]"
 bmnews --version
 ```
 
-You should see `bmnews, version 0.1.0` (or the current version).
+You should see `bmnews, version 0.3.0` (or the current version).
 
 ## LLM setup
 

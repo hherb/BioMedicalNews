@@ -64,7 +64,7 @@ backend = "postgresql"
 pg_dsn = "postgresql://bmnews:secret@localhost:5432/bmnews"
 ```
 
-Requires the `postgresql` optional dependency: `pip install -e ".[postgresql]"`.
+Requires the `postgresql` optional dependency: `uv pip install -e ".[postgresql]"`.
 
 ## `[sources]`
 

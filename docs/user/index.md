@@ -34,7 +34,8 @@ BioMedical News (`bmnews`) is a command-line tool that fetches biomedical prepri
 ## Quick taste
 
 ```bash
-pip install -e ".[ollama]"
+uv venv && source .venv/bin/activate
+uv pip install -e ".[ollama]"
 bmnews init
 # Edit ~/.bmnews/config.toml — set your research interests
 bmnews run

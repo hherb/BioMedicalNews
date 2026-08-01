@@ -348,11 +348,16 @@ exist. All six files are now written against the code as it stands:
 - **`contributing.md`** — the fetcher guide rewritten around bmlib's registry
   convention (the old one described a dispatch path that no longer exists).
 
-Two things to know if you extend them: the docs are checked by reading, not by
-a test, so a symbol renamed in code will not fail CI here; and `docs/user/`
-still says `pip install` throughout, which is at odds with the project's
-uv-only rule but is not wrong for an end user — worth a decision rather than a
-silent edit.
+Two things to know if you extend them. `tests/test_docs.py` checks these files'
+backticked **paths** (plus the migration table and the test listings) but not
+the symbols inside them, so a function renamed in code will not fail CI here —
+see "The docs drift backstop" above. And `docs/user/` is now uv throughout,
+which closed the last inconsistency with the project's uv-only rule. Converting
+it was not a search-and-replace: `uv pip install` **refuses to install without
+an active virtual environment**, where `pip` would simply have gone ahead, so
+every install path in those files grew a `uv venv` + activate step (or the
+`uv run` alternative) that the pip version did not need. Keep that step if you
+rewrite them.
 
 ## Reference: how the `publications` migration was resolved
 
