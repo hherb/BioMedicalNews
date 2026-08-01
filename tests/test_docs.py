@@ -1,22 +1,29 @@
-"""Drift checks for docs/dev: the manual must fail CI when it stops matching the code.
+"""Drift checks for the developer docs: they must fail CI when they stop matching the code.
 
-Exact-match checks only (issue #16's first pass): backticked repo paths must
-exist, the migration table in database.md must match MIGRATIONS, and the
-test-file listing in testing.md must match tests/. The parsers are module-level
-functions tested against literal fixture strings below; the TestDocsMatchCode
-checks then run them against the real tree.
+Exact-match checks only (issue #16's first pass): backticked repo paths in
+``docs/dev/`` must exist, the migration table in database.md must match
+MIGRATIONS, and both test-file listings — testing.md's and CLAUDE.md's — must
+match ``tests/``. The parsers *and* the path scan are module-level functions
+tested against literal fixtures below; the TestDocsMatchCode checks then run
+them against the real tree.
+
+Every parser returns None rather than an empty result when its anchor is
+missing, and the scan reports an unclosed fence: a check that cannot find what
+it is meant to compare must fail loudly, never pass vacuously.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from bmnews.db.migrations import MIGRATIONS
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DOCS_DEV = REPO_ROOT / "docs" / "dev"
+CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
 
 _INLINE_CODE = re.compile(r"`([^`]+)`")
 _FENCE = re.compile(r"^\s*(```|~~~)")
@@ -45,12 +52,33 @@ def iter_inline_code(text: str) -> Iterator[tuple[int, str]]:
             yield line_no, match.group(1)
 
 
+def has_unclosed_fence(text: str) -> bool:
+    """Whether a fence is still open at end of file.
+
+    An odd number of fence lines makes :func:`iter_inline_code` swallow
+    everything below the stray one, so the file would be scanned in part and
+    still report no failures. The scan treats that as drift in its own right.
+
+    Args:
+        text: Full markdown source.
+
+    Returns:
+        True when the fence markers do not pair up.
+    """
+    return sum(1 for line in text.splitlines() if _FENCE.match(line)) % 2 == 1
+
+
 def is_path_candidate(token: str) -> bool:
     """Whether a backticked token claims to be a repo path.
 
-    A candidate is made only of path characters (URLs contain ':' and fail),
-    contains a '/', and ends with '/' or a known file extension — which is
-    what separates `bmnews/cli.py` from prose fragments like `n-1/n`.
+    Args:
+        token: The text between a pair of single backticks.
+
+    Returns:
+        True when the token is made only of path characters (URLs contain ':'
+        and fail), contains a '/', and ends with '/' or a known file
+        extension — which is what separates `bmnews/cli.py` from prose
+        fragments like `n-1/n`.
     """
     if not _PATH_CHARS.fullmatch(token):
         return False
@@ -63,6 +91,12 @@ def is_path_candidate(token: str) -> bool:
 # Anything added here needs the same justification. `newsource.py` is the
 # add-a-fetcher example in contributing.md and bmlib-integration.md.
 KNOWN_FICTIONAL_PATHS = frozenset({"bmnews/fetchers/newsource.py"})
+
+# Prefixes that look like repo paths but are not: a different repository (whose
+# files would otherwise be checked against whatever bmlib version this machine
+# resolved), user-home runtime files, and GUI routes like `/watches/` — leading
+# slash, so "does it exist" is the wrong question and "fix the doc" the wrong advice.
+SKIPPED_PREFIXES = ("bmlib/", "~", "/")
 
 
 def path_bases() -> list[Path]:
@@ -80,22 +114,81 @@ def path_bases() -> list[Path]:
     return bases
 
 
+@dataclass(frozen=True)
+class PathScan:
+    """The result of scanning docs for backticked repo paths.
+
+    Attributes:
+        failures: Human-readable ``file:line: `token``` lines, one per problem.
+        checked: How many path candidates were resolved. Zero means the
+            scanner has stopped recognising paths, which is not a pass.
+    """
+
+    failures: list[str]
+    checked: int
+
+
+def unresolved_paths(
+    docs: Iterable[Path],
+    bases: Sequence[Path],
+    allowlist: frozenset[str] = KNOWN_FICTIONAL_PATHS,
+) -> PathScan:
+    """Scan markdown files for backticked repo paths that resolve against nothing.
+
+    Note that path resolution is only as case-sensitive as the filesystem: a
+    wrong-case path passes on macOS and fails on Linux CI.
+
+    Args:
+        docs: Markdown files to scan.
+        bases: Directories a documented path may be relative to.
+        allowlist: Paths that do not exist by design.
+
+    Returns:
+        A :class:`PathScan` holding one failure line per unresolved token (and
+        one per file with an unclosed fence), plus the number of candidates
+        actually resolved.
+    """
+    failures: list[str] = []
+    checked = 0
+    for doc in sorted(docs):
+        text = doc.read_text(encoding="utf-8")
+        if has_unclosed_fence(text):
+            failures.append(f"{doc.name}: unclosed code fence — every path below it goes unchecked")
+        for line_no, token in iter_inline_code(text):
+            if not is_path_candidate(token):
+                continue
+            if token.startswith(SKIPPED_PREFIXES):
+                continue
+            if token in allowlist:
+                continue
+            checked += 1
+            if not any((base / token).exists() for base in bases):
+                failures.append(f"{doc.name}:{line_no}: `{token}`")
+    return PathScan(failures=failures, checked=checked)
+
+
+_TABLE_SEPARATOR = re.compile(r"^\|[\s\-:|]+\|\s*$")
 _MIGRATION_HEADER = re.compile(r"^\|\s*#\s*\|\s*Name\s*\|")
 _MIGRATION_ROW = re.compile(r"^\|\s*(\d+)\s*\|\s*`([^`]+)`\s*\|")
+_TEST_TABLE_HEADER = re.compile(r"^\|\s*File\s*\|")
+_TEST_COUNT = re.compile(r"# Test suite \((\d+) test modules\)")
 
 
 def documented_migrations(text: str) -> set[tuple[int, str]] | None:
     """Parse (version, name) pairs from database.md's migration table.
 
-    Anchored on the ``| # | Name |`` header; rows are read until the first
-    line that is not a migration row. Returns None when no such table exists,
-    so the caller fails loudly rather than passing vacuously.
+    Anchored on the ``| # | Name |`` header; the ``|---|`` separator is
+    skipped and rows are read until the first line that is not a migration
+    row. Returns None when no such table exists, so the caller fails loudly
+    rather than passing vacuously.
     """
     lines = text.splitlines()
     for index, line in enumerate(lines):
         if _MIGRATION_HEADER.match(line):
             pairs = set()
-            for row in lines[index + 2 :]:  # skip the |---|---| separator line
+            for row in lines[index + 1 :]:
+                if _TABLE_SEPARATOR.match(row):
+                    continue
                 match = _MIGRATION_ROW.match(row)
                 if not match:
                     break
@@ -119,6 +212,45 @@ def documented_test_files(text: str) -> set[str] | None:
     return None
 
 
+def tabulated_test_files(text: str) -> set[str] | None:
+    """Extract the *.py names from CLAUDE.md's test-file table.
+
+    Anchored on the ``| File |`` header; only each row's **first** cell is
+    read, so a filename mentioned in a coverage description cannot pass a file
+    off as documented. One cell may name several files (``backends.py`` /
+    ``conftest.py``). Returns None when no such table exists.
+    """
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if not _TEST_TABLE_HEADER.match(line):
+            continue
+        names: set[str] = set()
+        for row in lines[index + 1 :]:
+            if _TABLE_SEPARATOR.match(row):
+                continue
+            if not row.startswith("|"):
+                break
+            first_cell = row.split("|")[1]
+            names.update(t for t in _INLINE_CODE.findall(first_cell) if t.endswith(".py"))
+        return names
+    return None
+
+
+def actual_test_files() -> set[str]:
+    """The test-suite filenames both listings are checked against (``__init__.py`` aside)."""
+    return {path.name for path in (REPO_ROOT / "tests").glob("*.py")} - {"__init__.py"}
+
+
+def documented_test_count(text: str) -> int | None:
+    """Read the test-module count from CLAUDE.md's directory tree.
+
+    Returns None when the ``# Test suite (N test modules)`` comment is absent,
+    so rewording it fails rather than silently retiring the check.
+    """
+    match = _TEST_COUNT.search(text)
+    return int(match.group(1)) if match else None
+
+
 class TestIterInlineCode:
     def test_yields_tokens_with_line_numbers(self):
         text = "first `a/b.py` and `c/d.py`\nsecond `e.py`\n"
@@ -133,6 +265,15 @@ class TestIterInlineCode:
             "after `other/path.md`\n"
         )
         assert list(iter_inline_code(text)) == [(1, "real/path.py"), (5, "other/path.md")]
+
+
+class TestHasUnclosedFence:
+    def test_balanced_fences_are_fine(self):
+        assert not has_unclosed_fence("text\n```\ncode\n```\nmore `a/b.py`\n")
+
+    def test_stray_fence_is_reported(self):
+        # Without this, `c/d.py` below the stray fence is never scanned.
+        assert has_unclosed_fence("`a/b.py`\n```\nstuff\n\n`c/d.py`\n")
 
 
 class TestIsPathCandidate:
@@ -159,6 +300,47 @@ class TestPathBases:
         assert REPO_ROOT / "bmnews" / "notify" in bases
 
 
+class TestUnresolvedPaths:
+    """The scan itself, on seeded drift — not just the parsers it calls."""
+
+    def _doc(self, tmp_path: Path, body: str) -> Path:
+        doc = tmp_path / "seeded.md"
+        doc.write_text(body, encoding="utf-8")
+        return doc
+
+    def test_reports_only_the_missing_path_with_file_and_line(self, tmp_path):
+        doc = self._doc(tmp_path, "real `bmnews/cli.py`\nmade up `bmnews/nope.py`\n")
+        scan = unresolved_paths([doc], [REPO_ROOT])
+        assert scan.failures == ["seeded.md:2: `bmnews/nope.py`"]
+        assert scan.checked == 2
+
+    def test_passes_clean_docs(self, tmp_path):
+        doc = self._doc(tmp_path, "see `bmnews/cli.py` and `tests/test_docs.py`\n")
+        assert unresolved_paths([doc], [REPO_ROOT]) == PathScan(failures=[], checked=2)
+
+    def test_skips_fenced_examples(self, tmp_path):
+        doc = self._doc(tmp_path, "```\n`bmnews/nope.py`\n```\n")
+        assert unresolved_paths([doc], [REPO_ROOT]) == PathScan(failures=[], checked=0)
+
+    def test_skips_other_repos_home_paths_and_routes(self, tmp_path):
+        doc = self._doc(tmp_path, "`bmlib/db.py` `~/.bmnews/config.toml` `/watches/`\n")
+        assert unresolved_paths([doc], [REPO_ROOT]) == PathScan(failures=[], checked=0)
+
+    def test_skips_the_allowlist(self, tmp_path):
+        doc = self._doc(tmp_path, "create `bmnews/fetchers/newsource.py`\n")
+        assert unresolved_paths([doc], [REPO_ROOT]).failures == []
+        assert unresolved_paths([doc], [REPO_ROOT], allowlist=frozenset()).failures == [
+            "seeded.md:1: `bmnews/fetchers/newsource.py`"
+        ]
+
+    def test_unclosed_fence_is_a_failure(self, tmp_path):
+        doc = self._doc(tmp_path, "`bmnews/cli.py`\n```\nstuff\n\n`bmnews/nope.py`\n")
+        scan = unresolved_paths([doc], [REPO_ROOT])
+        assert scan.failures == [
+            "seeded.md: unclosed code fence — every path below it goes unchecked"
+        ]
+
+
 MIGRATION_DOC = """\
 ## Migrations
 
@@ -177,6 +359,10 @@ class TestDocumentedMigrations:
             (1, "initial_schema"),
             (2, "add_paper_tags"),
         }
+
+    def test_reads_the_first_row_without_a_separator(self):
+        text = "| # | Name |\n| 1 | `initial_schema` |\n"
+        assert documented_migrations(text) == {(1, "initial_schema")}
 
     def test_returns_none_without_the_header(self):
         other_table = "| Column | Type |\n|---|---|\n| `id` | INTEGER |\n"
@@ -207,26 +393,48 @@ class TestDocumentedTestFiles:
         assert documented_test_files(text) == {"backends.py", "test_cli.py", "test_db.py"}
 
 
+TEST_TABLE_DOC = """\
+Test files:
+| File | Coverage |
+|---|---|
+| `test_cli.py` | The CLI, which `test_db.py` says nothing about |
+| `backends.py` / `conftest.py` | Not tests: fixtures |
+
+Prose after the table must not be parsed as rows.
+"""
+
+
+class TestTabulatedTestFiles:
+    def test_reads_first_cells_only(self):
+        # `test_db.py` appears in a description, which must not document it.
+        assert tabulated_test_files(TEST_TABLE_DOC) == {
+            "test_cli.py",
+            "backends.py",
+            "conftest.py",
+        }
+
+    def test_returns_none_without_the_header(self):
+        assert tabulated_test_files("| Section | Dataclass |\n|---|---|\n| `[llm]` | x |\n") is None
+
+
+class TestDocumentedTestCount:
+    def test_reads_the_count(self):
+        assert documented_test_count("tests/    # Test suite (17 test modules)\n") == 17
+
+    def test_returns_none_when_reworded(self):
+        assert documented_test_count("tests/    # The test suite\n") is None
+
+
 class TestDocsMatchCode:
-    """The three live checks: docs/dev against the real tree."""
+    """The live checks: the docs against the real tree."""
 
     def test_backticked_paths_exist(self):
-        bases = path_bases()
-        failures = []
-        for doc in sorted(DOCS_DEV.glob("*.md")):
-            for line_no, token in iter_inline_code(doc.read_text(encoding="utf-8")):
-                if not is_path_candidate(token):
-                    continue
-                if token.startswith(("bmlib/", "~")):
-                    continue  # a different repo; a user-home runtime file
-                if token in KNOWN_FICTIONAL_PATHS:
-                    continue
-                if not any((base / token).exists() for base in bases):
-                    failures.append(f"{doc.name}:{line_no}: `{token}`")
-        assert not failures, (
+        scan = unresolved_paths(DOCS_DEV.glob("*.md"), path_bases())
+        assert not scan.failures, (
             "docs/dev references paths that do not exist — fix the doc, or add a "
-            "worked example to KNOWN_FICTIONAL_PATHS:\n" + "\n".join(failures)
+            "worked example to KNOWN_FICTIONAL_PATHS:\n" + "\n".join(scan.failures)
         )
+        assert scan.checked, "no path candidates found at all — the scanner has stopped seeing them"
 
     def test_migration_table_matches_migrations(self):
         text = (DOCS_DEV / "database.md").read_text(encoding="utf-8")
@@ -250,11 +458,34 @@ class TestDocsMatchCode:
         assert documented is not None, (
             "fenced `tests/` listing not found in testing.md — removing the block is itself drift"
         )
-        actual = {p.name for p in (REPO_ROOT / "tests").glob("*.py")} - {"__init__.py"}
-        undocumented = actual - documented
-        gone_from_tree = documented - actual
+        actual = actual_test_files()
         assert documented == actual, (
             f"testing.md's test-file listing is out of step with tests/ — "
-            f"in tests/ but not documented: {sorted(undocumented)}; "
-            f"documented but not in tests/: {sorted(gone_from_tree)}"
+            f"in tests/ but not documented: {sorted(actual - documented)}; "
+            f"documented but not in tests/: {sorted(documented - actual)}"
+        )
+
+    def test_claude_md_test_table_matches_tests_dir(self):
+        text = CLAUDE_MD.read_text(encoding="utf-8")
+        documented = tabulated_test_files(text)
+        assert documented is not None, (
+            "test-file table (header `| File |`) not found in CLAUDE.md — "
+            "renaming the header is itself drift"
+        )
+        actual = actual_test_files()
+        assert documented == actual, (
+            f"CLAUDE.md's test-file table is out of step with tests/ — "
+            f"in tests/ but not documented: {sorted(actual - documented)}; "
+            f"documented but not in tests/: {sorted(documented - actual)}"
+        )
+
+    def test_claude_md_test_count_matches_tests_dir(self):
+        documented = documented_test_count(CLAUDE_MD.read_text(encoding="utf-8"))
+        assert documented is not None, (
+            "`# Test suite (N test modules)` not found in CLAUDE.md's tree — "
+            "rewording it is itself drift"
+        )
+        actual = len([name for name in actual_test_files() if name.startswith("test_")])
+        assert documented == actual, (
+            f"CLAUDE.md says {documented} test modules; tests/ holds {actual}"
         )

@@ -21,9 +21,15 @@ allowlist, and is deferred: the PR closes #16 as the first pass the issue
 itself proposed, and the symbol check gets a fresh, narrower issue if it is
 still wanted once this backstop has run for a while.
 
-Only `docs/dev/*.md` is checked. `CLAUDE.md`, `HANDOVER.md` and `docs/user/`
-are out of scope, deliberately: the issue is about the developer manual, and
-widening the net means widening the allowlist.
+Only `docs/dev/*.md` is checked for paths. `HANDOVER.md` and `docs/user/` are
+out of scope, deliberately: the issue is about the developer manual, and
+widening the *path* net means widening the allowlist.
+
+`CLAUDE.md` is a partial exception, added in the review revision below: its
+test-file table and module count are checked against `tests/`, because that
+comparison needs no allowlist at all and the count was demonstrably the drift
+that happened (it said 14 while the suite held 17). Its backticked paths are
+still unchecked.
 
 ## Decision
 
@@ -93,7 +99,7 @@ If no table with that header exists, the check fails with "migration table
 not found in database.md" rather than passing vacuously: renaming the header
 is itself drift.
 
-### 3. The test-file listing matches `tests/`
+### 3. The test-file listings match `tests/`
 
 `docs/dev/testing.md` lists the suite in a fenced code block whose first line
 is `tests/`. The check extracts every `*.py` filename from that block and
@@ -101,24 +107,75 @@ compares the set against the actual `tests/*.py` files (excluding
 `__init__.py`), in both directions — a new test file must be documented, a
 documented file must exist. Comments after the filenames are ignored.
 
-As with the migration table, a missing block is a failure, not a pass.
+`CLAUDE.md` carries the same listing twice more — a `| File | Coverage |`
+table and a `# Test suite (N test modules)` comment in its directory tree —
+and both are compared against `tests/` the same way. The table parser reads
+only each row's **first** cell, so a filename mentioned in a coverage
+description cannot pass a file off as documented; one cell may name several
+files (`backends.py` / `conftest.py`). The count is of `test_*.py` modules,
+which is what that number has always meant; the wording was made explicit so
+the check has an unambiguous anchor.
+
+As with the migration table, a missing block, table or comment is a failure,
+not a pass.
 
 ## Testing the checker
 
-The parsers (inline-backtick extraction with fence exclusion, the two table
-parsers, the path-candidate filter) are module-level functions tested against
-literal fixture strings — including a fenced block containing backticks, the
-`n-1/n` non-path, a URL, and a `bmlib/` token. Each of the three checks is
-demonstrated to fail on seeded drift (a fictional path, a migration pair
-removed, a test file removed from the listing) via the fixture-string tests;
-the three real checks then run against the live tree and must pass.
+The parsers (inline-backtick extraction with fence exclusion, the three table
+and listing parsers, the path-candidate filter, the fence-balance check) are
+module-level functions tested against literal fixture strings — including a
+fenced block containing backticks, the `n-1/n` non-path, a URL, and a
+`bmlib/` token.
+
+The path check's own logic — the skip prefixes, `KNOWN_FICTIONAL_PATHS`, base
+resolution, failure formatting — is a module-level function too
+(`unresolved_paths`), tested against seeded drift in `tmp_path`: a missing
+path reported with file and line, a fenced example not reported, the skipped
+prefixes and the allowlist honoured (and the same doc failing with an empty
+allowlist), and an unclosed fence reported. Leaving that logic inside the test
+body would have let a broadened skip retire the check with nothing noticing.
+
+The five real checks then run against the live tree and must pass.
 
 ## Consequences
 
 - Adding a migration now requires touching `database.md`; adding a test file
-  requires touching `testing.md`. That is the point.
+  requires touching `testing.md` *and* `CLAUDE.md`'s table (and its count, for
+  a `test_*.py`). That is the point.
 - A doc author inventing a new worked-example path must either name it under
   a real directory that exists or add it to `KNOWN_FICTIONAL_PATHS` — the
   failure message says so.
 - The check never imports GUI or pipeline code, so it stays fast and cannot
   flake on external state.
+
+## Revision 2026-08-01: review of PR #27
+
+Six findings from the review of the merged PR, all addressed in the follow-up:
+
+1. **The path scan was untested.** Its skip rules, allowlist and base
+   resolution sat inline in the test body, so a broadened skip would have made
+   it pass on everything silently. Extracted to `unresolved_paths()` and
+   pinned against seeded drift — see "Testing the checker" above. This is also
+   what makes the original doc's claim that each check was demonstrated on
+   seeded drift true of check 1, which it had not been.
+2. **An unclosed fence passed vacuously.** One stray fence line and every path
+   below it went unscanned while the check still reported success —
+   contradicting the "fail loudly, never vacuously" stance the two table
+   parsers already took. `has_unclosed_fence()` now makes it a failure, and
+   the scan additionally fails if it resolved *no* candidates at all.
+3. **GUI routes were false failures.** `/watches/` satisfies the path-candidate
+   test, resolves against nothing, and would have been reported with the wrong
+   advice ("fix the doc"). It only never bit because the routes in the docs are
+   written `/papers/<id>`, whose angle brackets fail the charset by accident.
+   A leading `/` is now skipped deliberately, alongside `bmlib/` and `~`.
+4. **`CLAUDE.md` held a third, unguarded copy of the listing** — see Scope.
+5. **Case sensitivity** is the filesystem's, so a wrong-case path passes on
+   macOS and fails on Linux CI. Accepted, and now noted in the docstring so
+   the asymmetry is not a surprise.
+6. `documented_migrations()` no longer assumes the `|---|` separator sits
+   immediately below the header; it skips separator rows wherever they are.
+   The old form failed safe (a mismatch, not a false pass), so this is tidying.
+
+Deliberately **not** changed: check 1 still does not run over `CLAUDE.md`'s
+backticked paths — that is the widening that needs a wider allowlist, and the
+Scope argument above still holds against it.
