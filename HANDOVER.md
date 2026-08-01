@@ -190,8 +190,11 @@ no-vacuous-pass guard, since `docs/dev/` alone keeps that aggregate non-zero
 while the other half quietly stopped being scanned. One measurement worth
 keeping if this is revisited: `CLAUDE.md` yields 27 candidates and **all 27
 already resolve**, so the design's "widening needs a wider allowlist" argument
-does not hold against `CLAUDE.md` as it stands — a fresh design conversation,
-not a follow-on from this change.
+does not hold against `CLAUDE.md` as it stands. That is
+[issue #32](https://github.com/hherb/BioMedicalNews/issues/32) — open, and a
+design decision rather than a defect: the Scope argument's *other* half (this
+backstop covers the developer manual, and `CLAUDE.md` is agent instructions)
+survives the measurement even though the allowlist one does not.
 
 **Nothing here is allowed to pass vacuously**, and that is the property to
 preserve if you touch the module. A missing table header, listing block or
