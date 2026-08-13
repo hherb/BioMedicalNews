@@ -1,25 +1,24 @@
 """Drift checks for the developer docs: they must fail CI when they stop matching the code.
 
-Exact-match checks only (issue #16's first pass): backticked repo paths in
-``docs/dev/`` must exist, the migration table in database.md must match
-MIGRATIONS, both test-file listings — testing.md's and CLAUDE.md's — must
-match ``tests/``, and the version installation.md tells a user to expect must
-match the one the CLI prints. The parsers *and* the path scan are module-level
-functions tested against literal fixtures below; the TestDocsMatchCode checks
-then run them against the real tree.
+Exact-match checks only (issue #16's first pass): backticked repo paths in the
+developer docs and both ``CLAUDE.md`` files must exist, the migration table in
+database.md must match MIGRATIONS, both test-file listings — testing.md's and
+CLAUDE.md's — must match ``tests/``, and the version installation.md tells a
+user to expect must match the one the CLI prints. The parsers *and* the path
+scan are module-level functions tested against literal fixtures below; the
+TestDocsMatchCode checks then run them against the real tree.
 
 The version check is the only one reaching into ``docs/user/``. It exists
 because that string had already drifted once — it claimed 0.1.0 against a
 package at 0.3.0 — and a release bumps ``__version__`` with no reason to think
 of a doc.
 
-The *path* scan stays on ``docs/dev/`` deliberately (issue #30). ``docs/user/``
-yields no path candidates at all, so scanning it would check nothing today —
-and folding a permanently-empty tree in would leave the ``checked`` guard
-below satisfied by ``docs/dev/`` alone, unable to notice the other half going
-unscanned. Failure lines name their file repo-relative anyway, via
-:func:`doc_label`, so widening later (to ``docs/user/``, or to CLAUDE.md, whose
-backticked paths are still unchecked) needs no change to the format.
+The *path* scan runs over ``docs/dev/*.md``, ``CLAUDE.md`` and
+``bmnews/gui/CLAUDE.md``, each scanned as a separately guarded group — see
+:func:`path_scan_groups` for why the grouping is load-bearing rather than
+cosmetic (issue #32). ``docs/user/`` stays out (issue #30): it yields no path
+candidates at all, so scanning it would check nothing, and a permanently-empty
+group cannot satisfy the ``checked`` guard every group is held to.
 
 Every parser returns None rather than an empty result when its anchor is
 missing, and the scan reports an unclosed fence: a check that cannot find what
@@ -33,6 +32,8 @@ from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
+
 from bmnews import __version__
 from bmnews.db.migrations import MIGRATIONS
 
@@ -40,6 +41,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DOCS_DEV = REPO_ROOT / "docs" / "dev"
 DOCS_USER = REPO_ROOT / "docs" / "user"
 CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
+GUI_CLAUDE_MD = REPO_ROOT / "bmnews" / "gui" / "CLAUDE.md"
 
 _INLINE_CODE = re.compile(r"`([^`]+)`")
 _FENCE = re.compile(r"^\s*(```|~~~)")
@@ -212,6 +214,45 @@ def unresolved_paths(
             if not any((base / token).exists() for base in bases):
                 failures.append(f"{label}:{line_no}: `{token}`")
     return PathScan(failures=failures, checked=checked)
+
+
+@dataclass(frozen=True)
+class ScanGroup:
+    """A set of files the path scan covers and guards as a unit.
+
+    Attributes:
+        label: How the group is named in a failure message and a test id.
+        docs: The markdown files in it.
+    """
+
+    label: str
+    docs: tuple[Path, ...]
+
+
+def path_scan_groups() -> list[ScanGroup]:
+    """The files the backticked-path scan runs over, grouped by the guard they share.
+
+    Each group is scanned and asserted on its own, which is the whole point:
+    ``PathScan.checked`` is the module's no-vacuous-pass guard, and one
+    aggregate over every file would be held up by ``docs/dev/`` alone while a
+    ``CLAUDE.md`` quietly stopped being recognised (issue #30's trap, which
+    issue #32 would have walked straight into by widening the glob).
+
+    Grouped rather than per-file, because ``docs/dev/index.md`` holds no path
+    candidate at all — it is a table of contents — so a per-file guard would
+    fail on a clean tree. The two ``CLAUDE.md`` files are separate groups
+    rather than one, because ``bmnews/gui/CLAUDE.md`` yields a *single*
+    candidate: pooled, the root file's two dozen would satisfy the guard for
+    both and the GUI file could stop being scanned unnoticed. That single
+    candidate is also this grouping's one cost — dropping the last path
+    reference out of ``bmnews/gui/CLAUDE.md`` legitimately would fail here,
+    and the fix is to drop its group with a comment saying so, not to pool it.
+    """
+    return [
+        ScanGroup("docs/dev/*.md", tuple(sorted(DOCS_DEV.glob("*.md")))),
+        ScanGroup("CLAUDE.md", (CLAUDE_MD,)),
+        ScanGroup("bmnews/gui/CLAUDE.md", (GUI_CLAUDE_MD,)),
+    ]
 
 
 _TABLE_SEPARATOR = re.compile(r"^\|[\s\-:|]+\|\s*$")
@@ -453,6 +494,40 @@ class TestUnresolvedPaths:
         ]
 
 
+class TestPathScanGroups:
+    """The scan's coverage and its grouping, both of which a later edit could quietly undo."""
+
+    def test_covers_the_developer_docs_and_both_claude_files(self):
+        covered = {doc for group in path_scan_groups() for doc in group.docs}
+        assert set(DOCS_DEV.glob("*.md")) <= covered
+        assert CLAUDE_MD in covered
+        assert GUI_CLAUDE_MD in covered
+
+    def test_keeps_the_two_claude_files_in_separate_groups(self):
+        owner = {doc: group.label for group in path_scan_groups() for doc in group.docs}
+        assert owner[CLAUDE_MD] != owner[GUI_CLAUDE_MD], (
+            "both CLAUDE.md files sit in one group: bmnews/gui/CLAUDE.md holds a single "
+            "path candidate, so the root file's count would satisfy the `checked` guard "
+            "for both and the GUI file could stop being scanned unnoticed"
+        )
+
+    def test_no_group_is_empty(self):
+        # An empty group scans nothing and reports checked=0, which
+        # TestDocsMatchCode reads as the scanner having broken. A tree with no
+        # paths in it does not belong here — that is why docs/user/ stays out (#30).
+        assert all(group.docs for group in path_scan_groups())
+
+    def test_docs_user_would_not_qualify_as_a_group(self):
+        # The measurement issue #30 turned on, pinned rather than remembered: if
+        # docs/user/ ever grows real path references, this fails and the "it would
+        # check nothing" argument for excluding it has to be re-made or dropped.
+        scan = unresolved_paths(DOCS_USER.glob("*.md"), path_bases())
+        assert scan.checked == 0, (
+            "docs/user/ now yields path candidates — the reason it is excluded from "
+            f"path_scan_groups() no longer holds: {scan.checked} candidate(s)"
+        )
+
+
 MIGRATION_DOC = """\
 ## Migrations
 
@@ -550,13 +625,17 @@ class TestDocumentedVersion:
 class TestDocsMatchCode:
     """The live checks: the docs against the real tree."""
 
-    def test_backticked_paths_exist(self):
-        scan = unresolved_paths(DOCS_DEV.glob("*.md"), path_bases())
+    @pytest.mark.parametrize("group", path_scan_groups(), ids=lambda group: group.label)
+    def test_backticked_paths_exist(self, group: ScanGroup):
+        scan = unresolved_paths(group.docs, path_bases())
         assert not scan.failures, (
-            "docs/dev references paths that do not exist — fix the doc, or add a "
+            f"{group.label} references paths that do not exist — fix the doc, or add a "
             "worked example to KNOWN_FICTIONAL_PATHS:\n" + "\n".join(scan.failures)
         )
-        assert scan.checked, "no path candidates found at all — the scanner has stopped seeing them"
+        assert scan.checked, (
+            f"{group.label} yielded no path candidates at all — either the scanner has "
+            "stopped seeing them, or this group no longer holds a path worth guarding"
+        )
 
     def test_migration_table_matches_migrations(self):
         text = (DOCS_DEV / "database.md").read_text(encoding="utf-8")

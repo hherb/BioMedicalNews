@@ -21,15 +21,17 @@ allowlist, and is deferred: the PR closes #16 as the first pass the issue
 itself proposed, and the symbol check gets a fresh, narrower issue if it is
 still wanted once this backstop has run for a while.
 
-Only `docs/dev/*.md` is checked for paths. `HANDOVER.md` and `docs/user/` are
-out of scope, deliberately: the issue is about the developer manual, and
-widening the *path* net means widening the allowlist.
+`docs/dev/*.md`, `CLAUDE.md` and `bmnews/gui/CLAUDE.md` are checked for paths
+(the last two added in the 2026-08-13 revision below — see it for the
+measurement that retired the original "widening needs a wider allowlist"
+argument). `HANDOVER.md` and `docs/user/` stay out: `docs/user/` yields no
+path candidates at all, so it would check nothing, and `HANDOVER.md` is a
+running log of sessions rather than a reference anyone navigates by.
 
-`CLAUDE.md` is a partial exception, added in the review revision below: its
-test-file table and module count are checked against `tests/`, because that
-comparison needs no allowlist at all and the count was demonstrably the drift
-that happened (it said 14 while the suite held 17). Its backticked paths are
-still unchecked.
+`CLAUDE.md`'s test-file table and module count are checked against `tests/`
+as well, added in the review revision below, because that comparison needs no
+allowlist at all and the count was demonstrably the drift that happened (it
+said 14 while the suite held 17).
 
 ## Decision
 
@@ -48,8 +50,10 @@ off-the-shelf tool knows about the migration or test-file tables anyway).
 
 ### 1. Backticked paths exist
 
-Scan inline backticked tokens in every `docs/dev/*.md`. Fenced code blocks
-are excluded — they hold example code, not references.
+Scan inline backticked tokens in every scanned file — `docs/dev/*.md`,
+`CLAUDE.md` and `bmnews/gui/CLAUDE.md`, in three separately guarded groups
+(see the 2026-08-13 revision). Fenced code blocks are excluded — they hold
+example code, not references.
 
 A token is a **path candidate** when all of these hold:
 
@@ -176,9 +180,10 @@ Six findings from the review of the merged PR, all addressed in the follow-up:
    immediately below the header; it skips separator rows wherever they are.
    The old form failed safe (a mismatch, not a false pass), so this is tidying.
 
-Deliberately **not** changed: check 1 still does not run over `CLAUDE.md`'s
-backticked paths — that is the widening that needs a wider allowlist, and the
-Scope argument above still holds against it.
+Deliberately **not** changed at the time: check 1 did not run over
+`CLAUDE.md`'s backticked paths, on the grounds that widening needs a wider
+allowlist. **That reasoning was later measured and found false** — see the
+2026-08-13 revision, which reverses this and scans them.
 
 ## Revision 2026-08-02: unambiguous failure lines (issue #30)
 
@@ -195,6 +200,55 @@ The unclosed-fence line uses the same label, and is pinned separately (patching
 a stand-in repo root, since a fixture file otherwise has no relative form) so a
 partial revert cannot pass; the path-failure line is pinned against the *real*
 `REPO_ROOT`, which the stand-in cannot cover.
+
+## Revision 2026-08-13: the path scan covers both `CLAUDE.md` files (issue #32)
+
+Revision 1 excluded `CLAUDE.md` from the path scan for two stated reasons.
+Only one of them survived measurement.
+
+**What the measurement showed.** `CLAUDE.md` yields **28** path candidates and
+**all 28 resolve** against the existing `path_bases()` and
+`KNOWN_FICTIONAL_PATHS`. So "widening needs a wider allowlist" was not true of
+this file: enabling the scan needed no allowlist entry and no doc fix. That is
+the opposite of the `docs/user/` case in issue #30, which yields **zero**
+candidates and so would check nothing at all. The measurement is now pinned by
+`TestPathScanGroups::test_docs_user_would_not_qualify_as_a_group`, so if
+`docs/user/` ever grows real path references the exclusion has to be re-argued
+rather than silently inherited.
+
+**What decided it.** The surviving argument was scope — this backstop covers
+the developer manual, and `CLAUDE.md` is agent instructions. It was overruled
+on the evidence: 28 live references guarded by nothing, in the file an agent
+reads first (so a stale path there misdirects before any code is opened), in a
+file with a demonstrated drift history — its module count said 14 against a
+suite of 17, which is why revision 1 pulled its *listings* in while leaving
+its paths behind. `bmnews/gui/CLAUDE.md` came with it, as the same kind of
+file: one candidate, which also resolves.
+
+**The one piece of new machinery is the grouping**, and it is load-bearing.
+The scan now runs over three groups — `docs/dev/*.md`, `CLAUDE.md`,
+`bmnews/gui/CLAUDE.md` — each scanned and asserted on its own via
+`path_scan_groups()`, rather than one glob with one aggregate assertion. This
+is exactly the trap issue #30 named: `PathScan.checked` is the module's
+no-vacuous-pass guard, and pooled, `docs/dev/`'s 77 candidates would hold the
+total up while a `CLAUDE.md` quietly stopped being recognised. The two
+`CLAUDE.md` files are separate groups for the same reason at smaller scale —
+the GUI file yields a single candidate, which the root file's two dozen would
+mask completely.
+
+**Grouped rather than per-file**, because `docs/dev/index.md` holds no path
+candidate at all — it is a table of contents — so a per-file guard would fail
+on a clean tree.
+
+**The known cost**, recorded so it is recognised rather than rediscovered:
+`bmnews/gui/CLAUDE.md`'s guard rests on a single path reference, so
+legitimately removing the last one fails this check. The fix then is to drop
+that group with a comment saying why, **not** to pool it back into the root
+file's group — pooling is the failure mode this grouping exists to prevent.
+The wider cost is the editing constraint itself: every backticked path in
+either `CLAUDE.md` must now be real, in the files that change most often.
+That is the point of a backstop, and it is why `KNOWN_FICTIONAL_PATHS` exists
+for worked examples that are meant not to.
 
 **The glob was deliberately not widened, and issue #30 closes as won't-fix on
 that half.** Two reasons, the second being the one that matters:
