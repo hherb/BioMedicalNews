@@ -9,7 +9,7 @@
 | Notification service | **Done.** CLI, pipeline stage, and the GUI watches pane — see below. |
 | `docs/dev/` drift | **Done.** All six files rewritten against the current code ([issue #11](https://github.com/hherb/BioMedicalNews/issues/11)). |
 | `bmlib.transparency` | **Done.** Wired up as a fifth pipeline stage, informs only — see below. |
-| `docs/dev/` drift detection | **Done, merged.** `tests/test_docs.py` fails the ordinary suite (and so CI) when the docs drift — see "The docs drift backstop" below ([PR #27](https://github.com/hherb/BioMedicalNews/pull/27), closed [#16](https://github.com/hherb/BioMedicalNews/issues/16)), plus a follow-up PR closing the review's six findings. Scan failures now name their file repo-relative; [#30](https://github.com/hherb/BioMedicalNews/issues/30)'s glob widening closed as won't-fix, with the measurement behind that recorded below. |
+| Docs drift detection | **Done.** `tests/test_docs.py` fails the ordinary suite (and so CI) when the docs drift — see "The docs drift backstop" below ([PR #27](https://github.com/hherb/BioMedicalNews/pull/27), closed [#16](https://github.com/hherb/BioMedicalNews/issues/16)), plus a follow-up PR closing the review's six findings. Scan failures name their file repo-relative. The path scan now covers **both `CLAUDE.md` files** as well as `docs/dev/` ([#32](https://github.com/hherb/BioMedicalNews/issues/32)); the `docs/user/` half of [#30](https://github.com/hherb/BioMedicalNews/issues/30) stays closed as won't-fix, with the measurement behind that now pinned by a test. |
 | bmlib version pin | **Done.** `pyproject.toml` pins `bmlib @ git+…@v0.6.0` — now the repository's only pin, and the first one CI has ever had. Closes [issue #25](https://github.com/hherb/BioMedicalNews/issues/25); see "Environment gotcha" below. |
 | Digest templates don't escape metadata | **Done, merged.** `digest_email.html` escapes every interpolation and carries the notify templates' explanatory comment ([PR #23](https://github.com/hherb/BioMedicalNews/pull/23), closed [#17](https://github.com/hherb/BioMedicalNews/issues/17)). `digest_text.txt` deliberately stays raw: it is a text/plain MIME part, matching `notify_email.txt`/`notify_matrix.txt` — the issue's premise that all four notify templates escape was wrong, only the HTML ones do. A test pins each half. |
 | Reading pane shows literal `None` for a missing date | **Done, merged.** Both `reading_pane.html` *and* `paper_card.html` (identical defect, found while fixing) now guard the date with `{% if %}`, as the `journal` line beside it already did ([PR #24](https://github.com/hherb/BioMedicalNews/pull/24), closed [#18](https://github.com/hherb/BioMedicalNews/issues/18)). The issue's option 2, deliberately: `_row_to_paper()` keeps leaving a date-semantic NULL as `None` for Python readers. |
@@ -158,7 +158,8 @@ escape their own interpolations, because bmlib's `TemplateEngine` runs with
 Design: `docs/plans/2026-08-01-docs-drift-check-design.md`. Plan:
 `docs/plans/2026-08-01-docs-drift-check-plan.md`. `tests/test_docs.py` runs in
 the ordinary suite, so CI gets it for free. Exact-match checks only: inline
-backticked paths in `docs/dev/*.md` must exist (resolved against the repo
+backticked paths in `docs/dev/*.md`, `CLAUDE.md` and `bmnews/gui/CLAUDE.md`
+must exist (resolved against the repo
 root, `bmnews/`, or any direct subpackage of `bmnews/`, computed from the
 tree — that is what lets shorthand like `db/operations.py` and `channels/`
 resolve); `database.md`'s migration table must match `MIGRATIONS` by
@@ -169,7 +170,7 @@ both directions; and the `bmnews, version X` sample output in
 `docs/user/installation.md` must match `bmnews.__version__`, which is what
 `click`'s `version_option` prints.
 
-That last check is the only one reaching outside `docs/dev/`, added because
+That last check is the only one reaching into `docs/user/`, added because
 the string had already drifted — it claimed 0.1.0 against a package at 0.3.0
 — and a release bumps `__version__` with no reason to think of a doc.
 
@@ -182,24 +183,40 @@ Absolute rather than bare, because two `seeded.md` fixtures in different
 temporary directories would collide precisely the way the two `index.md` files
 do.
 
-The *path* scan itself deliberately stays on `docs/dev/`, and
-[issue #30](https://github.com/hherb/BioMedicalNews/issues/30)'s other half —
-widening the glob to `docs/user/` — is closed as won't-fix. `docs/user/*.md`
-yields **zero** path candidates (measured: its `~/.bmnews/…` references fail
-the charset on `~` before `SKIPPED_PREFIXES` is consulted — which also means
-the `"~"` entry in that list can never fire, and is now commented as the belt
-to the charset's braces rather than as what does the work — and the rest are
-CLI commands), so scanning it would check nothing — and folding a
-permanently-empty tree in would weaken `assert scan.checked`, the module's
-no-vacuous-pass guard, since `docs/dev/` alone keeps that aggregate non-zero
-while the other half quietly stopped being scanned. One measurement worth
-keeping if this is revisited: `CLAUDE.md` yields 27 candidates and **all 27
-already resolve**, so the design's "widening needs a wider allowlist" argument
-does not hold against `CLAUDE.md` as it stands. That is
-[issue #32](https://github.com/hherb/BioMedicalNews/issues/32) — open, and a
-design decision rather than a defect: the Scope argument's *other* half (this
-backstop covers the developer manual, and `CLAUDE.md` is agent instructions)
-survives the measurement even though the allowlist one does not.
+**The path scan runs as three separately asserted groups**, never one glob —
+`docs/dev/*.md`, `CLAUDE.md`, `bmnews/gui/CLAUDE.md`, listed in
+`path_scan_groups()`. That grouping is the load-bearing part of
+[issue #32](https://github.com/hherb/BioMedicalNews/issues/32), not the
+widening: `PathScan.checked` is the no-vacuous-pass guard, so pooled,
+`docs/dev/`'s 77 candidates would hold the total up while a `CLAUDE.md`
+quietly stopped being recognised. The two `CLAUDE.md` files are separate
+groups for that same reason at smaller scale — the GUI one yields a **single**
+candidate, which the root file's two dozen would mask entirely. Grouped rather
+than per-file because `docs/dev/index.md` legitimately holds no path at all.
+Two consequences to know: `bmnews/gui/CLAUDE.md`'s guard rests on that one
+reference, so if it is ever legitimately removed, **drop that group with a
+comment — do not pool it back**; and every backticked path in either
+`CLAUDE.md` must now be real, which is the editing constraint this buys the
+coverage with.
+
+`CLAUDE.md` was admitted on a measurement: it yields 28 candidates and all 28
+already resolved, so revision 1's stated reason for excluding it ("widening
+needs a wider allowlist") was simply false of that file. Its *other* reason —
+this backstop covers the developer manual — was overruled on the evidence: 28
+live references guarded by nothing, in the file an agent reads first, with a
+demonstrated drift history (its module count said 14 against a suite of 17).
+
+[Issue #30](https://github.com/hherb/BioMedicalNews/issues/30)'s other half —
+widening to `docs/user/` — stays closed as won't-fix, and for the opposite
+reason. `docs/user/*.md` yields **zero** path candidates (its `~/.bmnews/…`
+references fail the charset on `~` before `SKIPPED_PREFIXES` is consulted —
+which also means the `"~"` entry in that list can never fire, and is commented
+as the belt to the charset's braces rather than as what does the work — and
+the rest are CLI commands), so it would check nothing, and an empty group
+cannot satisfy the `checked` guard at all. That measurement is now **pinned by
+a test** rather than recorded here as a memory: if `docs/user/` grows real
+path references, `test_docs_user_would_not_qualify_as_a_group` fails and the
+exclusion has to be re-argued.
 
 **Nothing here is allowed to pass vacuously**, and that is the property to
 preserve if you touch the module. A missing table header, listing block or
@@ -219,8 +236,7 @@ three things that look like repo paths and are not: `bmlib/` (another repo),
 `database.md` / `testing.md` **and `CLAUDE.md`'s table** respectively; that is
 the point, not an inconvenience — `CLAUDE.md` was the file whose count had
 already gone stale (14 against a suite of 17), which is why the review pulled
-it into scope even though the original design had left it out. Its backticked
-*paths* are still unchecked, deliberately. The symbol-resolution check from issue #16
+it into scope even though the original design had left it out. The symbol-resolution check from issue #16
 (backticked `function()` names resolving to `def`s) was deliberately deferred
 as needing heuristics — file a fresh, narrower issue if it turns out to be
 wanted; do not bolt it onto the exact-match module without one.

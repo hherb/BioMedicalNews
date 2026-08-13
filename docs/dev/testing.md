@@ -247,6 +247,36 @@ class TestNewCommand:
 2. Build the app with `create_app()` and a test config
 3. If the route starts background work, it goes through `gui/jobs.py` — assert that starting one while another runs is *refused*, not raced
 
+## The docs drift checks
+
+`tests/test_docs.py` runs in the ordinary suite, so these fail locally and in
+CI like any other test. They are exact-match checks — nothing heuristic:
+
+- **Backticked repo paths must exist.** Scanned in `docs/dev/*.md`, in
+  `CLAUDE.md` and in `bmnews/gui/CLAUDE.md`. A path may be written relative to
+  the repo root, to `bmnews/`, or to any package under it, so `db/operations.py`
+  resolves. Fenced code blocks are skipped; so are `bmlib/` (another repo), `~`
+  paths and leading-slash GUI routes.
+- **`database.md`'s migration table** must match `MIGRATIONS`, both ways.
+- **Both test-file listings** — the fenced `tests/` block above and `CLAUDE.md`'s
+  table plus its module count — must match `tests/`, both ways.
+- **`docs/user/installation.md`'s `bmnews, version X`** sample must match
+  `bmnews.__version__`.
+
+So adding a migration or a test file means updating the doc in the same commit.
+That is deliberate, not an obstacle.
+
+If a path check fails, the fix is normally the doc. If the path is a worked
+example a reader is told to *create*, add it to `KNOWN_FICTIONAL_PATHS` in
+`tests/test_docs.py` with a comment saying which doc it belongs to.
+
+The scan runs as three separately asserted groups rather than one glob, and
+that matters if you extend it: each group must resolve at least one candidate,
+which is what would catch the scanner silently going blind. Pooling the groups
+would let `docs/dev/` alone satisfy that guard while another file went
+unscanned. A tree with no path references in it (as `docs/user/` has none)
+therefore cannot be added as a group at all.
+
 ## Running lint
 
 ```bash
