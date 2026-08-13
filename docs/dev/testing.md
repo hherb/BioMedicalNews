@@ -277,6 +277,18 @@ would let `docs/dev/` alone satisfy that guard while another file went
 unscanned. A tree with no path references in it (as `docs/user/` has none)
 therefore cannot be added as a group at all.
 
+The **bmlib pin** is checked the same way, and for the same reason the
+`bmnews, version` claim is: it is hand-copied into `CLAUDE.md`, `HANDOVER.md`
+and `docs/dev/bmlib-integration.md`, and one bump has to move all of them.
+Every one of those files must name the tag `pyproject.toml` pins — and must
+name *a* tag at all. That second half is not ceremony: the first version of
+this check anchored on the full `bmlib.git@…` URL, which matched neither
+`CLAUDE.md`'s elided `git+…@v0.9.1` nor `HANDOVER.md`'s bare `@v0.9.1`, so both
+files were skipped in silence and seeded drift in `CLAUDE.md` passed. A doc may
+name *extra* tags — an older one when narrating a bump, a hypothetical newer
+one in a worked example — so the assertion is "it names the pinned tag", not
+"it names nothing else".
+
 ## Running lint
 
 ```bash

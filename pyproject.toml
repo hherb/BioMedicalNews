@@ -30,10 +30,10 @@ dependencies = [
     # an explicit one-line change in this file (issue #25). v0.9.1 is a
     # four-release jump from v0.6.0; nothing bmnews calls changed signature, but
     # three changes move stored values, so the bump is not value-neutral:
-    # PubMed titles/abstracts become Markdown (0.8.0 — see
-    # `gui/helpers.py::_markdown_to_html`), transparency scores rise (0.7.0, so
-    # `bmnews transparency --refresh`), and Europe PMC now yields the ~95% of
-    # free PDFs it was discarding (0.9.1). See docs/dev/bmlib-integration.md.
+    # PubMed titles/abstracts become Markdown (0.8.0 — see `bmnews/markup.py`),
+    # transparency scores rise (0.7.0, so `bmnews transparency --refresh`), and
+    # Europe PMC now yields the ~95% of free PDFs it was discarding (0.9.1).
+    # See docs/dev/bmlib-integration.md.
     "bmlib @ git+https://github.com/hherb/bmlib.git@v0.9.1",
     "httpx>=0.25",
     "click>=8.0",

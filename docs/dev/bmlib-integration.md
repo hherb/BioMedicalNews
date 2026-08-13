@@ -53,13 +53,32 @@ The v0.6.0 → v0.9.1 jump had three, and each needed a response here:
 
 | What moved | Why it matters to bmnews | Response |
 |---|---|---|
-| **PubMed titles and abstracts became Markdown** (0.8.0) — `**LABEL:** text` sections, `*em*` / `~sub~` / `^sup^`, and prose backslash-escaped over ``\ ` * ~ ^`` | The reading pane's formatter read HTML, so the markers rendered raw: literal `**BACKGROUND:**`, `CO~2~`, `\*1`. Titles were also being *truncated* at the first inline tag before this, so stored titles predating 0.8.0 may be short | `gui/helpers.py::_markdown_to_html`; re-sync PubMed to repair truncated titles |
-| **`transparency_score` rises** (0.7.0) — structured `<DataBankList>` deposition now scores, and three trial registries PubMed emits were unrecognised | `get_transparency_candidates()` never returns a determinate result, so old rows keep their old score for ever and the corpus silently splits into two populations | `bmnews transparency --refresh`, which walks the corpus by `analyzed_at ASC NULLS FIRST` rather than redoing one batch |
-| **Europe PMC free PDFs** (0.9.1) — the allow-list recognised only `"Free"`, which is 4.3% of entries; 95.7% read `"Open access"` | The reading pane now gets extracted text and a **View PDF** button where it used to get a bare link. Outbound traffic to Europe PMC rises accordingly | None needed — stored full text simply is not comparable across the upgrade |
+| **PubMed titles and abstracts became Markdown** (0.8.0) — `**LABEL:** text` sections, `*em*` / `~sub~` / `^sup^`, and prose backslash-escaped over ``\ ` * ~ ^`` | The reading pane's formatter read HTML, so the markers rendered raw: literal `**BACKGROUND:**`, `CO~2~`, `\*1`. Titles were also being *truncated* at the first inline tag before this, so stored titles predating 0.8.0 may be short | `bmnews/markup.py` — abstracts become tags in the reading pane, titles are flattened to text in `_row_to_paper()`. **Truncated titles are not repaired** (issue #35) |
+| **`transparency_score` rises** (0.7.0) — structured `<DataBankList>` deposition now scores, and three trial registries PubMed emits were unrecognised | A paper already holding a determinate result is never re-selected by `get_transparency_candidates()`, so old rows keep their old score for ever and the corpus silently splits into two populations | `bmnews transparency --refresh`, which walks the corpus by `analyzed_at ASC NULLS FIRST` rather than redoing one batch. It is a manual step nothing prompts for — issue #37 |
+| **Europe PMC free PDFs** (0.9.1) — the allow-list recognised only `"Free"`, which is 4.3% of entries; 95.7% read `"Open access"` | The reading pane now gets extracted text and a **View PDF** button where it used to get a bare link. Outbound traffic to Europe PMC rises accordingly | Nothing in this bump — but text cached *before* it stays frozen as a bare link, with no re-fetch path (issue #38) |
 
 The general shape: **the pin is API-compatible far more often than it is
 value-compatible.** A bump whose suite passes first time is the normal case,
 not evidence that nothing changed.
+
+### Re-syncing does not repair a stored value
+
+Worth knowing before reaching for it as a remedy, because it looks like one and
+reports success. Two independent things stop it, and neither warns:
+
+1. **The days are never re-fetched.** `run_sync()` calls `bmlib.publications.sync()`
+   without `recheck_days`, which defaults to `0` — a day recorded `completed` in
+   `download_days` is skipped. `bmnews fetch` exposes only `--days`; no force or
+   recheck flag exists anywhere in the CLI.
+2. **The merge discards the incoming value even if it were re-fetched.** bmlib's
+   `_merge_publication()` never overwrites an existing non-NULL field: `title` is
+   absent from its `UPDATE` entirely, and `abstract` is written as
+   `COALESCE(abstract, ?)`.
+
+So the run prints `Sync complete: 0 added, N merged, 0 failed` — which reads as
+success — and nothing was repaired. Repairing stored prose needs a migration on
+the pattern of migration 6, which cleared stale full text *and* purged bmlib's
+disk cache rather than trusting a re-fetch. That is issue #35.
 
 ## bmlib modules used by bmnews
 

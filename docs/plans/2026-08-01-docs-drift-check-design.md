@@ -206,8 +206,11 @@ partial revert cannot pass; the path-failure line is pinned against the *real*
 Revision 1 excluded `CLAUDE.md` from the path scan for two stated reasons.
 Only one of them survived measurement.
 
-**What the measurement showed.** `CLAUDE.md` yields **28** path candidates and
-**all 28 resolve** against the existing `path_bases()` and
+**What the measurement showed** (measured at the 2026-08-13 revision; the
+counts move whenever a doc gains a backticked path, so treat them as a dated
+observation rather than a current property — nothing asserts them).
+`CLAUDE.md` yielded **28** path candidates and **all 28 resolved** against the
+existing `path_bases()` and
 `KNOWN_FICTIONAL_PATHS`. So "widening needs a wider allowlist" was not true of
 this file: enabling the scan needed no allowlist entry and no doc fix. That is
 the opposite of the `docs/user/` case in issue #30, which yields **zero**
@@ -218,7 +221,7 @@ rather than silently inherited.
 
 **What decided it.** The surviving argument was scope — this backstop covers
 the developer manual, and `CLAUDE.md` is agent instructions. It was overruled
-on the evidence: 28 live references guarded by nothing, in the file an agent
+on the evidence: two dozen live references guarded by nothing, in the file an agent
 reads first (so a stale path there misdirects before any code is opened), in a
 file with a demonstrated drift history — its module count said 14 against a
 suite of 17, which is why revision 1 pulled its *listings* in while leaving
@@ -230,8 +233,9 @@ The scan now runs over three groups — `docs/dev/*.md`, `CLAUDE.md`,
 `bmnews/gui/CLAUDE.md` — each scanned and asserted on its own via
 `path_scan_groups()`, rather than one glob with one aggregate assertion. This
 is exactly the trap issue #30 named: `PathScan.checked` is the module's
-no-vacuous-pass guard, and pooled, `docs/dev/`'s 77 candidates would hold the
-total up while a `CLAUDE.md` quietly stopped being recognised. The two
+no-vacuous-pass guard, and pooled, `docs/dev/`'s candidates — an order of
+magnitude more numerous — would hold the total up while a `CLAUDE.md` quietly
+stopped being recognised. The two
 `CLAUDE.md` files are separate groups for the same reason at smaller scale —
 the GUI file yields a single candidate, which the root file's two dozen would
 mask completely.
