@@ -23,7 +23,18 @@ Desktop app: pywebview (native window) + Flask (HTTP backend) + HTMX (frontend i
   "N notification(s)". Creating and editing watches stays in `config.toml`
 - **One background job** — `gui/jobs.py` owns the lock, status and daemon thread that
   the pipeline routes and the watches pane share, so a delivery cannot race a scoring run
-- **Fulltext retrieval** — on-demand via `bmlib.fulltext.FullTextService`, seeded with the URLs sync recorded in `fulltext_sources` and falling back to Europe PMC → Unpaywall → DOI; JATS XML parsed to HTML; cached in `paper_extras.fulltext_html`. When the text was extracted from a PDF, the reading pane offers **View PDF** alongside it. Every outbound URL passes `_safe_url()` first — these come from upstream services, and escaping stops attribute injection but not a `javascript:` payload
+- **Fulltext retrieval** — on-demand via `bmlib.fulltext.FullTextService`, seeded with the URLs sync recorded in `fulltext_sources` and falling back through Europe PMC XML, NCBI's own PMC copy, Europe PMC's free PDF, Unpaywall and finally a publisher link from the DOI; JATS XML parsed to HTML; cached in `paper_extras.fulltext_html`. When the text was extracted from a PDF, the reading pane offers **View PDF** alongside it. Every outbound URL passes `_safe_url()` first — these come from upstream services, and escaping stops attribute injection but not a `javascript:` payload
+- **Abstract rendering** — `helpers.py` normalises the two shapes an abstract arrives in.
+  bioRxiv/medRxiv/Europe PMC send HTML (`<h4>Background</h4>`); PubMed, since bmlib
+  0.8.0, sends Markdown (`**LABEL:** text` sections, `*em*`/`~sub~`/`^sup^`, prose
+  backslash-escaped over ``\ ` * ~ ^``). Both converge on `<p><strong>Label:</strong> …</p>`.
+  Markdown converts *after* `escape()` — that call leaves the markers alone, so the tags
+  the converter emits are the only unescaped HTML in the result. Backslash-escaped
+  specials are held aside before any marker matching, or `CYP2C19 (\*1, \*2)` italicises
+  the very star alleles the escaping exists to protect. Delimiters must hug
+  non-whitespace (CommonMark's flanking rule, which bmlib's emitter guarantees): without
+  it the conversion corrupts the sources that are not Markdown at all — medRxiv's
+  `~50 to ~60 patients` pairs into a subscript
 - **Dynamic model selector** — auto-populated from provider APIs with local caching
 - **Window geometry persistence** — saves/restores position and size in `~/.bmnews/window_state.json`
 - **Sorting/filtering** — by date, score, source, quality tier, study design

@@ -151,7 +151,9 @@ gui/ → app.py (Flask factory) → routes/ (papers, settings, pipeline blueprin
 
 ### bmlib Integration
 
-bmlib is a companion library providing shared infrastructure. It is pinned to a released tag in `pyproject.toml` (`bmlib @ git+…@v0.6.0`), which is the repository's only pin — `uv.lock` is gitignored, so an unpinned git dependency would resolve per machine and per CI run. Bumping bmlib means editing that line and re-running `uv lock --upgrade-package bmlib`, as its own reviewable change.
+bmlib is a companion library providing shared infrastructure. It is pinned to a released tag in `pyproject.toml` (`bmlib @ git+…@v0.9.1`), which is the repository's only pin — `uv.lock` is gitignored, so an unpinned git dependency would resolve per machine and per CI run. Bumping bmlib means editing that line and re-running `uv lock --upgrade-package bmlib`, as its own reviewable change.
+
+A green suite says a bump is **API**-safe, never that it is value-neutral: every fetcher and analyzer is mocked, so no test sees what bmlib now *produces*. bmlib's CHANGELOG marks each such entry "moves stored values" — read it before bumping, and see `docs/dev/bmlib-integration.md` for the three that landed with v0.9.1 (PubMed Markdown, transparency scores, Europe PMC PDFs) and what each one needed here.
 
 Key modules used:
 
@@ -163,7 +165,7 @@ Key modules used:
 | `bmlib.agents` | `BaseAgent` — provides `render_template()`, `chat()`, `chat_json()`, `parse_json()` |
 | `bmlib.templates` | `TemplateEngine` with user-dir override (`~/.bmnews/templates/`) → package `templates/` fallback |
 | `bmlib.quality` | `QualityManager`, `QualityFilter`, `QualityAssessment`, `StudyDesign`, `QualityTier`, `DESIGN_TO_TIER`, `DESIGN_TO_SCORE` — the evidence hierarchy and its scores live here, not in `bmnews.constants` |
-| `bmlib.fulltext` | `FullTextService` (3-tier: Europe PMC → Unpaywall → DOI), JATS XML parser, `FullTextError` |
+| `bmlib.fulltext` | `FullTextService`, JATS XML parser, `FullTextError`. The chain is the fetcher's own URLs (Tier 0), then Europe PMC XML by known or discovered PMC ID (1a/1b, the id resolvable via NCBI's converter when Europe PMC's search finds none), NCBI's own PMC copy (1c), Europe PMC's free PDF (1d), Unpaywall (2) and a publisher link from the DOI (3). bmnews neither selects nor configures a tier — it passes the `fulltext_sources` sync recorded and takes what comes back |
 | `bmlib.publications` | `sync()` — the whole fetch-and-store cycle; `ensure_schema()`, `store_publication()`, `get_publication_by_doi/pmid()` — the `publications` table bmnews's papers live in; `register_source()`, `source_names()`, `FetchedRecord`, `SyncProgress`, `SyncReport`, `SourceDescriptor` — the registry every source goes through |
 | `bmlib.transparency` | `TransparencyAnalyzer`, `TransparencyRisk`, `TransparencySettings` — research-integrity analysis (funder disclosure, COI statement, data availability, trial-results reporting) via CrossRef, Europe PMC, PubMed, OpenAlex and ClinicalTrials.gov. Wired up as the TRANSPARENCY pipeline stage in `bmnews/transparency/service.py`; informs only, never filters or reranks |
 
@@ -304,7 +306,7 @@ Test files:
 | `test_fetchers.py` | Europe PMC fetcher + its registration in bmlib's source registry |
 | `test_fulltext_integration.py` | Fulltext service integration (Europe PMC/Unpaywall/DOI) |
 | `test_gui_app.py` | Flask blueprints, HTMX responses, paper queries, pipeline status, the View PDF button, and the outbound-URL scheme allowlist |
-| `test_gui_helpers.py` | Abstract HTML formatting |
+| `test_gui_helpers.py` | Abstract HTML formatting, over both shapes an abstract arrives in — the legacy HTML one (`<h4>` headings, mixed tags) and bmlib ≥ 0.8.0's Markdown (`**LABEL:**` sections, `*em*`/`~sub~`/`^sup^`, backslash-escaped prose). Plus the two hazards the Markdown conversion creates for the sources that are *not* Markdown: medRxiv's `~50 to ~60` must not pair into a subscript and a pair of significance asterisks must not italicise the clause between them, which is why the delimiters follow CommonMark's flanking rule |
 | `test_gui_jobs.py` | The shared background job — refusal while one runs without clobbering its progress line, a raising target freeing the lock, a target that forgets to clear `running` |
 | `test_gui_notify.py` | The watches pane — the count join with delivered/matching/remaining pinned in column order, an unresolved channel and an unparseable watch (both produce no counts at all) versus a disabled watch (counts render, buttons don't), a partly-resolved channel list naming what was dropped, watches that all fail to parse not reading as "none configured", the no-criteria summary, delivery and drain, failed-delivery and nothing-to-notify reporting, a multi-channel run counting notifications rather than papers, a delivery refused by a running job saying so, a disabled watch refused before any job starts, a slash in a watch name surviving into the URL, HTML in one being escaped, 404 on an unknown watch, the counts being skipped (but the config notices not) while a job runs, the 204-while-running refresh, and one unmocked pass against a real database |
 | `test_notify.py` | Every watch criterion in isolation against literal paper dicts; watch/channel parsing, validation and unknown-key warnings |

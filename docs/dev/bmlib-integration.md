@@ -11,7 +11,7 @@ bmlib is installed as a Git dependency:
 ```toml
 # pyproject.toml
 dependencies = [
-    "bmlib @ git+https://github.com/hherb/bmlib.git@v0.6.0",
+    "bmlib @ git+https://github.com/hherb/bmlib.git@v0.9.1",
 ]
 ```
 
@@ -29,12 +29,37 @@ gui = ["pywebview>=5.0", "flask>=3.0"]
 **The version is pinned to a released tag, and that is the only pin the repository has.** `uv.lock` is gitignored, so an unpinned git dependency would be resolved afresh per machine and on every CI run — no two checkouts necessarily on the same bmlib, and a push to bmlib able to break bmnews with no change here. Bumping bmlib is therefore an edit to `pyproject.toml`, reviewable as its own one-line pull request:
 
 ```bash
-# 1. edit pyproject.toml: @v0.6.0 -> @v0.7.0
+# 1. edit pyproject.toml: @v0.9.1 -> @v0.10.0
 uv lock --upgrade-package bmlib   # 2. re-resolve the local lock to the new tag
 uv run pytest tests/ -q           # 3. the suite is what says the bump is safe
 ```
 
+A green suite says the bump is *API*-safe. It cannot say the bump is
+value-neutral, and the v0.6.0 → v0.9.1 jump was not: see
+"[What a bmlib bump can move](#what-a-bmlib-bump-can-move)" below for the three
+changes that moved stored values, none of which broke a test.
+
 > **`uv run` re-syncs bmlib to whatever `uv.lock` resolved the tag to** — so installing a newer bmlib by hand is silently undone on the next `uv run`. When bmnews starts using a bmlib symbol the pinned tag predates, the whole suite fails at import; the fix is to move the pin above, not to install around it.
+
+## What a bmlib bump can move
+
+A bmlib release can change what bmnews *stores* without changing a signature
+bmnews calls, and the suite cannot see it: every fetcher and analyzer is
+mocked, so a test asserts what bmnews does with a value, never what bmlib now
+produces. Read the release's CHANGELOG for "moves stored values" before
+bumping — bmlib marks each such entry explicitly.
+
+The v0.6.0 → v0.9.1 jump had three, and each needed a response here:
+
+| What moved | Why it matters to bmnews | Response |
+|---|---|---|
+| **PubMed titles and abstracts became Markdown** (0.8.0) — `**LABEL:** text` sections, `*em*` / `~sub~` / `^sup^`, and prose backslash-escaped over ``\ ` * ~ ^`` | The reading pane's formatter read HTML, so the markers rendered raw: literal `**BACKGROUND:**`, `CO~2~`, `\*1`. Titles were also being *truncated* at the first inline tag before this, so stored titles predating 0.8.0 may be short | `gui/helpers.py::_markdown_to_html`; re-sync PubMed to repair truncated titles |
+| **`transparency_score` rises** (0.7.0) — structured `<DataBankList>` deposition now scores, and three trial registries PubMed emits were unrecognised | `get_transparency_candidates()` never returns a determinate result, so old rows keep their old score for ever and the corpus silently splits into two populations | `bmnews transparency --refresh`, which walks the corpus by `analyzed_at ASC NULLS FIRST` rather than redoing one batch |
+| **Europe PMC free PDFs** (0.9.1) — the allow-list recognised only `"Free"`, which is 4.3% of entries; 95.7% read `"Open access"` | The reading pane now gets extracted text and a **View PDF** button where it used to get a bare link. Outbound traffic to Europe PMC rises accordingly | None needed — stored full text simply is not comparable across the upgrade |
+
+The general shape: **the pin is API-compatible far more often than it is
+value-compatible.** A bump whose suite passes first time is the normal case,
+not evidence that nothing changed.
 
 ## bmlib modules used by bmnews
 

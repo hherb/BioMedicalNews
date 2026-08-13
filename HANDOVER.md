@@ -10,29 +10,35 @@
 | `docs/dev/` drift | **Done.** All six files rewritten against the current code ([issue #11](https://github.com/hherb/BioMedicalNews/issues/11)). |
 | `bmlib.transparency` | **Done.** Wired up as a fifth pipeline stage, informs only — see below. |
 | Docs drift detection | **Done.** `tests/test_docs.py` fails the ordinary suite (and so CI) when the docs drift — see "The docs drift backstop" below ([PR #27](https://github.com/hherb/BioMedicalNews/pull/27), closed [#16](https://github.com/hherb/BioMedicalNews/issues/16)), plus a follow-up PR closing the review's six findings. Scan failures name their file repo-relative. The path scan now covers **both `CLAUDE.md` files** as well as `docs/dev/` ([#32](https://github.com/hherb/BioMedicalNews/issues/32)); the `docs/user/` half of [#30](https://github.com/hherb/BioMedicalNews/issues/30) stays closed as won't-fix, with the measurement behind that now pinned by a test. |
-| bmlib version pin | **Done.** `pyproject.toml` pins `bmlib @ git+…@v0.6.0` — now the repository's only pin, and the first one CI has ever had. Closes [issue #25](https://github.com/hherb/BioMedicalNews/issues/25); see "Environment gotcha" below. |
+| bmlib version pin | **Done.** `pyproject.toml` pins `bmlib @ git+…@v0.9.1` — the repository's only pin, and the first one CI has ever had. Closes [issue #25](https://github.com/hherb/BioMedicalNews/issues/25); see "Environment gotcha" below. Bumped from v0.6.0 on 2026-08-13: no signature bmnews calls moved, but three stored values did, and the PubMed one needed a fix in `gui/helpers.py`. |
 | Digest templates don't escape metadata | **Done, merged.** `digest_email.html` escapes every interpolation and carries the notify templates' explanatory comment ([PR #23](https://github.com/hherb/BioMedicalNews/pull/23), closed [#17](https://github.com/hherb/BioMedicalNews/issues/17)). `digest_text.txt` deliberately stays raw: it is a text/plain MIME part, matching `notify_email.txt`/`notify_matrix.txt` — the issue's premise that all four notify templates escape was wrong, only the HTML ones do. A test pins each half. |
 | Reading pane shows literal `None` for a missing date | **Done, merged.** Both `reading_pane.html` *and* `paper_card.html` (identical defect, found while fixing) now guard the date with `{% if %}`, as the `journal` line beside it already did ([PR #24](https://github.com/hherb/BioMedicalNews/pull/24), closed [#18](https://github.com/hherb/BioMedicalNews/issues/18)). The issue's option 2, deliberately: `_row_to_paper()` keeps leaving a date-semantic NULL as `None` for Python readers. |
 
 ## Environment gotcha
 
-bmlib is pinned **by tag** in `pyproject.toml` (`@v0.6.0`), and `uv run`
+bmlib is pinned **by tag** in `pyproject.toml` (`@v0.9.1`), and `uv run`
 re-syncs to whatever `uv.lock` resolved that tag to — so installing a newer
 bmlib by hand is silently undone on the next `uv run`. When bmnews starts
 using a bmlib symbol the tag predates, the whole suite fails at import. Move
 the pin rather than installing around it:
 
 ```bash
-# edit pyproject.toml: @v0.6.0 -> @v0.7.0
+# edit pyproject.toml: @v0.9.1 -> @v0.10.0
 uv lock --upgrade-package bmlib
 ```
+
+A failing import is the *easy* case. The v0.6.0 → v0.9.1 bump broke no test at
+all and still moved three stored values, because bmnews mocks every fetcher and
+analyzer and so no test sees what bmlib produces. Read bmlib's CHANGELOG for
+its explicit "moves stored values" entries before bumping;
+`docs/dev/bmlib-integration.md` records the three that landed with v0.9.1.
 
 Until 2026-08-01 there was **no repo-level pin at all**: `.gitignore` ignores
 `uv.lock` (line 141) and CI installs with `uv pip install -e`, so
 `bmlib @ git+…` resolved to whatever bmlib main was that day — per machine and
 per CI run. The tag is what every checkout now shares. One property to keep in
 mind, since it is where a tag is weaker than a tracked lock: a git tag is
-mutable, so a re-pointed `v0.6.0` would be picked up silently. CI's weekly
+mutable, so a re-pointed `v0.9.1` would be picked up silently. CI's weekly
 cron is the backstop for that, and for the rest of the tree — httpx, click,
 jinja2, bmlib's own dependencies and the dev tools are all still unpinned and
 resolved fresh on every run.
