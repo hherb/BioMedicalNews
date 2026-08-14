@@ -261,6 +261,16 @@ _MIGRATION_ROW = re.compile(r"^\|\s*(\d+)\s*\|\s*`([^`]+)`\s*\|")
 _TEST_TABLE_HEADER = re.compile(r"^\|\s*File\s*\|")
 _TEST_COUNT = re.compile(r"# Test suite \((\d+) test modules\)")
 _VERSION_CLAIM = re.compile(r"`bmnews, version ([^`]+)`")
+# Anchored on ``@`` rather than on ``bmlib.git@``, because the docs elide the
+# URL to keep the line readable — CLAUDE.md writes ``bmlib @ git+…@v0.9.1`` and
+# HANDOVER.md writes a bare ``@v0.9.1``. Requiring the full URL made this check
+# silently skip both files, which is the vacuous pass the rest of this module
+# exists to prevent: seeded drift in CLAUDE.md went undetected.
+#
+# The tag charset is explicit rather than "anything but a delimiter": a negated
+# class swallows the trailing comma of a TOML list entry and reports a tag that
+# can never match pyproject's own.
+_BMLIB_PIN = re.compile(r"@(v\d[\w.+-]*)")
 
 
 def documented_migrations(text: str) -> set[tuple[int, str]] | None:
@@ -622,8 +632,83 @@ class TestDocumentedVersion:
         assert documented_version("Check the version with `bmnews --version`.\n") is None
 
 
+def bmlib_pins(text: str) -> set[str]:
+    """Every ``bmlib.git@<tag>`` reference in a file.
+
+    A set rather than a single value because a doc legitimately names the tag
+    more than once, and because the check is "they all agree", not "the first
+    one is right". Empty when the file names no pin, which the caller reads as
+    "nothing to check here" — the no-vacuous-pass guard is that at least one
+    file must yield one.
+    """
+    return set(_BMLIB_PIN.findall(text))
+
+
+#: Files that quote the bmlib pin in prose and must agree with pyproject.toml.
+#: The pin is hand-copied into each, which is exactly the drift shape the
+#: ``bmnews, version`` check below already exists to catch: PR #34 moved it in
+#: five places at once.
+BMLIB_PIN_DOCS = (
+    CLAUDE_MD,
+    REPO_ROOT / "HANDOVER.md",
+    DOCS_DEV / "bmlib-integration.md",
+)
+
+
+class TestBmlibPins:
+    def test_reads_a_pin(self):
+        text = 'dependencies = ["bmlib @ git+https://github.com/hherb/bmlib.git@v1.2.3"]'
+        assert bmlib_pins(text) == {"v1.2.3"}
+
+    def test_reads_the_elided_forms_the_docs_actually_use(self):
+        # CLAUDE.md and HANDOVER.md shorten the URL; anchoring on the full one
+        # made this check skip both files entirely.
+        assert bmlib_pins("pinned as `bmlib @ git+\u2026@v1.2.3`") == {"v1.2.3"}
+        assert bmlib_pins("bmlib is pinned by tag (`@v1.2.3`)") == {"v1.2.3"}
+
+    def test_reads_every_pin_in_a_file(self):
+        text = "was bmlib.git@v0.6.0, now bmlib.git@v0.9.1\nand again @v0.9.1"
+        assert bmlib_pins(text) == {"v0.6.0", "v0.9.1"}
+
+    def test_returns_empty_without_a_pin(self):
+        assert bmlib_pins("bmlib is a companion library.\n") == set()
+
+    def test_does_not_swallow_a_trailing_delimiter(self):
+        # A negated character class reports `v1.2.3",` here, which can never
+        # match the value parsed out of pyproject.toml itself.
+        assert bmlib_pins('"bmlib.git@v1.2.3",') == {"v1.2.3"}
+        assert bmlib_pins("was bmlib.git@v0.6.0, now newer") == {"v0.6.0"}
+
+
 class TestDocsMatchCode:
     """The live checks: the docs against the real tree."""
+
+    def test_documented_bmlib_pin_matches_pyproject(self):
+        pinned = bmlib_pins((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        assert len(pinned) == 1, (
+            f"pyproject.toml names {len(pinned)} bmlib tags, expected exactly one: {pinned}"
+        )
+        expected = pinned.pop()
+
+        for doc in BMLIB_PIN_DOCS:
+            found = bmlib_pins(doc.read_text(encoding="utf-8"))
+            # Every listed file must name a pin. Skipping the empty ones would
+            # be the same vacuous pass ``PathScan.checked`` guards against —
+            # and it is not hypothetical here: an earlier pattern anchored on
+            # the full URL matched neither CLAUDE.md's elided ``git+…@v0.9.1``
+            # nor HANDOVER.md's bare ``@v0.9.1``, so seeded drift in CLAUDE.md
+            # passed.
+            assert found, (
+                f"{doc_label(doc)} names no bmlib tag — either it stopped documenting "
+                "the pin, or _BMLIB_PIN has stopped matching how it writes one"
+            )
+            # A doc may also narrate an *older* tag when explaining the bump,
+            # or a hypothetical newer one in a worked example, so the test is
+            # "it names the pinned tag", not "it names nothing else".
+            assert expected in found, (
+                f"{doc_label(doc)} names bmlib {sorted(found)} but pyproject.toml pins "
+                f"{expected} — a bump has to move every one of these by hand"
+            )
 
     @pytest.mark.parametrize("group", path_scan_groups(), ids=lambda group: group.label)
     def test_backticked_paths_exist(self, group: ScanGroup):

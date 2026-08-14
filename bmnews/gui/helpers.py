@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import re
+from collections.abc import Iterable
 from html import escape
+
+from bmnews.markup import is_markdown_source, markdown_to_html
+
+logger = logging.getLogger(__name__)
 
 # Section heading tags used by PubMed/bioRxiv abstracts (e.g. <h4>Background</h4>)
 _HTML_HEADING_RE = re.compile(
@@ -30,10 +36,11 @@ _SECTION_PATTERN = re.compile(
 def _normalise_abstract(text: str) -> str:
     """Convert HTML-tagged abstracts into plain-text with section labels.
 
-    PubMed abstracts often arrive with ``<h4>Background</h4>`` style headings.
-    This converts them into ``Background:`` so the downstream formatter can
-    detect structured sections.  All remaining HTML tags are stripped and the
-    text is then HTML-escaped for safe rendering.
+    bioRxiv, medRxiv and Europe PMC abstracts often arrive with
+    ``<h4>Background</h4>`` style headings. This converts them into
+    ``Background:`` so the downstream formatter can detect structured sections.
+    All remaining HTML tags are stripped and the text is then HTML-escaped for
+    safe rendering.
     """
 
     def _heading_to_label(m: re.Match) -> str:
@@ -49,13 +56,57 @@ def _normalise_abstract(text: str) -> str:
     return text
 
 
-def format_abstract_html(text: str | None) -> str:
-    """Format abstract text as HTML with structured section labels bolded."""
+def format_abstract_html(text: str | None, sources: Iterable[str] | None = None) -> str:
+    """Format abstract text as HTML with structured section labels bolded.
+
+    The two shapes an abstract arrives in converge here. bioRxiv, medRxiv and
+    Europe PMC send HTML, which :func:`_normalise_abstract` flattens to
+    ``Label:`` lines; PubMed sends bmlib Markdown, whose markers become tags —
+    but only when *sources* says so.
+
+    The Markdown conversion runs *after* ``escape()``: that call leaves
+    ``\\ ` * ~ ^`` alone, so the markers survive it intact and the tags
+    :func:`~bmnews.markup.markdown_to_html` emits are the only unescaped HTML
+    it introduces. The ``<p>`` and ``<strong>`` wrappers this function adds
+    below are the others.
+
+    Args:
+        text: The stored abstract, in whichever shape its source sent.
+        sources: The paper's ``sources``. Only a source
+            :func:`~bmnews.markup.is_markdown_source` accepts has its markers
+            converted; every other source's ``*``, ``~`` and ``^`` are content
+            and are left as the reader's own text. Omitting the argument
+            therefore converts nothing, which is the safe default and what a
+            template override predating the gate still gets.
+
+    Returns:
+        Escaped HTML: structured abstracts as one
+        ``<p><strong>Label:</strong> …</p>`` per section, plain ones as ``<p>``
+        per line.
+    """
     if not text:
         return ""
 
+    try:
+        return _format_abstract_html(text, sources)
+    except Exception:
+        # The reading pane renders this through ``|safe`` inside
+        # ``render_template``, so an exception here is a Flask 500 — and HTMX
+        # does not swap on a non-2xx, which leaves the *previous* paper's
+        # title, DOI and abstract in the pane while the newly clicked card
+        # takes the highlight. Wrong-paper attribution is the one failure this
+        # module must not have, so a formatting bug degrades to the escaped
+        # text instead. Logged with a traceback, never swallowed.
+        logger.exception("Abstract formatting failed; falling back to escaped text")
+        return f"<p>{escape(text)}</p>"
+
+
+def _format_abstract_html(text: str, sources: Iterable[str] | None) -> str:
+    """Do the formatting. See :func:`format_abstract_html`, which guards it."""
     normalised = _normalise_abstract(text)
     escaped = escape(normalised)
+    if is_markdown_source(sources):
+        escaped = markdown_to_html(escaped)
 
     # Try structured abstract (has labeled sections)
     parts = _SECTION_PATTERN.split(escaped)

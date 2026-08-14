@@ -11,7 +11,7 @@ bmlib is installed as a Git dependency:
 ```toml
 # pyproject.toml
 dependencies = [
-    "bmlib @ git+https://github.com/hherb/bmlib.git@v0.6.0",
+    "bmlib @ git+https://github.com/hherb/bmlib.git@v0.9.1",
 ]
 ```
 
@@ -29,12 +29,56 @@ gui = ["pywebview>=5.0", "flask>=3.0"]
 **The version is pinned to a released tag, and that is the only pin the repository has.** `uv.lock` is gitignored, so an unpinned git dependency would be resolved afresh per machine and on every CI run — no two checkouts necessarily on the same bmlib, and a push to bmlib able to break bmnews with no change here. Bumping bmlib is therefore an edit to `pyproject.toml`, reviewable as its own one-line pull request:
 
 ```bash
-# 1. edit pyproject.toml: @v0.6.0 -> @v0.7.0
+# 1. edit pyproject.toml: @v0.9.1 -> @v0.10.0
 uv lock --upgrade-package bmlib   # 2. re-resolve the local lock to the new tag
 uv run pytest tests/ -q           # 3. the suite is what says the bump is safe
 ```
 
+A green suite says the bump is *API*-safe. It cannot say the bump is
+value-neutral, and the v0.6.0 → v0.9.1 jump was not: see
+"[What a bmlib bump can move](#what-a-bmlib-bump-can-move)" below for the three
+changes that moved stored values, none of which broke a test.
+
 > **`uv run` re-syncs bmlib to whatever `uv.lock` resolved the tag to** — so installing a newer bmlib by hand is silently undone on the next `uv run`. When bmnews starts using a bmlib symbol the pinned tag predates, the whole suite fails at import; the fix is to move the pin above, not to install around it.
+
+## What a bmlib bump can move
+
+A bmlib release can change what bmnews *stores* without changing a signature
+bmnews calls, and the suite cannot see it: every fetcher and analyzer is
+mocked, so a test asserts what bmnews does with a value, never what bmlib now
+produces. Read the release's CHANGELOG for "moves stored values" before
+bumping — bmlib marks each such entry explicitly.
+
+The v0.6.0 → v0.9.1 jump had three, and each needed a response here:
+
+| What moved | Why it matters to bmnews | Response |
+|---|---|---|
+| **PubMed titles and abstracts became Markdown** (0.8.0) — `**LABEL:** text` sections, `*em*` / `~sub~` / `^sup^`, and prose backslash-escaped over ``\ ` * ~ ^`` | The reading pane's formatter read HTML, so the markers rendered raw: literal `**BACKGROUND:**`, `CO~2~`, `\*1`. Titles were also being *truncated* at the first inline tag before this, so stored titles predating 0.8.0 may be short | `bmnews/markup.py` — abstracts become tags in the reading pane, titles are flattened to text in `_row_to_paper()`. **Truncated titles are not repaired** (issue #35) |
+| **`transparency_score` rises** (0.7.0) — structured `<DataBankList>` deposition now scores, and three trial registries PubMed emits were unrecognised | A paper already holding a determinate result is never re-selected by `get_transparency_candidates()`, so old rows keep their old score for ever and the corpus silently splits into two populations | `bmnews transparency --refresh`, which walks the corpus by `analyzed_at ASC NULLS FIRST` rather than redoing one batch. It is a manual step nothing prompts for — issue #37 |
+| **Europe PMC free PDFs** (0.9.1) — the allow-list recognised only `"Free"`, which is 4.3% of entries; 95.7% read `"Open access"` | The reading pane now gets extracted text and a **View PDF** button where it used to get a bare link. Outbound traffic to Europe PMC rises accordingly | Nothing in this bump — but text cached *before* it stays frozen as a bare link, with no re-fetch path (issue #38) |
+
+The general shape: **the pin is API-compatible far more often than it is
+value-compatible.** A bump whose suite passes first time is the normal case,
+not evidence that nothing changed.
+
+### Re-syncing does not repair a stored value
+
+Worth knowing before reaching for it as a remedy, because it looks like one and
+reports success. Two independent things stop it, and neither warns:
+
+1. **The days are never re-fetched.** `run_sync()` calls `bmlib.publications.sync()`
+   without `recheck_days`, which defaults to `0` — a day recorded `completed` in
+   `download_days` is skipped. `bmnews fetch` exposes only `--days`; no force or
+   recheck flag exists anywhere in the CLI.
+2. **The merge discards the incoming value even if it were re-fetched.** bmlib's
+   `_merge_publication()` never overwrites an existing non-NULL field: `title` is
+   absent from its `UPDATE` entirely, and `abstract` is written as
+   `COALESCE(abstract, ?)`.
+
+So the run prints `Sync complete: 0 added, N merged, 0 failed` — which reads as
+success — and nothing was repaired. Repairing stored prose needs a migration on
+the pattern of migration 6, which cleared stale full text *and* purged bmlib's
+disk cache rather than trusting a re-fetch. That is issue #35.
 
 ## bmlib modules used by bmnews
 

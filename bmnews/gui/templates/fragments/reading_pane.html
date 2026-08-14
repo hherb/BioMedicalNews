@@ -71,7 +71,7 @@
 
     <section class="abstract-section">
         <h2>Abstract</h2>
-        {{ paper.abstract | format_abstract | safe }}
+        {{ paper.abstract | format_abstract(paper.sources) | safe }}
     </section>
 
     <div class="paper-actions">

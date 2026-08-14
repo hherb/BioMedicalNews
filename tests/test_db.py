@@ -127,6 +127,49 @@ class TestSchema:
             ), f"{table} kept a row pointing at a deleted publication"
 
 
+class TestMarkdownTitleDecoding:
+    """bmlib >= 0.8.0 stores PubMed titles as Markdown; ``_row_to_paper`` flattens them.
+
+    It happens at the decode point rather than in a template filter because
+    every surface bmnews has renders a title as text — the reading pane, the
+    card list, both email digests and both Matrix bodies — and because a filter
+    would reach neither a user's overridden template nor the title the
+    relevance prompt sends to the LLM.
+    """
+
+    def test_a_pubmed_title_is_flattened(self):
+        conn = _db()
+        store_paper(
+            conn,
+            doi="10.1000/md1",
+            title=r"Effect of *Escherichia coli* on CYP2C19 \*2 at 10^6^ CFU",
+            authors=["Smith J"],
+            abstract="An abstract.",
+            source="pubmed",
+            published_date="2026-01-01",
+        )
+        paper = get_paper_by_doi(conn, "10.1000/md1")
+        assert paper["title"] == "Effect of Escherichia coli on CYP2C19 *2 at 10^6 CFU", (
+            "markers dropped, the escaped star allele kept, and the exponent's "
+            "caret kept so 10^6 does not read as 106"
+        )
+
+    def test_a_medrxiv_title_is_left_exactly_as_stored(self):
+        """Its ``*`` is content — star alleles and significance marks, not markup."""
+        conn = _db()
+        title = "CYP2C19*2 and HLA-B*57:01 carriers (*P<0.05)"
+        store_paper(
+            conn,
+            doi="10.1101/md2",
+            title=title,
+            authors=["Doe A"],
+            abstract="An abstract.",
+            source="medrxiv",
+            published_date="2026-01-01",
+        )
+        assert get_paper_by_doi(conn, "10.1101/md2")["title"] == title
+
+
 class TestPapers:
     def test_store_and_retrieve(self):
         conn = _db()

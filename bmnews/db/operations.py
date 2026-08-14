@@ -31,6 +31,7 @@ from bmnews.constants import (
     TRANSPARENCY_MAX_ATTEMPTS,
     UNSCORED_BATCH_SIZE,
 )
+from bmnews.markup import is_markdown_source, markdown_to_text
 from bmnews.metadata import parse_metadata, parse_transparency
 
 logger = logging.getLogger(__name__)
@@ -1273,6 +1274,17 @@ def _row_to_paper(row: Any) -> dict:
     for column in _NULLABLE_TEXT_COLUMNS:
         if paper.get(column) is None:
             paper[column] = ""
+
+    # Titles are rendered as text on every surface bmnews has — the reading
+    # pane, the card list, both email digests, both notification bodies and the
+    # Matrix ones — so bmlib's Markdown is flattened here, at the one place a
+    # row is decoded, rather than by a filter each of those would have to
+    # remember. That also reaches the templates a user has overridden and the
+    # title the relevance prompt sends to the LLM, neither of which a filter
+    # would. Abstracts are *not* flattened: only the GUI shows one, and it wants
+    # the markup as tags (see ``gui.helpers.format_abstract_html``).
+    if paper.get("title") and is_markdown_source(paper.get("sources")):
+        paper["title"] = markdown_to_text(paper["title"])
 
     paper["metadata"] = parse_metadata(paper.get("metadata_json"))
     # Only the paper-detail query selects the blob, so the membership test is
